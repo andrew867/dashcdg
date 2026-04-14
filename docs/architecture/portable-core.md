@@ -8,7 +8,7 @@ The portable core is the union of:
 - `core/src/media_clock.c`
 - `proto/src/protocol.c`
 
-The core is intentionally free of renderer, audio, and transport runtime dependencies.
+The core is intentionally free of renderer, audio-device, and socket runtime dependencies.
 
 ## Responsibilities
 
@@ -23,13 +23,29 @@ The core is intentionally free of renderer, audio, and transport runtime depende
 
 - provide a monotonic timestamp source
 - maintain a bounded remote/local offset estimate
-- let receivers gradually discipline to transport beacons without large jumps
+- let receivers gradually discipline to transport timing packets without large jumps
+
+Current state:
+
+- this is still a simple offset estimator
+- it is not yet a full PTP round-trip implementation with path-delay exchange
 
 ### `protocol`
 
 - define versioned packet framing
-- serialize and parse announce, asset, and clock packets
+- serialize and parse announce, asset, clock, live media, and future-repair packet types
 - provide a fixed binary contract for desktop and future ESP-IDF transports
+
+Current protocol v2 coverage includes:
+
+- `ANNOUNCE`
+- `ASSET_CHUNK`
+- `CLOCK_BEACON`
+- `AUDIO_FRAME`
+- `CDG_BATCH`
+- `PTP_SYNC`
+- `PTP_FOLLOW_UP`
+- declared but not yet active desktop use of `PTP_DELAY_REQ`, `PTP_DELAY_RESP`, and `FEC_PARITY`
 
 ## Core correctness strategy
 
@@ -43,5 +59,6 @@ The core is intentionally free of renderer, audio, and transport runtime depende
 The next logical refactor after this commit is:
 
 1. move desktop TX/RX socket handling into a reusable transport adapter
-2. split a pure render-surface abstraction from the desktop OpenGL implementation
-3. add a second renderer backend that rasterizes to a host-side RGBA buffer for golden tests and headless CI
+2. split a pure playout/jitter-buffer abstraction from the desktop PortAudio implementation
+3. split a pure render-surface abstraction from the desktop OpenGL implementation
+4. add a second renderer backend that rasterizes to a host-side RGBA buffer for golden tests and headless CI

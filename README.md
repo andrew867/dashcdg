@@ -1,102 +1,163 @@
 # dashcdg
 
-`dashcdg` is now structured as the foundation for a portable karaoke broadcast and receiver platform.
+`dashcdg` is a portable karaoke broadcast/receiver codebase centered on:
 
-Today the repo contains:
+- deterministic CD+G decode and seek
+- a versioned UDP-friendly wire protocol
+- desktop proof applications for local playback, multicast transmit, and multicast receive
+- a live on-wire `Opus + timed CDG` proof path with late-join bootstrap
 
-- a portable CD+G core with deterministic seeking and keyframes
-- a versioned UDP-friendly transport protocol
-- a local desktop player
-- a desktop multicast transmitter proof
-- a desktop multicast receiver proof
-- core and protocol tests
-- architecture, protocol, hardware, and quality-gate documentation
+## Current repository contents
 
-## Repository layout
-
-- `core/`: portable CD+G and clock logic
-- `proto/`: versioned wire protocol
-- `platform/desktop/`: desktop audio, file I/O, and OpenGL rendering
-- `apps/desktop-player/`: local `MP3+G` playback
-- `apps/desktop-tx/`: Wi-Fi multicast proof transmitter
-- `apps/desktop-rx/`: Wi-Fi multicast proof receiver
-- `docs/`: roadmap deliverables and tranche specs
-- `tests/`: portable core and protocol tests
+- `core/`: portable CD+G decode and simple remote/local clock discipline
+- `proto/`: protocol v2 framing and packet serialization/parsing
+- `platform/desktop/`: desktop OpenGL renderer, PortAudio plumbing, MP3 file playback, and Opus helpers
+- `apps/desktop-player/`: local desktop player and entrypoint shim for TX/RX modes
+- `docs/`: protocol, validation, architecture, hardware, and release docs
+- `tests/`: portable CD+G, clock, and protocol tests
 
 ## Build
 
-Build portable libs, tests, and the desktop transmitter:
+Default build:
 
 ```sh
 make
 ```
 
-Build and run the portable test suite:
-
-```sh
-make test
-```
-
-Build the desktop OpenGL applications as well:
+Build desktop binaries and debug artifacts:
 
 ```sh
 make debug
 ```
 
+Run the portable test suite:
+
+```sh
+make test
+```
+
+Windows portable package:
+
+```sh
+make package
+```
+
+That produces `build/release/dashcdg-windows-portable.zip`.
+
+## Desktop dependencies
+
+The desktop apps require:
+
+- OpenGL plus GLEW
+- FreeGLUT
+- PortAudio
+- `libopus`
+
+On the current Windows/MSYS2 flow, `mingw-w64-x86_64-opus` must be available so `desktop-tx`, `desktop-rx`, and `desktop-player` can link and ship `libopus-0.dll`.
+
 ## Desktop app usage
 
-Local desktop player:
+Local player:
 
 ```sh
 build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]
 ```
 
-Integrated desktop-player network modes:
+Integrated network modes through the player entrypoint:
 
 ```sh
 build/bin/desktop-player tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
 build/bin/desktop-player rx <multicast-address> <port> [local.mp3]
 ```
 
-Player behavior:
-
-- With no path, it scans the local `cdg/` folder and plays tracks sequentially.
-- With `--shuffle`, it scans a folder and shuffles the playlist order.
-- With a folder path, it scans that folder for `.cdg` files and auto-pairs same-name `.mp3` files when present.
-- With a single `.cdg` file, it still supports individual file playback and auto-detects a sibling `.mp3` when available.
-- With a single `.mp3` file, it looks for a same-name sibling `.cdg` file so Windows Explorer file associations can launch the combined pair.
-- With a bare file stem such as `C:/songs/MyTrack`, it resolves `MyTrack.cdg` and auto-pairs `MyTrack.mp3` when present.
-- With `<file.cdg> <file.mp3>`, it plays that explicit pair.
-
-Windows packaging:
-
-```sh
-make package
-```
-
-This produces `build/release/dashcdg-windows-portable.zip`, a portable bundle containing the desktop binaries and required runtime DLLs from `build/bin`.
-
-Desktop multicast transmitter:
+Standalone multicast transmitter:
 
 ```sh
 build/bin/desktop-tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
 ```
 
-Desktop multicast receiver:
+Standalone multicast receiver:
 
 ```sh
-build/bin/desktop-rx <multicast-address> <port> [local.mp3]
+build/bin/desktop-rx [--headless] <multicast-address> <port> [local.mp3]
 ```
 
-TX preview behavior:
+## Media resolution behavior
 
-- `--display` opens a local OpenGL preview while the sender is broadcasting.
-- Press `v` in the TX preview window to blank/unblank the local preview without stopping the network transmitter.
-- The transmitter accepts a single `.cdg`, `.mp3`, bare stem, or a folder of tracks; paired sibling media is treated as one `MP3+G` session and CDG-only tracks fall back to graphics-only timing.
-- Foreground TX controls are line-based: `p` play/pause, `n` next, `b` back, `r` restart, `f` force asset rebroadcast, `s` status, `v` preview toggle, `q` quit.
+- With no path, `desktop-player` scans the local `cdg/` folder and plays tracks sequentially.
+- With `--shuffle`, `desktop-player` scans a folder and shuffles the playlist.
+- With a folder path, TX/player scan for `.cdg` files and auto-pair same-name `.mp3` files.
+- With a single `.cdg` file, the app still auto-detects a sibling `.mp3` when present.
+- With a single `.mp3` file, the app looks for a same-name sibling `.cdg`.
+- With a bare stem such as `C:/songs/MyTrack`, the app resolves `MyTrack.cdg` and `MyTrack.mp3`.
+- With `<file.cdg> <file.mp3>`, the player uses the explicit pair.
+- In TX, paired media is treated as `MP3+G`; CDG-only tracks fall back to graphics-only timing and omit network audio metadata.
 
-## Notes
+## UI Controls
 
-- The OpenGL apps still require desktop graphics/audio libraries such as GLEW, GLUT, and PortAudio.
-- The desktop TX/RX path is intentionally a proof tranche for protocol and synchronization, not a finished production venue stack.
-- The ESP-IDF receiver and hardware program are documented in `docs/` and staged for future implementation.
+`desktop-player`:
+
+- `Left Arrow`: seek backward by 1000 ms
+- `Right Arrow`: seek forward by 1000 ms
+
+`desktop-tx` foreground command controls:
+
+- `p`: play/pause
+- `n`: next track
+- `b`: previous track
+- `r`: restart current track
+- `f`: force late-join asset rebroadcast
+- `s`: print current status
+- `v`: toggle preview visibility when `--display` is active
+- `h` or `?`: print help
+- `q`: quit
+
+`desktop-tx --display` preview:
+
+- opens a local OpenGL preview window while TX continues broadcasting
+- the same `v` command blanks/unblanks only the local preview; it does not stop network send
+
+`desktop-rx`:
+
+- `--headless` prints status lines to stdout once per second and does not open a window
+- GUI mode shows a HUD in the window
+- `S` in the RX window prints the current status line to stdout
+
+## Current networked proof behavior
+
+The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
+
+- `ANNOUNCE`, `ASSET_CHUNK`, and `CLOCK_BEACON` keep the original late-join bootstrap working
+- `AUDIO_FRAME` carries live Opus frames on the wire
+- `CDG_BATCH` carries timed groups of CD+G subchannel packets on the wire
+- `PTP_SYNC` and `PTP_FOLLOW_UP` are emitted and observed for sender clock tracking
+- RX decodes network Opus into a queue-driven PortAudio stream when audio metadata is present
+- RX can still optionally use a local MP3 fallback path when launched with `[local.mp3]`
+
+Current TX defaults:
+
+- audio sample rate: 48 kHz
+- channels: 2
+- Opus frame size: 20 ms
+- Opus bitrate target: 96 kbps
+- announced playout delay: 500 ms
+- announced audio FEC group size: 5
+- announced CDG FEC group size: 9
+- CDG packets per live batch: up to 6
+- asset bootstrap chunk size: 1024 bytes
+
+## Important current limitations
+
+- The protocol declares `PTP_DELAY_REQ`, `PTP_DELAY_RESP`, and `FEC_PARITY`, but the desktop proof does not yet use them end-to-end.
+- Clock discipline is still a lightweight sender-offset estimator, not a full PTP round-trip implementation.
+- Late join is still guaranteed by repeated asset replay, not bounded FEC recovery.
+- RX startup can still show a small number of early Opus decode failures during bring-up before the steady-state queue settles.
+- This is a proof tranche, not a finished venue-grade transport stack.
+
+## Related documentation
+
+- `docs/specs/transport-protocol.md`: full protocol v2 field-level documentation
+- `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove
+- `docs/architecture/portable-core.md`: portable vs desktop-specific boundaries
+- `docs/hardware/`: future ESP32 receiver and productization docs
+- `docs/ops/quality-gates.md`: current tranche release criteria

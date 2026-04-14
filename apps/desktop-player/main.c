@@ -644,6 +644,7 @@ static void display(void) {
 
     dashcdg_cdg_reader_seek(&g_reader, packet_ts);
     dashcdg_gl_renderer_render(&g_renderer, &g_reader.state);
+    glutSwapBuffers();
 
     if (dashcdg_track_finished()) {
         dashcdg_advance_to_next_track();

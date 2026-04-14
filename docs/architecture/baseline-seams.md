@@ -2,9 +2,9 @@
 
 ## Current desktop playback model
 
-The original player had the right synchronization nucleus for a broader platform:
+The original player had the right synchronization nucleus for a broader platform, and the current desktop proof extends that model onto the wire:
 
-1. MP3 playout is the time authority.
+1. audio playout is the time authority once the receiver has started steady-state playback
 2. CD+G state is deterministic and can be replayed to an arbitrary packet index.
 3. Rendering is a projection of `cdg_state` onto a platform surface.
 
@@ -12,16 +12,18 @@ That architecture is now preserved in a more explicit form:
 
 - `core/include/dashcdg/cdg.h`: deterministic CD+G state, packet processing, keyframes, seeking.
 - `core/include/dashcdg/media_clock.h`: portable monotonic clock and remote/local timeline discipline.
-- `platform/desktop/include/dashcdg/desktop_audio.h`: desktop audio backend for local playout.
+- `platform/desktop/include/dashcdg/desktop_audio.h`: desktop audio backend for local-file playback and queue-driven streaming playout.
+- `platform/desktop/include/dashcdg/opus_codec.h`: desktop Opus encode/decode wrapper used by the live network proof.
 - `platform/desktop/include/dashcdg/gl_renderer.h`: OpenGL renderer for palette-index framebuffer output.
 
 ## Timing model
 
 - CD+G packets advance at `300` packets per second.
 - The transport and local player both convert between milliseconds and packet counts using integer helpers in `core/include/dashcdg/common.h`.
-- The new receiver stack supports two clocks:
-  - `local audio clock`: when local MP3 playback is active.
-  - `network-disciplined sender clock`: when following transport beacons before or without local audio.
+- The receiver stack currently supports two practical timing sources:
+  - `network audio playout clock`: when `AUDIO_FRAME` decoding and streaming playback are active.
+  - `network-disciplined sender clock`: during startup, before playout begins, or when the local-file fallback path is used.
+- A legacy optional local MP3 fallback still exists in RX, but it is no longer the only synchronization path.
 
 ## Portability contract
 

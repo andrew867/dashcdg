@@ -19,7 +19,38 @@
 #include "dashcdg/gl_renderer.h"
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
+#include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
+
+#define DASHCDG_AUDIO_SAMPLE_RATE 48000U
+#define DASHCDG_AUDIO_CHANNELS 2U
+#define DASHCDG_AUDIO_FRAME_MS 20U
+#define DASHCDG_AUDIO_FRAME_SAMPLES ((DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_FRAME_MS) / 1000U)
+#define DASHCDG_AUDIO_BITRATE_KBPS 96U
+#define DASHCDG_PAYOUT_DELAY_MS 500U
+#define DASHCDG_AUDIO_GROUP_SIZE 5U
+#define DASHCDG_CDG_GROUP_SIZE 9U
+#define DASHCDG_CDG_BATCH_PACKETS DASHCDG_MAX_CDG_BATCH_PACKETS
+
+struct dashcdg_tx_audio_frame {
+    uint32_t media_sequence;
+    uint32_t group_id;
+    uint8_t group_index;
+    uint8_t frame_ms;
+    uint16_t encoded_length;
+    uint64_t playback_ms;
+    uint8_t encoded_bytes[DASHCDG_MAX_AUDIO_FRAME_BYTES];
+};
+
+struct dashcdg_tx_cdg_batch {
+    uint32_t media_sequence;
+    uint32_t group_id;
+    uint8_t group_index;
+    uint8_t packet_count;
+    uint64_t playback_ms;
+    uint64_t packet_start_index;
+    uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+};
 
 struct dashcdg_tx_track {
     char *cdg_path;
@@ -58,6 +89,31 @@ struct dashcdg_tx_state {
     uint64_t playback_anchor_local_ms;
     uint64_t playback_anchor_ms;
     char base_song_id[DASHCDG_MAX_SONG_ID];
+    uint8_t *chunk_seen;
+    size_t chunk_count;
+    size_t distinct_chunks_sent;
+    size_t contiguous_prefix_chunks;
+    uint64_t asset_loops_completed;
+    uint64_t datagrams_sent;
+    uint64_t bytes_sent;
+    uint64_t announce_packets_sent;
+    uint64_t beacon_packets_sent;
+    uint64_t asset_chunk_packets_sent;
+    uint64_t send_failures;
+    struct dashcdg_tx_audio_frame *audio_frames;
+    size_t audio_frame_count;
+    size_t next_audio_frame_index;
+    struct dashcdg_tx_cdg_batch *cdg_batches;
+    size_t cdg_batch_count;
+    size_t next_cdg_batch_index;
+    uint32_t audio_media_sequence;
+    uint32_t cdg_media_sequence;
+    uint64_t audio_packets_sent;
+    uint64_t cdg_batch_packets_sent;
+    uint64_t ptp_sync_packets_sent;
+    uint64_t ptp_follow_up_packets_sent;
+    uint32_t ptp_sync_id;
+    uint64_t last_ptp_sync_ms;
     int preview_enabled;
     int display_requested;
     int paused;
@@ -467,6 +523,213 @@ static const struct dashcdg_tx_track *dashcdg_tx_current_track(void) {
     return &g_tx_state.playlist.tracks[g_tx_state.playlist.current_index];
 }
 
+static int16_t *dashcdg_tx_resample_pcm(
+        const int16_t *input,
+        size_t input_frames,
+        int input_rate,
+        int channels,
+        size_t *output_frames
+) {
+    int16_t *output;
+    size_t frames_out;
+
+    if (output_frames == NULL || input == NULL || input_frames == 0U || input_rate <= 0 || channels <= 0) {
+        return NULL;
+    }
+
+    if (input_rate == (int) DASHCDG_AUDIO_SAMPLE_RATE) {
+        output = (int16_t *) malloc(input_frames * (size_t) channels * sizeof(int16_t));
+        if (output == NULL) {
+            return NULL;
+        }
+        memcpy(output, input, input_frames * (size_t) channels * sizeof(int16_t));
+        *output_frames = input_frames;
+        return output;
+    }
+
+    frames_out = (input_frames * (size_t) DASHCDG_AUDIO_SAMPLE_RATE + (size_t) input_rate - 1U) / (size_t) input_rate;
+    output = (int16_t *) malloc(frames_out * (size_t) channels * sizeof(int16_t));
+    if (output == NULL) {
+        return NULL;
+    }
+
+    for (size_t out_index = 0; out_index < frames_out; ++out_index) {
+        uint64_t source_num = (uint64_t) out_index * (uint64_t) input_rate;
+        size_t left_index = (size_t) (source_num / DASHCDG_AUDIO_SAMPLE_RATE);
+        size_t right_index = left_index + 1U;
+        uint64_t frac = source_num % DASHCDG_AUDIO_SAMPLE_RATE;
+
+        if (left_index >= input_frames) {
+            left_index = input_frames - 1U;
+        }
+        if (right_index >= input_frames) {
+            right_index = input_frames - 1U;
+        }
+
+        for (int channel = 0; channel < channels; ++channel) {
+            int32_t left = input[left_index * (size_t) channels + (size_t) channel];
+            int32_t right = input[right_index * (size_t) channels + (size_t) channel];
+            int32_t mixed = (int32_t) (((uint64_t) left * (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
+                    ((uint64_t) right * frac)) / (int32_t) DASHCDG_AUDIO_SAMPLE_RATE;
+            output[out_index * (size_t) channels + (size_t) channel] = (int16_t) mixed;
+        }
+    }
+
+    *output_frames = frames_out;
+    return output;
+}
+
+static void dashcdg_tx_free_live_media_locked(void) {
+    free(g_tx_state.audio_frames);
+    g_tx_state.audio_frames = NULL;
+    g_tx_state.audio_frame_count = 0U;
+    g_tx_state.next_audio_frame_index = 0U;
+    free(g_tx_state.cdg_batches);
+    g_tx_state.cdg_batches = NULL;
+    g_tx_state.cdg_batch_count = 0U;
+    g_tx_state.next_cdg_batch_index = 0U;
+}
+
+static int dashcdg_tx_build_audio_frames_locked(const struct dashcdg_tx_track *track) {
+    struct dashcdg_desktop_audio *audio;
+    struct dashcdg_opus_encoder encoder;
+    int16_t *resampled_pcm = NULL;
+    size_t resampled_frames = 0;
+    size_t frame_count;
+
+    if (track == NULL || track->mp3_path == NULL) {
+        return 1;
+    }
+
+    audio = dashcdg_desktop_audio_new();
+    if (audio == NULL) {
+        return 0;
+    }
+    if (!dashcdg_desktop_audio_load_file(audio, track->mp3_path)) {
+        dashcdg_desktop_audio_free(audio);
+        return 0;
+    }
+
+    resampled_pcm = dashcdg_tx_resample_pcm(
+            (const int16_t *) audio->file_info.buffer,
+            audio->file_info.samples / (size_t) audio->file_info.channels,
+            audio->file_info.hz,
+            audio->file_info.channels,
+            &resampled_frames
+    );
+    if (resampled_pcm == NULL) {
+        dashcdg_desktop_audio_free(audio);
+        return 0;
+    }
+
+    frame_count = (resampled_frames + DASHCDG_AUDIO_FRAME_SAMPLES - 1U) / DASHCDG_AUDIO_FRAME_SAMPLES;
+    g_tx_state.audio_frames = (struct dashcdg_tx_audio_frame *) calloc(frame_count, sizeof(*g_tx_state.audio_frames));
+    if (g_tx_state.audio_frames == NULL) {
+        free(resampled_pcm);
+        dashcdg_desktop_audio_free(audio);
+        return 0;
+    }
+
+    if (!dashcdg_opus_encoder_init(
+            &encoder,
+            DASHCDG_AUDIO_SAMPLE_RATE,
+            DASHCDG_AUDIO_CHANNELS,
+            DASHCDG_AUDIO_FRAME_MS,
+            DASHCDG_AUDIO_BITRATE_KBPS * 1000
+    )) {
+        free(resampled_pcm);
+        dashcdg_desktop_audio_free(audio);
+        return 0;
+    }
+
+    for (size_t i = 0; i < frame_count; ++i) {
+        int16_t pcm[DASHCDG_AUDIO_FRAME_SAMPLES * DASHCDG_AUDIO_CHANNELS];
+        size_t source_offset = i * DASHCDG_AUDIO_FRAME_SAMPLES;
+        size_t available_frames = 0U;
+        int encoded_length;
+
+        memset(pcm, 0, sizeof(pcm));
+        if (source_offset < resampled_frames) {
+            available_frames = resampled_frames - source_offset;
+            if (available_frames > DASHCDG_AUDIO_FRAME_SAMPLES) {
+                available_frames = DASHCDG_AUDIO_FRAME_SAMPLES;
+            }
+            memcpy(
+                    pcm,
+                    resampled_pcm + (source_offset * DASHCDG_AUDIO_CHANNELS),
+                    available_frames * DASHCDG_AUDIO_CHANNELS * sizeof(int16_t)
+            );
+        }
+
+        encoded_length = dashcdg_opus_encode_frame(
+                &encoder,
+                pcm,
+                g_tx_state.audio_frames[i].encoded_bytes,
+                sizeof(g_tx_state.audio_frames[i].encoded_bytes)
+        );
+        if (encoded_length <= 0) {
+            dashcdg_opus_encoder_free(&encoder);
+            free(resampled_pcm);
+            dashcdg_desktop_audio_free(audio);
+            return 0;
+        }
+
+        g_tx_state.audio_frames[i].media_sequence = ++g_tx_state.audio_media_sequence;
+        g_tx_state.audio_frames[i].group_id = (uint32_t) (i / DASHCDG_AUDIO_GROUP_SIZE);
+        g_tx_state.audio_frames[i].group_index = (uint8_t) (i % DASHCDG_AUDIO_GROUP_SIZE);
+        g_tx_state.audio_frames[i].frame_ms = DASHCDG_AUDIO_FRAME_MS;
+        g_tx_state.audio_frames[i].encoded_length = (uint16_t) encoded_length;
+        g_tx_state.audio_frames[i].playback_ms = (uint64_t) i * DASHCDG_AUDIO_FRAME_MS;
+    }
+
+    g_tx_state.audio_frame_count = frame_count;
+    dashcdg_opus_encoder_free(&encoder);
+    free(resampled_pcm);
+    dashcdg_desktop_audio_free(audio);
+    return 1;
+}
+
+static int dashcdg_tx_build_cdg_batches_locked(void) {
+    size_t packet_count;
+    size_t batch_count;
+
+    if (g_tx_state.asset_bytes == NULL || g_tx_state.asset_size == 0U) {
+        return 1;
+    }
+
+    packet_count = g_tx_state.asset_size / DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    batch_count = (packet_count + DASHCDG_CDG_BATCH_PACKETS - 1U) / DASHCDG_CDG_BATCH_PACKETS;
+    g_tx_state.cdg_batches = (struct dashcdg_tx_cdg_batch *) calloc(batch_count, sizeof(*g_tx_state.cdg_batches));
+    if (g_tx_state.cdg_batches == NULL) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < batch_count; ++i) {
+        size_t start_packet = i * DASHCDG_CDG_BATCH_PACKETS;
+        size_t remaining_packets = packet_count - start_packet;
+        size_t packet_bytes;
+
+        if (remaining_packets > DASHCDG_CDG_BATCH_PACKETS) {
+            remaining_packets = DASHCDG_CDG_BATCH_PACKETS;
+        }
+        packet_bytes = remaining_packets * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+        g_tx_state.cdg_batches[i].media_sequence = ++g_tx_state.cdg_media_sequence;
+        g_tx_state.cdg_batches[i].group_id = (uint32_t) (i / DASHCDG_CDG_GROUP_SIZE);
+        g_tx_state.cdg_batches[i].group_index = (uint8_t) (i % DASHCDG_CDG_GROUP_SIZE);
+        g_tx_state.cdg_batches[i].packet_count = (uint8_t) remaining_packets;
+        g_tx_state.cdg_batches[i].packet_start_index = start_packet;
+        g_tx_state.cdg_batches[i].playback_ms = dashcdg_packet_count_to_ms(start_packet);
+        memcpy(
+                g_tx_state.cdg_batches[i].packet_bytes,
+                g_tx_state.asset_bytes + (start_packet * DASHCDG_SUBCHANNEL_PACKET_BYTES),
+                packet_bytes
+        );
+    }
+
+    g_tx_state.cdg_batch_count = batch_count;
+    return 1;
+}
+
 static uint64_t dashcdg_tx_current_playback_ms_locked(uint64_t now_ms) {
     uint64_t playback_ms;
 
@@ -505,7 +768,14 @@ static void dashcdg_tx_copy_song_id_locked(char *output, size_t output_size) {
 
 static void dashcdg_tx_force_rebroadcast_locked(void) {
     g_tx_state.next_asset_offset = 0;
+    g_tx_state.next_audio_frame_index = 0;
+    g_tx_state.next_cdg_batch_index = 0;
     g_tx_state.last_announce_ms = 0;
+    if (g_tx_state.chunk_seen != NULL && g_tx_state.chunk_count > 0U) {
+        memset(g_tx_state.chunk_seen, 0, g_tx_state.chunk_count);
+    }
+    g_tx_state.distinct_chunks_sent = 0;
+    g_tx_state.contiguous_prefix_chunks = 0;
 }
 
 static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
@@ -522,6 +792,16 @@ static void dashcdg_tx_print_status_locked(void) {
     uint64_t now_ms = dashcdg_clock_now_ms();
     uint64_t playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
     const char *mode = "CDG-only";
+    uint32_t available_prefix_bytes = 0;
+    size_t prefix_chunks = g_tx_state.contiguous_prefix_chunks;
+
+    if (g_tx_state.asset_size > 0U && prefix_chunks > 0U) {
+        if (prefix_chunks >= g_tx_state.chunk_count) {
+            available_prefix_bytes = (uint32_t) g_tx_state.asset_size;
+        } else {
+            available_prefix_bytes = (uint32_t) (prefix_chunks * DASHCDG_MAX_ASSET_CHUNK);
+        }
+    }
 
     if (track == NULL) {
         return;
@@ -541,6 +821,27 @@ static void dashcdg_tx_print_status_locked(void) {
             g_tx_state.paused ? "paused" : "playing",
             (unsigned long long) playback_ms,
             (unsigned long long) g_tx_state.duration_ms
+    );
+    fprintf(
+            stdout,
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu ptp=%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | head_off=%zu\n",
+            (unsigned long long) g_tx_state.datagrams_sent,
+            (unsigned long long) g_tx_state.send_failures,
+            (unsigned long long) g_tx_state.bytes_sent,
+            (unsigned long long) g_tx_state.announce_packets_sent,
+            (unsigned long long) g_tx_state.beacon_packets_sent,
+            (unsigned long long) g_tx_state.asset_chunk_packets_sent,
+            (unsigned long long) g_tx_state.audio_packets_sent,
+            (unsigned long long) g_tx_state.cdg_batch_packets_sent,
+            (unsigned long long) g_tx_state.ptp_sync_packets_sent,
+            (unsigned long long) g_tx_state.ptp_follow_up_packets_sent,
+            (unsigned int) available_prefix_bytes,
+            (unsigned int) g_tx_state.beacon.total_asset_bytes,
+            prefix_chunks,
+            g_tx_state.chunk_count,
+            g_tx_state.distinct_chunks_sent,
+            (unsigned long long) g_tx_state.asset_loops_completed,
+            g_tx_state.next_asset_offset
     );
     fflush(stdout);
 }
@@ -578,14 +879,44 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     free(g_tx_state.asset_bytes);
     g_tx_state.asset_bytes = asset_bytes;
     g_tx_state.asset_size = asset_size;
+    dashcdg_tx_free_live_media_locked();
+    free(g_tx_state.chunk_seen);
+    g_tx_state.chunk_seen = NULL;
+    g_tx_state.chunk_count = (asset_size + DASHCDG_MAX_ASSET_CHUNK - 1U) / DASHCDG_MAX_ASSET_CHUNK;
+    if (g_tx_state.chunk_count > 0U) {
+        g_tx_state.chunk_seen = (uint8_t *) calloc(g_tx_state.chunk_count, 1);
+        if (g_tx_state.chunk_seen == NULL) {
+            fprintf(stderr, "failed to allocate TX chunk coverage bitmap\n");
+            free(asset_bytes);
+            g_tx_state.asset_bytes = NULL;
+            g_tx_state.asset_size = 0;
+            g_tx_state.chunk_count = 0;
+            return 0;
+        }
+    }
+    g_tx_state.distinct_chunks_sent = 0;
+    g_tx_state.contiguous_prefix_chunks = 0;
+    g_tx_state.asset_loops_completed = 0;
+    g_tx_state.datagrams_sent = 0;
+    g_tx_state.bytes_sent = 0;
+    g_tx_state.announce_packets_sent = 0;
+    g_tx_state.beacon_packets_sent = 0;
+    g_tx_state.asset_chunk_packets_sent = 0;
+    g_tx_state.audio_packets_sent = 0;
+    g_tx_state.cdg_batch_packets_sent = 0;
+    g_tx_state.ptp_sync_packets_sent = 0;
+    g_tx_state.ptp_follow_up_packets_sent = 0;
+    g_tx_state.ptp_sync_id = 0;
+    g_tx_state.last_ptp_sync_ms = 0;
+    g_tx_state.send_failures = 0;
     g_tx_state.playlist.current_index = index;
     g_tx_state.next_asset_offset = 0;
     g_tx_state.last_announce_ms = 0;
     g_tx_state.last_beacon_ms = 0;
     g_tx_state.paused = 0;
     g_tx_state.playback_anchor_ms = 0;
-    g_tx_state.playback_anchor_local_ms = now_ms + (apply_warmup ? g_tx_state.warmup_ms : 0U);
-    g_tx_state.session_start_ms = g_tx_state.playback_anchor_local_ms;
+    g_tx_state.playback_anchor_local_ms = 0;
+    g_tx_state.session_start_ms = 0;
 
     packet_count = asset_size / sizeof(struct dashcdg_subchannel_packet);
     g_tx_state.duration_ms = dashcdg_packet_count_to_ms(packet_count);
@@ -600,13 +931,35 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.announce.asset_size = (uint32_t) g_tx_state.asset_size;
     g_tx_state.announce.chunk_size = DASHCDG_MAX_ASSET_CHUNK;
     g_tx_state.announce.packets_per_second = DASHCDG_PACKETS_PER_SECOND;
+    g_tx_state.announce.audio_sample_rate = track->mp3_path != NULL ? DASHCDG_AUDIO_SAMPLE_RATE : 0U;
+    g_tx_state.announce.audio_channels = track->mp3_path != NULL ? DASHCDG_AUDIO_CHANNELS : 0U;
+    g_tx_state.announce.audio_frame_ms = track->mp3_path != NULL ? DASHCDG_AUDIO_FRAME_MS : 0U;
+    g_tx_state.announce.audio_bitrate_kbps = track->mp3_path != NULL ? DASHCDG_AUDIO_BITRATE_KBPS : 0U;
+    g_tx_state.announce.playout_delay_ms = DASHCDG_PAYOUT_DELAY_MS;
+    g_tx_state.announce.audio_fec_group_size = track->mp3_path != NULL ? DASHCDG_AUDIO_GROUP_SIZE : 0U;
+    g_tx_state.announce.cdg_fec_group_size = DASHCDG_CDG_GROUP_SIZE;
     g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
 
     memset(&g_tx_state.beacon, 0, sizeof(g_tx_state.beacon));
     strncpy(g_tx_state.beacon.song_id, song_id, sizeof(g_tx_state.beacon.song_id) - 1U);
     g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.beacon.total_asset_bytes = (uint32_t) g_tx_state.asset_size;
-    g_tx_state.beacon.available_asset_bytes = (uint32_t) g_tx_state.asset_size;
+    g_tx_state.beacon.available_asset_bytes = 0;
+
+    if (!dashcdg_tx_build_cdg_batches_locked()) {
+        fprintf(stderr, "failed to build TX CDG batches\n");
+        return 0;
+    }
+    if (!dashcdg_tx_build_audio_frames_locked(track)) {
+        fprintf(stderr, "failed to build TX audio frames\n");
+        return 0;
+    }
+
+    now_ms = dashcdg_clock_now_ms();
+    g_tx_state.playback_anchor_local_ms = now_ms + (apply_warmup ? g_tx_state.warmup_ms : 0U);
+    g_tx_state.session_start_ms = g_tx_state.playback_anchor_local_ms;
+    g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
+    g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
 
     fprintf(
             stdout,
@@ -651,7 +1004,7 @@ static int dashcdg_tx_send_packet(const uint8_t *packet, size_t packet_size) {
 }
 
 static void dashcdg_tx_print_help(void) {
-    fprintf(stdout, "[tx] controls: p=play/pause, n=next, b=back, r=restart, f=force-broadcast, s=status, v=toggle preview, q=quit\n");
+    fprintf(stdout, "[tx] controls: p=play/pause, n=next, b=back, r=restart, f=force-broadcast, s=status, v=toggle preview, h=help, q=quit\n");
     fflush(stdout);
 }
 
@@ -740,6 +1093,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
 
 static void *dashcdg_tx_thread_main(void *unused) {
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    size_t previous_offset = 0;
 
     (void) unused;
 
@@ -774,7 +1128,13 @@ static void *dashcdg_tx_thread_main(void *unused) {
                     &g_tx_state.announce
             );
             if (packet_size > 0) {
-                dashcdg_tx_send_packet(packet, packet_size);
+                if (dashcdg_tx_send_packet(packet, packet_size)) {
+                    g_tx_state.datagrams_sent++;
+                    g_tx_state.bytes_sent += packet_size;
+                    g_tx_state.announce_packets_sent++;
+                } else {
+                    g_tx_state.send_failures++;
+                }
             }
             g_tx_state.last_announce_ms = now_ms;
         }
@@ -783,6 +1143,21 @@ static void *dashcdg_tx_thread_main(void *unused) {
             size_t packet_size;
 
             g_tx_state.beacon.playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+            if (g_tx_state.chunk_seen != NULL && g_tx_state.contiguous_prefix_chunks < g_tx_state.chunk_count) {
+                while (g_tx_state.contiguous_prefix_chunks < g_tx_state.chunk_count &&
+                        g_tx_state.chunk_seen[g_tx_state.contiguous_prefix_chunks] != 0) {
+                    g_tx_state.contiguous_prefix_chunks++;
+                }
+            }
+            if (g_tx_state.asset_size > 0U) {
+                if (g_tx_state.contiguous_prefix_chunks >= g_tx_state.chunk_count) {
+                    g_tx_state.beacon.available_asset_bytes = (uint32_t) g_tx_state.asset_size;
+                } else {
+                    g_tx_state.beacon.available_asset_bytes = (uint32_t) (g_tx_state.contiguous_prefix_chunks * DASHCDG_MAX_ASSET_CHUNK);
+                }
+            } else {
+                g_tx_state.beacon.available_asset_bytes = 0;
+            }
             g_tx_state.header.flags = g_tx_state.paused ? DASHCDG_PACKET_FLAG_PAUSED : 0U;
             g_tx_state.header.sequence = g_tx_state.sequence++;
             g_tx_state.header.sender_time_ms = now_ms;
@@ -793,15 +1168,114 @@ static void *dashcdg_tx_thread_main(void *unused) {
                     &g_tx_state.beacon
             );
             if (packet_size > 0) {
-                dashcdg_tx_send_packet(packet, packet_size);
+                if (dashcdg_tx_send_packet(packet, packet_size)) {
+                    g_tx_state.datagrams_sent++;
+                    g_tx_state.bytes_sent += packet_size;
+                    g_tx_state.beacon_packets_sent++;
+                } else {
+                    g_tx_state.send_failures++;
+                }
             }
             g_tx_state.last_beacon_ms = now_ms;
+        }
+
+        if (g_tx_state.last_ptp_sync_ms == 0 || now_ms - g_tx_state.last_ptp_sync_ms >= 200U) {
+            struct dashcdg_ptp_sync_payload sync_payload;
+            struct dashcdg_ptp_follow_up_payload follow_up_payload;
+            size_t packet_size;
+            uint32_t sync_id = ++g_tx_state.ptp_sync_id;
+
+            memset(&sync_payload, 0, sizeof(sync_payload));
+            sync_payload.sync_id = sync_id;
+            g_tx_state.header.flags = 0;
+            g_tx_state.header.sequence = g_tx_state.sequence++;
+            g_tx_state.header.sender_time_ms = now_ms;
+            packet_size = dashcdg_protocol_serialize_ptp_sync(packet, sizeof(packet), &g_tx_state.header, &sync_payload);
+            if (packet_size > 0 && dashcdg_tx_send_packet(packet, packet_size)) {
+                g_tx_state.datagrams_sent++;
+                g_tx_state.bytes_sent += packet_size;
+                g_tx_state.ptp_sync_packets_sent++;
+            }
+
+            memset(&follow_up_payload, 0, sizeof(follow_up_payload));
+            follow_up_payload.sync_id = sync_id;
+            follow_up_payload.origin_time_ms = now_ms;
+            g_tx_state.header.sequence = g_tx_state.sequence++;
+            g_tx_state.header.sender_time_ms = now_ms;
+            packet_size = dashcdg_protocol_serialize_ptp_follow_up(
+                    packet,
+                    sizeof(packet),
+                    &g_tx_state.header,
+                    &follow_up_payload
+            );
+            if (packet_size > 0 && dashcdg_tx_send_packet(packet, packet_size)) {
+                g_tx_state.datagrams_sent++;
+                g_tx_state.bytes_sent += packet_size;
+                g_tx_state.ptp_follow_up_packets_sent++;
+            }
+            g_tx_state.last_ptp_sync_ms = now_ms;
+        }
+
+        while (now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+                g_tx_state.next_audio_frame_index < g_tx_state.audio_frame_count &&
+                g_tx_state.audio_frames[g_tx_state.next_audio_frame_index].playback_ms <=
+                dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+            const struct dashcdg_tx_audio_frame *frame = &g_tx_state.audio_frames[g_tx_state.next_audio_frame_index];
+            struct dashcdg_audio_frame_payload payload;
+            size_t packet_size;
+
+            memset(&payload, 0, sizeof(payload));
+            payload.media_sequence = frame->media_sequence;
+            payload.group_id = frame->group_id;
+            payload.group_index = frame->group_index;
+            payload.frame_ms = frame->frame_ms;
+            payload.encoded_length = frame->encoded_length;
+            payload.playback_ms = frame->playback_ms;
+            payload.encoded_bytes = frame->encoded_bytes;
+            g_tx_state.header.flags = 0;
+            g_tx_state.header.sequence = g_tx_state.sequence++;
+            g_tx_state.header.sender_time_ms = now_ms;
+            packet_size = dashcdg_protocol_serialize_audio_frame(packet, sizeof(packet), &g_tx_state.header, &payload);
+            if (packet_size > 0 && dashcdg_tx_send_packet(packet, packet_size)) {
+                g_tx_state.datagrams_sent++;
+                g_tx_state.bytes_sent += packet_size;
+                g_tx_state.audio_packets_sent++;
+            }
+            g_tx_state.next_audio_frame_index++;
+        }
+
+        while (now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+                g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
+                g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
+                dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+            const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
+            struct dashcdg_cdg_batch_payload payload;
+            size_t packet_size;
+
+            memset(&payload, 0, sizeof(payload));
+            payload.media_sequence = batch->media_sequence;
+            payload.group_id = batch->group_id;
+            payload.group_index = batch->group_index;
+            payload.packet_count = batch->packet_count;
+            payload.packet_start_index = batch->packet_start_index;
+            payload.packet_bytes = batch->packet_bytes;
+            g_tx_state.header.flags = 0;
+            g_tx_state.header.sequence = g_tx_state.sequence++;
+            g_tx_state.header.sender_time_ms = now_ms;
+            packet_size = dashcdg_protocol_serialize_cdg_batch(packet, sizeof(packet), &g_tx_state.header, &payload);
+            if (packet_size > 0 && dashcdg_tx_send_packet(packet, packet_size)) {
+                g_tx_state.datagrams_sent++;
+                g_tx_state.bytes_sent += packet_size;
+                g_tx_state.cdg_batch_packets_sent++;
+            }
+            g_tx_state.next_cdg_batch_index++;
         }
 
         if (g_tx_state.asset_size > 0) {
             struct dashcdg_asset_chunk_payload chunk;
             size_t chunk_size = g_tx_state.asset_size - g_tx_state.next_asset_offset;
             size_t packet_size;
+            size_t chunk_index;
 
             if (chunk_size > DASHCDG_MAX_ASSET_CHUNK) {
                 chunk_size = DASHCDG_MAX_ASSET_CHUNK;
@@ -822,12 +1296,35 @@ static void *dashcdg_tx_thread_main(void *unused) {
                     &chunk
             );
             if (packet_size > 0) {
-                dashcdg_tx_send_packet(packet, packet_size);
+                if (dashcdg_tx_send_packet(packet, packet_size)) {
+                    g_tx_state.datagrams_sent++;
+                    g_tx_state.bytes_sent += packet_size;
+                    g_tx_state.asset_chunk_packets_sent++;
+                } else {
+                    g_tx_state.send_failures++;
+                }
+            }
+
+            previous_offset = g_tx_state.next_asset_offset;
+            chunk_index = g_tx_state.next_asset_offset / DASHCDG_MAX_ASSET_CHUNK;
+            if (g_tx_state.chunk_seen != NULL && chunk_index < g_tx_state.chunk_count &&
+                    g_tx_state.chunk_seen[chunk_index] == 0) {
+                g_tx_state.chunk_seen[chunk_index] = 1;
+                g_tx_state.distinct_chunks_sent++;
+                if (chunk_index == g_tx_state.contiguous_prefix_chunks) {
+                    while (g_tx_state.contiguous_prefix_chunks < g_tx_state.chunk_count &&
+                            g_tx_state.chunk_seen[g_tx_state.contiguous_prefix_chunks] != 0) {
+                        g_tx_state.contiguous_prefix_chunks++;
+                    }
+                }
             }
 
             g_tx_state.next_asset_offset += chunk_size;
             if (g_tx_state.next_asset_offset >= g_tx_state.asset_size) {
                 g_tx_state.next_asset_offset = 0;
+                if (previous_offset != 0) {
+                    g_tx_state.asset_loops_completed++;
+                }
             }
         }
         pthread_mutex_unlock(&g_tx_state.mutex);
@@ -841,6 +1338,10 @@ static void *dashcdg_tx_thread_main(void *unused) {
 static void dashcdg_tx_preview_display(void) {
     uint64_t playback_ms;
     uint64_t packet_ts;
+    char hud_line_a[256];
+    char hud_line_b[256];
+    const struct dashcdg_tx_track *track = NULL;
+    uint32_t available_prefix_bytes = 0;
 
     pthread_mutex_lock(&g_tx_state.mutex);
     if (!g_tx_state.preview_enabled) {
@@ -856,7 +1357,63 @@ static void dashcdg_tx_preview_display(void) {
     packet_ts = dashcdg_ms_to_packet_count(playback_ms);
     dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_ts);
     dashcdg_gl_renderer_render(&g_tx_state.renderer, &g_tx_state.reader.state);
+
+    track = dashcdg_tx_current_track();
+    if (g_tx_state.asset_size > 0U && g_tx_state.contiguous_prefix_chunks >= g_tx_state.chunk_count) {
+        available_prefix_bytes = (uint32_t) g_tx_state.asset_size;
+    } else {
+        available_prefix_bytes = (uint32_t) (g_tx_state.contiguous_prefix_chunks * DASHCDG_MAX_ASSET_CHUNK);
+    }
+
+    snprintf(
+            hud_line_a,
+            sizeof(hud_line_a),
+            "TX dg:%llu fail:%llu live:%llu aud:%llu prefix:%u/%u",
+            (unsigned long long) g_tx_state.datagrams_sent,
+            (unsigned long long) g_tx_state.send_failures,
+            (unsigned long long) g_tx_state.cdg_batch_packets_sent,
+            (unsigned long long) g_tx_state.audio_packets_sent,
+            (unsigned int) available_prefix_bytes,
+            (unsigned int) g_tx_state.beacon.total_asset_bytes
+    );
+    snprintf(
+            hud_line_b,
+            sizeof(hud_line_b),
+            "loops:%llu off:%zu %s",
+            (unsigned long long) g_tx_state.asset_loops_completed,
+            g_tx_state.next_asset_offset,
+            track != NULL && track->mp3_path != NULL ? "MP3+G (audio is local on RX)" : "CDG-only"
+    );
     pthread_mutex_unlock(&g_tx_state.mutex);
+
+    glUseProgram(0);
+    glDisable(GL_TEXTURE_2D);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT), 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glColor3f(0.9f, 0.9f, 0.2f);
+    glRasterPos2i(8, 18);
+    for (const char *c = hud_line_a; *c != '\0'; ++c) {
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, (int) (unsigned char) *c);
+    }
+    glRasterPos2i(8, 34);
+    for (const char *c = hud_line_b; *c != '\0'; ++c) {
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, (int) (unsigned char) *c);
+    }
+
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+
+    glutSwapBuffers();
     glutPostRedisplay();
 }
 
@@ -873,6 +1430,10 @@ static void dashcdg_tx_preview_keyboard(unsigned char key, int x, int y) {
 static void dashcdg_tx_cleanup(void) {
     free(g_tx_state.asset_bytes);
     g_tx_state.asset_bytes = NULL;
+    dashcdg_tx_free_live_media_locked();
+    free(g_tx_state.chunk_seen);
+    g_tx_state.chunk_seen = NULL;
+    g_tx_state.chunk_count = 0;
     if (g_tx_state.sockfd != DASHCDG_INVALID_SOCKET) {
         dashcdg_socket_close(g_tx_state.sockfd);
         g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;

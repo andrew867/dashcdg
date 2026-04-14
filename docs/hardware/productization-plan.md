@@ -4,12 +4,14 @@
 
 - first board bring-up
 - Wi-Fi and display signal integrity
+- multicast receive and late-join bootstrap sanity
 - battery charging and protection validation
 - boot, recovery, and firmware flashing workflows
 
 ## DVT
 
 - long-duration packet-loss soak
+- synchronized live audio/CD+G soak against the desktop proof transport
 - battery charge/discharge endurance
 - brownout and reset recovery
 - ESD and connector abuse checks
@@ -28,3 +30,4 @@
 - fixture requirements
 - operator test instructions
 - field service and firmware recovery procedure
+- explicit transport-version and provisioning compatibility notes for mixed desktop/embedded validation

@@ -10,6 +10,7 @@
 
 - protocol serialization and parsing covered by tests
 - desktop TX/RX proof runnable from the repo
+- live `AUDIO_FRAME` and `CDG_BATCH` transport observable in TX/RX status output
 - documented impairment matrix for loss, jitter, and late join
 - packet captures can be analyzed via sequence and sender timestamps
 
@@ -17,7 +18,8 @@
 
 - ESP-IDF platform assumptions documented
 - hardware bring-up and production validation plans written before board spin
-- explicit audio feasibility gate written before committing to onboard audio
+- explicit network-audio feasibility gate written before committing to onboard audio
+- protocol docs must call out implemented vs reserved packet families so proof behavior is not overstated
 
 ## CI expectations
 
@@ -25,5 +27,6 @@ The repository should eventually enforce:
 
 - compile and test on every merge request
 - separate jobs for core tests and desktop app compilation
+- desktop smoke validation logs for TX/RX proof changes
 - artifact retention for test binaries and captured logs
 - no release tag without passing automated tests and updated docs

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Determine whether local MP3 decode and synchronized audio playout can coexist with:
+Determine whether synchronized on-wire `Opus` decode and audio playout can coexist with:
 
 - Wi-Fi receive
 - CD+G decode
@@ -13,8 +13,8 @@ on the selected ESP32 hardware profile.
 
 ## Required measurements
 
-- sustained MP3 decode throughput
-- worst-case RAM usage with audio buffers, asset buffers, and render state
+- sustained Opus decode throughput at the chosen frame size and bitrate
+- worst-case RAM usage with jitter buffers, bootstrap asset buffers, and render state
 - SPI display bandwidth under lyric-heavy updates
 - drift between audio playout clock and network session clock
 - battery current draw during peak display + Wi-Fi + audio load
@@ -23,7 +23,7 @@ on the selected ESP32 hardware profile.
 
 - no underruns during a full-song soak
 - stable lyric sync within visibly acceptable bounds
-- sufficient free RAM margin for packet jitter buffering
+- sufficient free RAM margin for packet jitter buffering and late-join bootstrap
 - thermal and battery behavior inside device limits
 
 ## Failure outcomes

@@ -10,15 +10,24 @@ WINDOWS_PACKAGE_ZIP := $(RELEASE_DIR)/dashcdg-windows-portable.zip
 
 COMMON_CFLAGS := -Wall -Wextra -Wno-cpp -std=c99 -pedantic -D_FORTIFY_SOURCE=2
 INCLUDES := -Icore/include -Iproto/include -Iplatform/desktop/include -Iinc
+EXTRA_LDFLAGS :=
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
-LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lpthread
-NET_LIBS := -lws2_32
-WINDOWS_RUNTIME_DLLS := /mingw64/bin/libfreeglut.dll /mingw64/bin/glew32.dll /mingw64/bin/libportaudio.dll /mingw64/bin/libwinpthread-1.dll
+WINDOWS_MINGW_PREFIX := $(shell if [ -d /c/msys64/mingw64 ]; then echo /c/msys64/mingw64; elif [ -d /c/ProgramData/mingw64/mingw64 ]; then echo /c/ProgramData/mingw64/mingw64; elif [ -d /mingw64 ]; then echo /mingw64; fi)
+WINDOWS_MINGW_PREFIX_WIN := $(shell if [ -n "$(WINDOWS_MINGW_PREFIX)" ]; then cygpath -m "$(WINDOWS_MINGW_PREFIX)"; fi)
+ifneq ($(WINDOWS_MINGW_PREFIX),)
+INCLUDES += -I$(WINDOWS_MINGW_PREFIX_WIN)/include
+EXTRA_LDFLAGS += -L$(WINDOWS_MINGW_PREFIX_WIN)/lib
+WINDOWS_RUNTIME_DLLS := $(shell for f in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll; do if [ -f "$(WINDOWS_MINGW_PREFIX)/bin/$$f" ]; then printf '%s ' "$(WINDOWS_MINGW_PREFIX)/bin/$$f"; fi; done)
 else
-LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lpthread
+WINDOWS_RUNTIME_DLLS :=
+endif
+LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lopus -lpthread
+NET_LIBS := -lws2_32
+else
+LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread
 NET_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
 endif
@@ -28,7 +37,7 @@ PROTO_SOURCES := proto/src/protocol.c
 CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
+DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
@@ -86,6 +95,9 @@ $(OBJ_DIR)/desktop_net_compat.o: platform/desktop/src/net_compat.c
 $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/desktop_opus_codec.o: platform/desktop/src/opus_codec.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/desktop_gl_renderer.o: platform/desktop/src/gl_renderer.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -111,19 +123,19 @@ $(TEST_BIN): $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 
 $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
 $(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
-	cp -f /mingw64/bin/libwinpthread-1.dll $(BIN_DIR)/
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
 $(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif

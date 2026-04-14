@@ -124,7 +124,9 @@ static void test_protocol_roundtrip(void) {
     struct dashcdg_announce_payload announce;
     struct dashcdg_asset_chunk_payload chunk;
     struct dashcdg_clock_beacon_payload beacon;
+    struct dashcdg_audio_frame_payload audio_frame;
     uint8_t chunk_bytes[] = { 1, 2, 3, 4 };
+    uint8_t audio_bytes[] = { 9, 8, 7, 6 };
     size_t size;
 
     memset(&header, 0, sizeof(header));
@@ -136,6 +138,13 @@ static void test_protocol_roundtrip(void) {
     announce.asset_size = 4096;
     announce.chunk_size = 1024;
     announce.packets_per_second = DASHCDG_PACKETS_PER_SECOND;
+    announce.audio_sample_rate = 48000;
+    announce.audio_channels = 2;
+    announce.audio_frame_ms = 20;
+    announce.audio_bitrate_kbps = 96;
+    announce.playout_delay_ms = 500;
+    announce.audio_fec_group_size = 5;
+    announce.cdg_fec_group_size = 9;
     announce.session_start_ms = 5000;
 
     size = dashcdg_protocol_serialize_announce(buffer, sizeof(buffer), &header, &announce);
@@ -143,6 +152,8 @@ static void test_protocol_roundtrip(void) {
     assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
     assert(strcmp(view.announce.song_id, "demo-song") == 0);
     assert(view.announce.asset_size == 4096);
+    assert(view.announce.audio_sample_rate == 48000);
+    assert(view.announce.audio_frame_ms == 20);
 
     chunk.asset_offset = 256;
     chunk.chunk_length = sizeof(chunk_bytes);
@@ -165,6 +176,21 @@ static void test_protocol_roundtrip(void) {
     assert(size > 0);
     assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
     assert(view.clock_beacon.playback_ms == 123);
+
+    memset(&audio_frame, 0, sizeof(audio_frame));
+    audio_frame.media_sequence = 3;
+    audio_frame.group_id = 1;
+    audio_frame.group_index = 0;
+    audio_frame.frame_ms = 20;
+    audio_frame.encoded_length = sizeof(audio_bytes);
+    audio_frame.playback_ms = 40;
+    audio_frame.encoded_bytes = audio_bytes;
+    size = dashcdg_protocol_serialize_audio_frame(buffer, sizeof(buffer), &header, &audio_frame);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.audio_frame.media_sequence == 3);
+    assert(view.audio_frame.playback_ms == 40);
+    assert(memcmp(view.audio_frame.encoded_bytes, audio_bytes, sizeof(audio_bytes)) == 0);
 }
 
 static void test_media_clock(void) {

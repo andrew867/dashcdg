@@ -3,6 +3,12 @@
 #include <string.h>
 
 #define DASHCDG_PACKET_HEADER_SIZE 24U
+#define DASHCDG_ANNOUNCE_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 4U + 4U + 2U + 2U + 1U + 1U + 2U + 2U + 1U + 1U + 8U)
+#define DASHCDG_CLOCK_BEACON_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 8U + 8U + 4U + 4U)
+#define DASHCDG_PTP_SYNC_PAYLOAD_SIZE 8U
+#define DASHCDG_PTP_FOLLOW_UP_PAYLOAD_SIZE 16U
+#define DASHCDG_PTP_DELAY_REQ_PAYLOAD_SIZE 8U
+#define DASHCDG_PTP_DELAY_RESP_PAYLOAD_SIZE 16U
 
 static void dashcdg_write_u16(uint8_t *dst, uint16_t value) {
     dst[0] = (uint8_t) ((value >> 8U) & 0xFFU);
@@ -71,7 +77,7 @@ size_t dashcdg_protocol_serialize_announce(
         const struct dashcdg_packet_header *header,
         const struct dashcdg_announce_payload *payload
 ) {
-    size_t payload_length = DASHCDG_MAX_SONG_ID + 4U + 4U + 2U + 2U + 8U;
+    size_t payload_length = DASHCDG_ANNOUNCE_PAYLOAD_SIZE;
     size_t offset;
 
     if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + payload_length) {
@@ -87,8 +93,16 @@ size_t dashcdg_protocol_serialize_announce(
     offset += 4U;
     dashcdg_write_u16(buffer + offset, payload->packets_per_second);
     offset += 2U;
-    dashcdg_write_u16(buffer + offset, payload->reserved);
+    dashcdg_write_u16(buffer + offset, payload->audio_sample_rate);
     offset += 2U;
+    buffer[offset++] = payload->audio_channels;
+    buffer[offset++] = payload->audio_frame_ms;
+    dashcdg_write_u16(buffer + offset, payload->audio_bitrate_kbps);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->playout_delay_ms);
+    offset += 2U;
+    buffer[offset++] = payload->audio_fec_group_size;
+    buffer[offset++] = payload->cdg_fec_group_size;
     dashcdg_write_u64(buffer + offset, payload->session_start_ms);
     offset += 8U;
     return offset;
@@ -130,7 +144,7 @@ size_t dashcdg_protocol_serialize_clock_beacon(
         const struct dashcdg_packet_header *header,
         const struct dashcdg_clock_beacon_payload *payload
 ) {
-    size_t payload_length = DASHCDG_MAX_SONG_ID + 8U + 8U + 4U + 4U;
+    size_t payload_length = DASHCDG_CLOCK_BEACON_PAYLOAD_SIZE;
     size_t offset;
 
     if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + payload_length) {
@@ -148,6 +162,195 @@ size_t dashcdg_protocol_serialize_clock_beacon(
     offset += 4U;
     dashcdg_write_u32(buffer + offset, payload->total_asset_bytes);
     offset += 4U;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_audio_frame(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_audio_frame_payload *payload
+) {
+    size_t payload_length;
+    size_t offset;
+
+    if (payload == NULL || payload->encoded_bytes == NULL || payload->encoded_length > DASHCDG_MAX_AUDIO_FRAME_BYTES) {
+        return 0;
+    }
+
+    payload_length = 4U + 4U + 1U + 1U + 2U + 8U + payload->encoded_length;
+    if (buffer_size < DASHCDG_PACKET_HEADER_SIZE + payload_length) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_AUDIO_FRAME, (uint16_t) payload_length);
+    dashcdg_write_u32(buffer + offset, payload->media_sequence);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->group_id);
+    offset += 4U;
+    buffer[offset++] = payload->group_index;
+    buffer[offset++] = payload->frame_ms;
+    dashcdg_write_u16(buffer + offset, payload->encoded_length);
+    offset += 2U;
+    dashcdg_write_u64(buffer + offset, payload->playback_ms);
+    offset += 8U;
+    memcpy(buffer + offset, payload->encoded_bytes, payload->encoded_length);
+    offset += payload->encoded_length;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_cdg_batch(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_cdg_batch_payload *payload
+) {
+    size_t payload_length;
+    size_t offset;
+    size_t batch_bytes;
+
+    if (payload == NULL || payload->packet_bytes == NULL || payload->packet_count == 0 ||
+            payload->packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
+        return 0;
+    }
+
+    batch_bytes = (size_t) payload->packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    payload_length = 4U + 4U + 1U + 1U + 2U + 8U + batch_bytes;
+    if (buffer_size < DASHCDG_PACKET_HEADER_SIZE + payload_length) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_CDG_BATCH, (uint16_t) payload_length);
+    dashcdg_write_u32(buffer + offset, payload->media_sequence);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->group_id);
+    offset += 4U;
+    buffer[offset++] = payload->group_index;
+    buffer[offset++] = payload->packet_count;
+    dashcdg_write_u16(buffer + offset, payload->reserved);
+    offset += 2U;
+    dashcdg_write_u64(buffer + offset, payload->packet_start_index);
+    offset += 8U;
+    memcpy(buffer + offset, payload->packet_bytes, batch_bytes);
+    offset += batch_bytes;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_ptp_sync(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_ptp_sync_payload *payload
+) {
+    size_t offset;
+
+    if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + DASHCDG_PTP_SYNC_PAYLOAD_SIZE) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_PTP_SYNC, DASHCDG_PTP_SYNC_PAYLOAD_SIZE);
+    dashcdg_write_u32(buffer + offset, payload->sync_id);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->reserved);
+    offset += 4U;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_ptp_follow_up(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_ptp_follow_up_payload *payload
+) {
+    size_t offset;
+
+    if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + DASHCDG_PTP_FOLLOW_UP_PAYLOAD_SIZE) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_PTP_FOLLOW_UP, DASHCDG_PTP_FOLLOW_UP_PAYLOAD_SIZE);
+    dashcdg_write_u32(buffer + offset, payload->sync_id);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->reserved);
+    offset += 4U;
+    dashcdg_write_u64(buffer + offset, payload->origin_time_ms);
+    offset += 8U;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_ptp_delay_req(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_ptp_delay_req_payload *payload
+) {
+    size_t offset;
+
+    if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + DASHCDG_PTP_DELAY_REQ_PAYLOAD_SIZE) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_PTP_DELAY_REQ, DASHCDG_PTP_DELAY_REQ_PAYLOAD_SIZE);
+    dashcdg_write_u32(buffer + offset, payload->request_id);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->reserved);
+    offset += 4U;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_ptp_delay_resp(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_ptp_delay_resp_payload *payload
+) {
+    size_t offset;
+
+    if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + DASHCDG_PTP_DELAY_RESP_PAYLOAD_SIZE) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_PTP_DELAY_RESP, DASHCDG_PTP_DELAY_RESP_PAYLOAD_SIZE);
+    dashcdg_write_u32(buffer + offset, payload->request_id);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->reserved);
+    offset += 4U;
+    dashcdg_write_u64(buffer + offset, payload->request_rx_time_ms);
+    offset += 8U;
+    return offset;
+}
+
+size_t dashcdg_protocol_serialize_fec_parity(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_fec_parity_payload *payload
+) {
+    size_t payload_length;
+    size_t offset;
+
+    if (payload == NULL || payload->payload_xor == NULL) {
+        return 0;
+    }
+
+    payload_length = 1U + 1U + 1U + 1U + 4U + 2U + 2U + payload->payload_bytes;
+    if (buffer_size < DASHCDG_PACKET_HEADER_SIZE + payload_length) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_FEC_PARITY, (uint16_t) payload_length);
+    buffer[offset++] = payload->stream_type;
+    buffer[offset++] = payload->group_size;
+    buffer[offset++] = payload->payload_bytes;
+    buffer[offset++] = payload->reserved;
+    dashcdg_write_u32(buffer + offset, payload->group_id);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->payload_length_xor);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->reserved_b);
+    offset += 2U;
+    memcpy(buffer + offset, payload->payload_xor, payload->payload_bytes);
+    offset += payload->payload_bytes;
     return offset;
 }
 
@@ -186,7 +389,7 @@ int dashcdg_protocol_parse_packet(
 
     switch (view->header.type) {
         case DASHCDG_PACKET_ANNOUNCE:
-            if (payload_length != DASHCDG_MAX_SONG_ID + 4U + 4U + 2U + 2U + 8U) {
+            if (payload_length != DASHCDG_ANNOUNCE_PAYLOAD_SIZE) {
                 return 0;
             }
 
@@ -198,8 +401,16 @@ int dashcdg_protocol_parse_packet(
             offset += 4U;
             view->announce.packets_per_second = dashcdg_read_u16(buffer + offset);
             offset += 2U;
-            view->announce.reserved = dashcdg_read_u16(buffer + offset);
+            view->announce.audio_sample_rate = dashcdg_read_u16(buffer + offset);
             offset += 2U;
+            view->announce.audio_channels = buffer[offset++];
+            view->announce.audio_frame_ms = buffer[offset++];
+            view->announce.audio_bitrate_kbps = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->announce.playout_delay_ms = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->announce.audio_fec_group_size = buffer[offset++];
+            view->announce.cdg_fec_group_size = buffer[offset++];
             view->announce.session_start_ms = dashcdg_read_u64(buffer + offset);
             return 1;
 
@@ -223,7 +434,7 @@ int dashcdg_protocol_parse_packet(
             return 1;
 
         case DASHCDG_PACKET_CLOCK_BEACON:
-            if (payload_length != DASHCDG_MAX_SONG_ID + 8U + 8U + 4U + 4U) {
+            if (payload_length != DASHCDG_CLOCK_BEACON_PAYLOAD_SIZE) {
                 return 0;
             }
 
@@ -236,6 +447,116 @@ int dashcdg_protocol_parse_packet(
             view->clock_beacon.available_asset_bytes = dashcdg_read_u32(buffer + offset);
             offset += 4U;
             view->clock_beacon.total_asset_bytes = dashcdg_read_u32(buffer + offset);
+            return 1;
+
+        case DASHCDG_PACKET_AUDIO_FRAME:
+            if (payload_length < 20U) {
+                return 0;
+            }
+
+            view->audio_frame.media_sequence = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->audio_frame.group_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->audio_frame.group_index = buffer[offset++];
+            view->audio_frame.frame_ms = buffer[offset++];
+            view->audio_frame.encoded_length = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->audio_frame.playback_ms = dashcdg_read_u64(buffer + offset);
+            offset += 8U;
+            if ((size_t) view->audio_frame.encoded_length != payload_length - 20U ||
+                    view->audio_frame.encoded_length > DASHCDG_MAX_AUDIO_FRAME_BYTES) {
+                return 0;
+            }
+            view->audio_frame.encoded_bytes = buffer + offset;
+            return 1;
+
+        case DASHCDG_PACKET_CDG_BATCH: {
+            size_t batch_bytes;
+
+            if (payload_length < 20U) {
+                return 0;
+            }
+
+            view->cdg_batch.media_sequence = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->cdg_batch.group_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->cdg_batch.group_index = buffer[offset++];
+            view->cdg_batch.packet_count = buffer[offset++];
+            view->cdg_batch.reserved = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->cdg_batch.packet_start_index = dashcdg_read_u64(buffer + offset);
+            offset += 8U;
+            if (view->cdg_batch.packet_count == 0 || view->cdg_batch.packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
+                return 0;
+            }
+            batch_bytes = (size_t) view->cdg_batch.packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+            if (batch_bytes != payload_length - 20U) {
+                return 0;
+            }
+            view->cdg_batch.packet_bytes = buffer + offset;
+            return 1;
+        }
+
+        case DASHCDG_PACKET_PTP_SYNC:
+            if (payload_length != DASHCDG_PTP_SYNC_PAYLOAD_SIZE) {
+                return 0;
+            }
+            view->ptp_sync.sync_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->ptp_sync.reserved = dashcdg_read_u32(buffer + offset);
+            return 1;
+
+        case DASHCDG_PACKET_PTP_FOLLOW_UP:
+            if (payload_length != DASHCDG_PTP_FOLLOW_UP_PAYLOAD_SIZE) {
+                return 0;
+            }
+            view->ptp_follow_up.sync_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->ptp_follow_up.reserved = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->ptp_follow_up.origin_time_ms = dashcdg_read_u64(buffer + offset);
+            return 1;
+
+        case DASHCDG_PACKET_PTP_DELAY_REQ:
+            if (payload_length != DASHCDG_PTP_DELAY_REQ_PAYLOAD_SIZE) {
+                return 0;
+            }
+            view->ptp_delay_req.request_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->ptp_delay_req.reserved = dashcdg_read_u32(buffer + offset);
+            return 1;
+
+        case DASHCDG_PACKET_PTP_DELAY_RESP:
+            if (payload_length != DASHCDG_PTP_DELAY_RESP_PAYLOAD_SIZE) {
+                return 0;
+            }
+            view->ptp_delay_resp.request_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->ptp_delay_resp.reserved = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->ptp_delay_resp.request_rx_time_ms = dashcdg_read_u64(buffer + offset);
+            return 1;
+
+        case DASHCDG_PACKET_FEC_PARITY:
+            if (payload_length < 12U) {
+                return 0;
+            }
+            view->fec_parity.stream_type = buffer[offset++];
+            view->fec_parity.group_size = buffer[offset++];
+            view->fec_parity.payload_bytes = buffer[offset++];
+            view->fec_parity.reserved = buffer[offset++];
+            view->fec_parity.group_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->fec_parity.payload_length_xor = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->fec_parity.reserved_b = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            if ((size_t) view->fec_parity.payload_bytes != payload_length - 12U) {
+                return 0;
+            }
+            view->fec_parity.payload_xor = buffer + offset;
             return 1;
 
         default:

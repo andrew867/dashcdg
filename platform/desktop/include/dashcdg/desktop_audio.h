@@ -35,6 +35,17 @@ struct dashcdg_desktop_audio {
     int seek_to_sample;
     uint64_t playback_started_ms;
     int playback_running;
+    int mode;
+    uint32_t stream_sample_rate;
+    uint16_t stream_channels;
+    int64_t stream_base_timestamp_ms;
+    uint64_t stream_played_frames;
+    size_t stream_capacity_frames;
+    size_t stream_read_frame;
+    size_t stream_write_frame;
+    size_t stream_queued_frames;
+    int16_t *stream_pcm;
+    pthread_mutex_t stream_mutex;
 };
 
 struct dashcdg_desktop_audio *dashcdg_desktop_audio_new(void);
@@ -45,5 +56,20 @@ int dashcdg_desktop_audio_get_duration_ms(const struct dashcdg_desktop_audio *au
 void dashcdg_desktop_audio_seek_ms(struct dashcdg_desktop_audio *audio, uint32_t ms);
 int dashcdg_desktop_audio_is_running(const struct dashcdg_desktop_audio *audio);
 int dashcdg_desktop_audio_play(struct dashcdg_desktop_audio *audio);
+int dashcdg_desktop_audio_init_stream(
+        struct dashcdg_desktop_audio *audio,
+        uint32_t sample_rate,
+        uint16_t channels,
+        uint32_t buffer_ms
+);
+int dashcdg_desktop_audio_start_stream(struct dashcdg_desktop_audio *audio);
+void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio);
+size_t dashcdg_desktop_audio_queue_frames(
+        struct dashcdg_desktop_audio *audio,
+        const int16_t *pcm,
+        size_t frame_count,
+        int64_t first_frame_timestamp_ms
+);
+uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *audio);
 
 #endif

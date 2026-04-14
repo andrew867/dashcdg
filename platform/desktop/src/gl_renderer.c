@@ -178,5 +178,4 @@ void dashcdg_gl_renderer_render(struct dashcdg_gl_renderer *renderer, const stru
     glEnd();
 
     glFlush();
-    glutSwapBuffers();
 }
