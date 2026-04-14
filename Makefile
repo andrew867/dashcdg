@@ -14,9 +14,11 @@ UNAME_S := $(shell uname -s 2>/dev/null)
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
 LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lpthread
 NET_LIBS := -lws2_32
+WINDOWS_RUNTIME_DLLS := /mingw64/bin/libfreeglut.dll /mingw64/bin/glew32.dll /mingw64/bin/libportaudio.dll /mingw64/bin/libwinpthread-1.dll
 else
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lpthread
 NET_LIBS :=
+WINDOWS_RUNTIME_DLLS :=
 endif
 
 CORE_SOURCES := core/src/cdg.c core/src/media_clock.c
@@ -47,6 +49,11 @@ desktop-apps: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(RX_BI
 
 dirs:
 	mkdir -p $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR)
+
+bundle-runtime:
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
 
 libs: $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB)
 
@@ -97,12 +104,21 @@ $(TEST_BIN): $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 
 $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
 
 $(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) -lpthread $(NET_LIBS)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f /mingw64/bin/libwinpthread-1.dll $(BIN_DIR)/
+endif
 
 $(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
 
 test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN)
 	$(TEST_BIN)
