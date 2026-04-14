@@ -26,7 +26,7 @@ PROTO_SOURCES := proto/src/protocol.c
 CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_gl_renderer.o
+DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
@@ -40,7 +40,7 @@ RX_BIN := $(BIN_DIR)/desktop-rx
 .PHONY: all debug dirs libs test desktop-apps clean
 
 all: CFLAGS += -O2
-all: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN) $(TX_BIN)
+all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
 
 debug: CFLAGS += -DDEBUG -g
 debug: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN)
@@ -87,6 +87,12 @@ $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 $(OBJ_DIR)/desktop_gl_renderer.o: platform/desktop/src/gl_renderer.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/desktop_app_tx.o: platform/desktop/src/app_tx.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_app_rx.o: platform/desktop/src/app_rx.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/test_core.o: tests/test_core.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -102,20 +108,20 @@ $(OBJ_DIR)/app_desktop_rx.o: apps/desktop-rx/main.c
 $(TEST_BIN): $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 
-$(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+$(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
-$(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) -lpthread $(NET_LIBS)
+$(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f /mingw64/bin/libwinpthread-1.dll $(BIN_DIR)/
 endif
 
-$(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+$(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
