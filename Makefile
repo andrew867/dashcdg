@@ -5,6 +5,8 @@ BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 BIN_DIR := $(BUILD_DIR)/bin
 LIB_DIR := $(BUILD_DIR)/lib
+RELEASE_DIR := $(BUILD_DIR)/release
+WINDOWS_PACKAGE_ZIP := $(RELEASE_DIR)/dashcdg-windows-portable.zip
 
 COMMON_CFLAGS := -Wall -Wextra -Wno-cpp -std=c99 -pedantic -D_FORTIFY_SOURCE=2
 INCLUDES := -Icore/include -Iproto/include -Iplatform/desktop/include -Iinc
@@ -37,7 +39,7 @@ PLAYER_BIN := $(BIN_DIR)/desktop-player
 TX_BIN := $(BIN_DIR)/desktop-tx
 RX_BIN := $(BIN_DIR)/desktop-rx
 
-.PHONY: all debug dirs libs test desktop-apps clean
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime package release clean
 
 all: CFLAGS += -O2
 all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
@@ -48,7 +50,7 @@ debug: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAY
 desktop-apps: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(RX_BIN)
 
 dirs:
-	mkdir -p $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR)
+	mkdir -p $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR) $(RELEASE_DIR)
 
 bundle-runtime:
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
@@ -128,6 +130,16 @@ endif
 
 test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN)
 	$(TEST_BIN)
+
+package: debug
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	rm -f "$(WINDOWS_PACKAGE_ZIP)"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path 'build/bin/*' -DestinationPath 'build/release/dashcdg-windows-portable.zip' -Force"
+else
+	@echo "package target currently supports Windows/MSYS2 desktop bundles only" && false
+endif
+
+release: package
 
 clean:
 	rm -rf $(BUILD_DIR)

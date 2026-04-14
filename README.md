@@ -48,7 +48,7 @@ make debug
 Local desktop player:
 
 ```sh
-build/bin/desktop-player [--shuffle] [<folder> | <file.cdg> [file.mp3]]
+build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]
 ```
 
 Integrated desktop-player network modes:
@@ -64,7 +64,17 @@ Player behavior:
 - With `--shuffle`, it scans a folder and shuffles the playlist order.
 - With a folder path, it scans that folder for `.cdg` files and auto-pairs same-name `.mp3` files when present.
 - With a single `.cdg` file, it still supports individual file playback and auto-detects a sibling `.mp3` when available.
+- With a single `.mp3` file, it looks for a same-name sibling `.cdg` file so Windows Explorer file associations can launch the combined pair.
+- With a bare file stem such as `C:/songs/MyTrack`, it resolves `MyTrack.cdg` and auto-pairs `MyTrack.mp3` when present.
 - With `<file.cdg> <file.mp3>`, it plays that explicit pair.
+
+Windows packaging:
+
+```sh
+make package
+```
+
+This produces `build/release/dashcdg-windows-portable.zip`, a portable bundle containing the desktop binaries and required runtime DLLs from `build/bin`.
 
 Desktop multicast transmitter:
 
