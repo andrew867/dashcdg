@@ -51,6 +51,13 @@ Local desktop player:
 build/bin/desktop-player [--shuffle] [<folder> | <file.cdg> [file.mp3]]
 ```
 
+Integrated desktop-player network modes:
+
+```sh
+build/bin/desktop-player tx [--display] <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]
+build/bin/desktop-player rx <multicast-address> <port> [local.mp3]
+```
+
 Player behavior:
 
 - With no path, it scans the local `cdg/` folder and plays tracks sequentially.
@@ -62,14 +69,19 @@ Player behavior:
 Desktop multicast transmitter:
 
 ```sh
-build/bin/desktop-tx <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]
+build/bin/desktop-tx [--display] <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]
 ```
 
 Desktop multicast receiver:
 
 ```sh
-build/bin/desktop-rx <multicast-address> <port> <local.mp3>
+build/bin/desktop-rx <multicast-address> <port> [local.mp3]
 ```
+
+TX preview behavior:
+
+- `--display` opens a local OpenGL preview while the sender is broadcasting.
+- Press `v` in the TX preview window to blank/unblank the local preview without stopping the network transmitter.
 
 ## Notes
 

@@ -14,6 +14,7 @@
 #include "dashcdg/file_io.h"
 #include "dashcdg/gl_renderer.h"
 #include "dashcdg/media_clock.h"
+#include "dashcdg/app_modes.h"
 
 #define DASHCDG_ATOMIC_GET(value) (__atomic_load_n(&(value), __ATOMIC_RELAXED))
 #define DASHCDG_ATOMIC_SET(value, next) __atomic_store_n(&(value), (next), __ATOMIC_RELAXED)
@@ -620,8 +621,17 @@ int main(int argc, char **argv) {
     srand((unsigned int) time(NULL));
     dashcdg_cdg_reader_init(&g_reader);
 
+    if (argc > 1 && strcmp(argv[1], "tx") == 0) {
+        return dashcdg_desktop_tx_main(argc - 1, argv + 1);
+    }
+    if (argc > 1 && strcmp(argv[1], "rx") == 0) {
+        return dashcdg_desktop_rx_main(argc - 1, argv + 1);
+    }
+
     if (!dashcdg_parse_args(&g_playlist, argc, argv)) {
         fprintf(stderr, "usage: %s [--shuffle] [<folder> | <file.cdg> [file.mp3]]\n", argv[0]);
+        fprintf(stderr, "   or: %s tx [--display] <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]\n", argv[0]);
+        fprintf(stderr, "   or: %s rx <multicast-address> <port> [local.mp3]\n", argv[0]);
         fprintf(stderr, "with no path, the default folder '%s' is scanned.\n", DASHCDG_DEFAULT_LIBRARY_DIR);
         return 1;
     }
