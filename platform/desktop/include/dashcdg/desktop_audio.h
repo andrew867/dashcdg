@@ -41,7 +41,9 @@ struct dashcdg_desktop_audio *dashcdg_desktop_audio_new(void);
 void dashcdg_desktop_audio_free(struct dashcdg_desktop_audio *audio);
 int dashcdg_desktop_audio_load_file(struct dashcdg_desktop_audio *audio, const char *path);
 int dashcdg_desktop_audio_get_pos_ms(struct dashcdg_desktop_audio *audio);
+int dashcdg_desktop_audio_get_duration_ms(const struct dashcdg_desktop_audio *audio);
 void dashcdg_desktop_audio_seek_ms(struct dashcdg_desktop_audio *audio, uint32_t ms);
+int dashcdg_desktop_audio_is_running(const struct dashcdg_desktop_audio *audio);
 int dashcdg_desktop_audio_play(struct dashcdg_desktop_audio *audio);
 
 #endif

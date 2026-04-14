@@ -225,6 +225,15 @@ int dashcdg_desktop_audio_get_pos_ms(struct dashcdg_desktop_audio *audio) {
     return (int) ((float) audio->pcm->index / samples_per_ms / (float) audio->file_info.channels);
 }
 
+int dashcdg_desktop_audio_get_duration_ms(const struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL || audio->file_info.hz == 0 || audio->file_info.channels == 0) {
+        return 0;
+    }
+
+    return (int) (((uint64_t) audio->file_info.samples * 1000ULL) /
+            ((uint64_t) audio->file_info.hz * (uint64_t) audio->file_info.channels));
+}
+
 void dashcdg_desktop_audio_seek_ms(struct dashcdg_desktop_audio *audio, uint32_t ms) {
     if (audio == NULL) {
         return;
@@ -233,13 +242,23 @@ void dashcdg_desktop_audio_seek_ms(struct dashcdg_desktop_audio *audio, uint32_t
     DASHCDG_ATOMIC_SET(audio->seek_to_sample, (int) dashcdg_ms_to_sample_index(audio, ms));
 }
 
+int dashcdg_desktop_audio_is_running(const struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return 0;
+    }
+
+    return DASHCDG_ATOMIC_GET(audio->playback_running);
+}
+
 int dashcdg_desktop_audio_play(struct dashcdg_desktop_audio *audio) {
     if (audio == NULL) {
         return 0;
     }
 
 #if DASHCDG_HAVE_PORTAUDIO
+    DASHCDG_ATOMIC_SET(audio->playback_running, 1);
     if (!dashcdg_desktop_audio_create_stream(audio)) {
+        DASHCDG_ATOMIC_SET(audio->playback_running, 0);
         return 0;
     }
 
@@ -247,17 +266,20 @@ int dashcdg_desktop_audio_play(struct dashcdg_desktop_audio *audio) {
         Pa_Sleep(50);
     }
 
+    if (audio->stream != NULL) {
+        Pa_CloseStream(audio->stream);
+        audio->stream = NULL;
+        Pa_Terminate();
+    }
+
+    DASHCDG_ATOMIC_SET(audio->playback_running, 0);
     return 1;
 #else
     uint64_t started_at_ms = dashcdg_clock_now_ms();
     uint32_t base_pos_ms = (uint32_t) dashcdg_desktop_audio_get_pos_ms(audio);
-    uint32_t duration_ms = (uint32_t) dashcdg_desktop_audio_get_pos_ms(audio);
+    uint32_t duration_ms = (uint32_t) dashcdg_desktop_audio_get_duration_ms(audio);
 
-    audio->playback_running = 1;
-    if (audio->file_info.hz != 0) {
-        duration_ms = (uint32_t) (((uint64_t) audio->file_info.samples * 1000ULL) /
-                ((uint64_t) audio->file_info.hz * (uint64_t) audio->file_info.channels));
-    }
+    DASHCDG_ATOMIC_SET(audio->playback_running, 1);
 
     while (audio->playback_running) {
         int seek_to_sample = DASHCDG_ATOMIC_GET(audio->seek_to_sample);
@@ -282,7 +304,7 @@ int dashcdg_desktop_audio_play(struct dashcdg_desktop_audio *audio) {
         dashcdg_sleep_ms(10);
     }
 
-    audio->playback_running = 0;
+    DASHCDG_ATOMIC_SET(audio->playback_running, 0);
     return 1;
 #endif
 }

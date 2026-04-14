@@ -48,10 +48,16 @@ make debug
 Local desktop player:
 
 ```sh
-build/bin/desktop-player <file.cdg> [file.mp3]
+build/bin/desktop-player [--shuffle] [<folder> | <file.cdg> [file.mp3]]
 ```
 
-If you pass only a `.cdg` file, the player runs in CDG-only validation mode using the native CD+G packet clock instead of audio playback. This is useful for graphics-only samples such as files in the local `cdg/` folder.
+Player behavior:
+
+- With no path, it scans the local `cdg/` folder and plays tracks sequentially.
+- With `--shuffle`, it scans a folder and shuffles the playlist order.
+- With a folder path, it scans that folder for `.cdg` files and auto-pairs same-name `.mp3` files when present.
+- With a single `.cdg` file, it still supports individual file playback and auto-detects a sibling `.mp3` when available.
+- With `<file.cdg> <file.mp3>`, it plays that explicit pair.
 
 Desktop multicast transmitter:
 
