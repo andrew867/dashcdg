@@ -33,6 +33,12 @@ struct dashcdg_playlist {
     int shuffle;
 };
 
+static int dashcdg_playlist_add_track(
+        struct dashcdg_playlist *playlist,
+        const char *cdg_path,
+        const char *mp3_path
+);
+
 static struct dashcdg_cdg_reader g_reader;
 static struct dashcdg_desktop_audio *g_audio;
 static struct dashcdg_gl_renderer g_renderer;
@@ -221,6 +227,67 @@ static char *dashcdg_find_matching_mp3(const char *cdg_path) {
     return candidate;
 }
 
+static char *dashcdg_find_matching_cdg(const char *mp3_path) {
+    char *candidate = dashcdg_replace_extension(mp3_path, ".cdg");
+
+    if (candidate == NULL) {
+        return NULL;
+    }
+
+    if (!dashcdg_path_exists(candidate)) {
+        free(candidate);
+        return NULL;
+    }
+
+    return candidate;
+}
+
+static int dashcdg_playlist_add_auto_paired_track(
+        struct dashcdg_playlist *playlist,
+        const char *path
+) {
+    char *cdg_path = NULL;
+    char *mp3_path = NULL;
+    int ok = 0;
+
+    if (playlist == NULL || path == NULL) {
+        return 0;
+    }
+
+    if (dashcdg_ends_with_ignore_case(path, ".cdg")) {
+        cdg_path = dashcdg_strdup(path);
+        mp3_path = dashcdg_find_matching_mp3(path);
+    } else if (dashcdg_ends_with_ignore_case(path, ".mp3")) {
+        mp3_path = dashcdg_strdup(path);
+        cdg_path = dashcdg_find_matching_cdg(path);
+    } else {
+        cdg_path = dashcdg_replace_extension(path, ".cdg");
+        if (cdg_path != NULL && dashcdg_path_exists(cdg_path)) {
+            mp3_path = dashcdg_find_matching_mp3(cdg_path);
+        } else {
+            free(cdg_path);
+            cdg_path = dashcdg_replace_extension(path, ".mp3");
+            if (cdg_path != NULL && dashcdg_path_exists(cdg_path)) {
+                mp3_path = cdg_path;
+                cdg_path = dashcdg_find_matching_cdg(mp3_path);
+            } else {
+                free(cdg_path);
+                cdg_path = NULL;
+            }
+        }
+    }
+
+    if (cdg_path == NULL) {
+        free(mp3_path);
+        return 0;
+    }
+
+    ok = dashcdg_playlist_add_track(playlist, cdg_path, mp3_path);
+    free(cdg_path);
+    free(mp3_path);
+    return ok;
+}
+
 static void dashcdg_free_track(struct dashcdg_track *track) {
     if (track == NULL) {
         return;
@@ -389,25 +456,19 @@ static int dashcdg_parse_args(struct dashcdg_playlist *playlist, int argc, char 
             return dashcdg_playlist_from_directory(playlist, positionals[0]);
         }
 
-        if (!dashcdg_ends_with_ignore_case(positionals[0], ".cdg")) {
-            return 0;
-        }
-
-        {
-            char *mp3_path = dashcdg_find_matching_mp3(positionals[0]);
-            int ok = dashcdg_playlist_add_track(playlist, positionals[0], mp3_path);
-
-            free(mp3_path);
-            return ok;
-        }
+        return dashcdg_playlist_add_auto_paired_track(playlist, positionals[0]);
     }
 
     if (positional_count == 2) {
-        if (!dashcdg_ends_with_ignore_case(positionals[0], ".cdg")) {
-            return 0;
+        if (dashcdg_ends_with_ignore_case(positionals[0], ".cdg")) {
+            return dashcdg_playlist_add_track(playlist, positionals[0], positionals[1]);
         }
 
-        return dashcdg_playlist_add_track(playlist, positionals[0], positionals[1]);
+        if (dashcdg_ends_with_ignore_case(positionals[1], ".cdg")) {
+            return dashcdg_playlist_add_track(playlist, positionals[1], positionals[0]);
+        }
+
+        return 0;
     }
 
     return 0;
@@ -629,10 +690,11 @@ int main(int argc, char **argv) {
     }
 
     if (!dashcdg_parse_args(&g_playlist, argc, argv)) {
-        fprintf(stderr, "usage: %s [--shuffle] [<folder> | <file.cdg> [file.mp3]]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]\n", argv[0]);
         fprintf(stderr, "   or: %s tx [--display] <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]\n", argv[0]);
         fprintf(stderr, "   or: %s rx <multicast-address> <port> [local.mp3]\n", argv[0]);
         fprintf(stderr, "with no path, the default folder '%s' is scanned.\n", DASHCDG_DEFAULT_LIBRARY_DIR);
+        fprintf(stderr, "single-file opens accept .cdg, .mp3, or a stem and auto-pair sibling media when present.\n");
         return 1;
     }
 
