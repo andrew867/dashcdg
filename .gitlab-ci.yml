@@ -1,0 +1,54 @@
+stages:
+  - build
+  - test
+
+default:
+  image: debian:bookworm
+  before_script:
+    - apt-get update
+    - apt-get install -y make gcc binutils libc6-dev
+  cache:
+    key:
+      files:
+        - Makefile
+    paths:
+      - build/
+
+core_build:
+  stage: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE'
+  script:
+    - make
+  artifacts:
+    paths:
+      - build/bin/test-core
+      - build/bin/desktop-tx
+      - build/lib/
+    expire_in: 1 week
+
+core_test:
+  stage: test
+  needs:
+    - core_build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE'
+  script:
+    - make test
+
+desktop_build:
+  stage: build
+  needs:
+    - core_build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  before_script:
+    - apt-get update
+    - apt-get install -y make gcc binutils libc6-dev libglew-dev freeglut3-dev portaudio19-dev
+  script:
+    - make desktop-apps
+  artifacts:
+    paths:
+      - build/bin/desktop-player
+      - build/bin/desktop-rx
+    expire_in: 1 week
