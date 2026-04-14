@@ -54,7 +54,7 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Integrated desktop-player network modes:
 
 ```sh
-build/bin/desktop-player tx [--display] <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]
+build/bin/desktop-player tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
 build/bin/desktop-player rx <multicast-address> <port> [local.mp3]
 ```
 
@@ -79,7 +79,7 @@ This produces `build/release/dashcdg-windows-portable.zip`, a portable bundle co
 Desktop multicast transmitter:
 
 ```sh
-build/bin/desktop-tx [--display] <multicast-address> <port> <song-id> <file.cdg> [warmup-ms]
+build/bin/desktop-tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
 ```
 
 Desktop multicast receiver:
@@ -92,6 +92,8 @@ TX preview behavior:
 
 - `--display` opens a local OpenGL preview while the sender is broadcasting.
 - Press `v` in the TX preview window to blank/unblank the local preview without stopping the network transmitter.
+- The transmitter accepts a single `.cdg`, `.mp3`, bare stem, or a folder of tracks; paired sibling media is treated as one `MP3+G` session and CDG-only tracks fall back to graphics-only timing.
+- Foreground TX controls are line-based: `p` play/pause, `n` next, `b` back, `r` restart, `f` force asset rebroadcast, `s` status, `v` preview toggle, `q` quit.
 
 ## Notes
 

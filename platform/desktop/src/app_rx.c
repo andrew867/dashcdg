@@ -30,8 +30,12 @@ struct receiver_state {
     size_t chunk_count;
     size_t received_chunks;
     uint64_t session_start_ms;
+    uint64_t playback_base_ms;
+    uint64_t playback_base_sender_ms;
+    char song_id[DASHCDG_MAX_SONG_ID];
     int reader_ready;
     int have_clock;
+    int playback_paused;
 };
 
 static struct receiver_state g_receiver;
@@ -51,8 +55,12 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->chunk_count = 0;
     state->received_chunks = 0;
     state->session_start_ms = 0;
+    state->playback_base_ms = 0;
+    state->playback_base_sender_ms = 0;
     state->reader_ready = 0;
     state->have_clock = 0;
+    state->playback_paused = 0;
+    memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
     dashcdg_cdg_reader_init(&state->reader);
@@ -109,15 +117,32 @@ static void receiver_state_try_finalize(struct receiver_state *state) {
     }
 
     state->reader_ready = 1;
+    fprintf(stdout, "[rx] asset ready for %s\n", state->song_id[0] == '\0' ? "<unknown>" : state->song_id);
+    fflush(stdout);
 }
 
 static void handle_announce(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    int song_changed = strcmp(state->song_id, view->announce.song_id) != 0;
+    int session_changed = state->session_start_ms != 0 && state->session_start_ms != view->announce.session_start_ms;
+    int asset_changed = state->asset_size != view->announce.asset_size ||
+            state->chunk_size != (view->announce.chunk_size == 0 ? DASHCDG_MAX_ASSET_CHUNK : view->announce.chunk_size);
+
+    if (song_changed || session_changed || asset_changed) {
+        receiver_state_reset(state);
+    }
+
     receiver_state_prepare_asset(
             state,
             view->announce.asset_size,
             view->announce.chunk_size == 0 ? DASHCDG_MAX_ASSET_CHUNK : view->announce.chunk_size
     );
+    strncpy(state->song_id, view->announce.song_id, sizeof(state->song_id) - 1U);
     state->session_start_ms = view->announce.session_start_ms;
+
+    if (song_changed || session_changed || asset_changed) {
+        fprintf(stdout, "[rx] announced %s (%u bytes)\n", state->song_id, view->announce.asset_size);
+        fflush(stdout);
+    }
 }
 
 static void handle_asset_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -155,6 +180,9 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
     );
     state->have_clock = 1;
     state->session_start_ms = view->clock_beacon.session_start_ms;
+    state->playback_base_ms = view->clock_beacon.playback_ms;
+    state->playback_base_sender_ms = view->header.sender_time_ms;
+    state->playback_paused = (view->header.flags & DASHCDG_PACKET_FLAG_PAUSED) != 0;
 }
 
 static void *network_thread(void *user_data) {
@@ -237,16 +265,25 @@ static void *audio_thread(void *unused) {
 
     for (;;) {
         int should_start = 0;
+        uint64_t start_ms = 0;
 
         pthread_mutex_lock(&g_receiver.mutex);
-        if (g_receiver.have_clock && g_receiver.session_start_ms > 0) {
+        if (g_receiver.have_clock && g_receiver.reader_ready) {
             uint64_t local_now_ms = dashcdg_clock_now_ms();
             int64_t sender_now_ms = dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
-            should_start = sender_now_ms >= (int64_t) g_receiver.session_start_ms;
+
+            if (sender_now_ms >= (int64_t) g_receiver.playback_base_sender_ms) {
+                start_ms = g_receiver.playback_base_ms;
+                if (!g_receiver.playback_paused) {
+                    start_ms += (uint64_t) (sender_now_ms - (int64_t) g_receiver.playback_base_sender_ms);
+                }
+                should_start = start_ms > 0 || g_receiver.session_start_ms == 0;
+            }
         }
         pthread_mutex_unlock(&g_receiver.mutex);
 
         if (should_start) {
+            dashcdg_desktop_audio_seek_ms(g_audio, (uint32_t) start_ms);
             break;
         }
 
@@ -264,15 +301,18 @@ static void display(void) {
     int should_start_audio = 0;
 
     pthread_mutex_lock(&g_receiver.mutex);
-    if (g_receiver.have_clock && g_receiver.session_start_ms > 0) {
+    if (g_receiver.have_clock) {
         int64_t sender_now_ms = dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
 
-        if (sender_now_ms > (int64_t) g_receiver.session_start_ms) {
-            playback_ms = (int) (sender_now_ms - (int64_t) g_receiver.session_start_ms);
+        if (sender_now_ms >= (int64_t) g_receiver.playback_base_sender_ms) {
+            playback_ms = (int) g_receiver.playback_base_ms;
+            if (!g_receiver.playback_paused) {
+                playback_ms += (int) (sender_now_ms - (int64_t) g_receiver.playback_base_sender_ms);
+            }
         }
     }
 
-    if (g_audio != NULL && DASHCDG_ATOMIC_GET(g_audio->timestamp_ms) >= 0) {
+    if (!g_receiver.playback_paused && g_audio != NULL && DASHCDG_ATOMIC_GET(g_audio->timestamp_ms) >= 0) {
         playback_ms = DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
     }
 
@@ -312,6 +352,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     g_multicast_address = argv[1];
     port = atoi(argv[2]);
     g_mp3_path = argc == 4 ? argv[3] : NULL;
+
+    fprintf(stdout, "[rx] listening on %s:%d%s\n", g_multicast_address, port, g_mp3_path != NULL ? " with local MP3" : "");
+    fflush(stdout);
 
     if (!dashcdg_net_init()) {
         fprintf(stderr, "failed to initialize network stack\n");
