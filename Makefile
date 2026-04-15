@@ -25,7 +25,7 @@ else
 WINDOWS_RUNTIME_DLLS :=
 endif
 LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lopus -lpthread
-NET_LIBS := -lws2_32
+NET_LIBS := -lws2_32 -liphlpapi
 else
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread
 NET_LIBS :=

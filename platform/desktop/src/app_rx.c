@@ -205,6 +205,62 @@ static int dashcdg_rx_parse_ipv4_address(const char *value, struct in_addr *out_
     return inet_pton(AF_INET, value, out_addr) == 1;
 }
 
+static void dashcdg_rx_format_multicast_interface(
+        const struct dashcdg_multicast_interface *interface_info,
+        char *buffer,
+        size_t buffer_size
+) {
+    char address_buffer[INET_ADDRSTRLEN];
+    const char *interface_kind = "multicast";
+
+    if (buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    buffer[0] = '\0';
+    if (interface_info == NULL) {
+        return;
+    }
+
+    if (interface_info->is_ethernet) {
+        interface_kind = "ethernet";
+    } else if (interface_info->is_wifi) {
+        interface_kind = "wi-fi";
+    } else if (interface_info->is_tailscale) {
+        interface_kind = "tailscale";
+    }
+
+    if (inet_ntop(AF_INET, &interface_info->ipv4_addr, address_buffer, sizeof(address_buffer)) == NULL) {
+        strncpy(address_buffer, "unknown", sizeof(address_buffer) - 1U);
+        address_buffer[sizeof(address_buffer) - 1U] = '\0';
+    }
+    snprintf(buffer, buffer_size, "%s (%s %s)", interface_info->name, interface_kind, address_buffer);
+}
+
+static size_t dashcdg_rx_join_multicast_interfaces(
+        dashcdg_socket_t sockfd,
+        const struct in_addr *group_addr,
+        const struct dashcdg_multicast_interface *interfaces,
+        size_t interface_count
+) {
+    size_t joined = 0U;
+
+    if (sockfd == DASHCDG_INVALID_SOCKET || group_addr == NULL) {
+        return 0U;
+    }
+
+    if (interfaces != NULL) {
+        for (size_t i = 0U; i < interface_count; ++i) {
+            if (dashcdg_net_join_multicast_group(sockfd, group_addr, &interfaces[i].ipv4_addr)) {
+                ++joined;
+            }
+        }
+    }
+    if (joined == 0U && dashcdg_net_join_multicast_group(sockfd, group_addr, NULL)) {
+        joined = 1U;
+    }
+    return joined;
+}
+
 static int dashcdg_rx_ipv4_is_multicast(const struct in_addr *address) {
     uint32_t host_order;
 
@@ -1757,6 +1813,9 @@ static void *network_thread(void *user_data) {
     struct sockaddr_in sender_addr;
     socklen_t sender_addr_len;
     uint8_t buffer[DASHCDG_MAX_PACKET_SIZE];
+    struct dashcdg_multicast_interface multicast_interfaces[DASHCDG_MAX_MULTICAST_INTERFACES];
+    size_t multicast_interface_count = 0U;
+    size_t joined_interface_count = 0U;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd == DASHCDG_INVALID_SOCKET) {
@@ -1786,14 +1845,39 @@ static void *network_thread(void *user_data) {
     }
 
     if (g_endpoint_is_multicast) {
-        struct ip_mreq membership;
-
-        membership.imr_multiaddr = g_endpoint_in_addr;
-        membership.imr_interface.s_addr = htonl(INADDR_ANY);
-        if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *) &membership, sizeof(membership)) != 0) {
+        multicast_interface_count = dashcdg_net_list_multicast_interfaces(
+                multicast_interfaces,
+                DASHCDG_MAX_MULTICAST_INTERFACES
+        );
+        if (multicast_interface_count > 0U &&
+                !dashcdg_net_set_multicast_interface(sockfd, &multicast_interfaces[0].ipv4_addr)) {
+            perror("IP_MULTICAST_IF");
+            dashcdg_socket_close(sockfd);
+            return NULL;
+        }
+        joined_interface_count = dashcdg_rx_join_multicast_interfaces(
+                sockfd,
+                &g_endpoint_in_addr,
+                multicast_interfaces,
+                multicast_interface_count
+        );
+        if (joined_interface_count == 0U) {
             perror("IP_ADD_MEMBERSHIP");
             dashcdg_socket_close(sockfd);
             return NULL;
+        }
+        if (multicast_interface_count > 0U) {
+            char preferred_interface[192];
+
+            dashcdg_rx_format_multicast_interface(&multicast_interfaces[0], preferred_interface, sizeof(preferred_interface));
+            fprintf(
+                    stdout,
+                    "[rx] multicast preferred interface: %s (joined on %u interface%s)\n",
+                    preferred_interface,
+                    (unsigned int) joined_interface_count,
+                    joined_interface_count == 1U ? "" : "s"
+            );
+            fflush(stdout);
         }
     }
 

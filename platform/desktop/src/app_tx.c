@@ -829,6 +829,62 @@ static int dashcdg_tx_parse_ipv4_address(const char *value, struct in_addr *out_
     return inet_pton(AF_INET, value, out_addr) == 1;
 }
 
+static void dashcdg_tx_format_multicast_interface(
+        const struct dashcdg_multicast_interface *interface_info,
+        char *buffer,
+        size_t buffer_size
+) {
+    char address_buffer[INET_ADDRSTRLEN];
+    const char *interface_kind = "multicast";
+
+    if (buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    buffer[0] = '\0';
+    if (interface_info == NULL) {
+        return;
+    }
+
+    if (interface_info->is_ethernet) {
+        interface_kind = "ethernet";
+    } else if (interface_info->is_wifi) {
+        interface_kind = "wi-fi";
+    } else if (interface_info->is_tailscale) {
+        interface_kind = "tailscale";
+    }
+
+    if (inet_ntop(AF_INET, &interface_info->ipv4_addr, address_buffer, sizeof(address_buffer)) == NULL) {
+        strncpy(address_buffer, "unknown", sizeof(address_buffer) - 1U);
+        address_buffer[sizeof(address_buffer) - 1U] = '\0';
+    }
+    snprintf(buffer, buffer_size, "%s (%s %s)", interface_info->name, interface_kind, address_buffer);
+}
+
+static size_t dashcdg_tx_join_multicast_interfaces(
+        dashcdg_socket_t sockfd,
+        const struct in_addr *group_addr,
+        const struct dashcdg_multicast_interface *interfaces,
+        size_t interface_count
+) {
+    size_t joined = 0U;
+
+    if (sockfd == DASHCDG_INVALID_SOCKET || group_addr == NULL) {
+        return 0U;
+    }
+
+    if (interfaces != NULL) {
+        for (size_t i = 0U; i < interface_count; ++i) {
+            if (dashcdg_net_join_multicast_group(sockfd, group_addr, &interfaces[i].ipv4_addr)) {
+                ++joined;
+            }
+        }
+    }
+    if (joined == 0U && dashcdg_net_join_multicast_group(sockfd, group_addr, NULL)) {
+        joined = 1U;
+    }
+    return joined;
+}
+
 static int dashcdg_tx_ipv4_is_multicast(const struct in_addr *address) {
     uint32_t host_order;
 
@@ -2579,6 +2635,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     int is_broadcast;
     pthread_t render_thread;
     struct dashcdg_tx_glut_bootstrap render_bootstrap;
+    struct dashcdg_multicast_interface multicast_interfaces[DASHCDG_MAX_MULTICAST_INTERFACES];
+    size_t multicast_interface_count = 0U;
+    size_t joined_interface_count = 0U;
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
@@ -2676,6 +2735,12 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 
     is_multicast = dashcdg_tx_ipv4_is_multicast(&destination_addr);
     is_broadcast = dashcdg_tx_ipv4_is_broadcast(&destination_addr);
+    if (is_multicast) {
+        multicast_interface_count = dashcdg_net_list_multicast_interfaces(
+                multicast_interfaces,
+                DASHCDG_MAX_MULTICAST_INTERFACES
+        );
+    }
 
     if (dashcdg_path_is_directory(source_path)) {
         if (!dashcdg_tx_playlist_from_directory(&g_tx_state.playlist, source_path)) {
@@ -2704,6 +2769,12 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     if (is_multicast) {
+        if (multicast_interface_count > 0U &&
+                !dashcdg_net_set_multicast_interface(g_tx_state.sockfd, &multicast_interfaces[0].ipv4_addr)) {
+            perror("IP_MULTICAST_IF");
+            dashcdg_tx_cleanup();
+            return 1;
+        }
         if (setsockopt(g_tx_state.sockfd, IPPROTO_IP, IP_MULTICAST_TTL, (const char *) &ttl, sizeof(ttl)) != 0) {
             perror("setsockopt");
             dashcdg_tx_cleanup();
@@ -2763,17 +2834,13 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
 
         if (is_multicast) {
-            struct ip_mreq membership;
-
-            membership.imr_multiaddr = g_tx_state.destination.sin_addr;
-            membership.imr_interface.s_addr = htonl(INADDR_ANY);
-            if (setsockopt(
+            joined_interface_count = dashcdg_tx_join_multicast_interfaces(
                     g_tx_state.ptp_sockfd,
-                    IPPROTO_IP,
-                    IP_ADD_MEMBERSHIP,
-                    (const char *) &membership,
-                    sizeof(membership)
-            ) != 0) {
+                    &g_tx_state.destination.sin_addr,
+                    multicast_interfaces,
+                    multicast_interface_count
+            );
+            if (joined_interface_count == 0U) {
                 perror("IP_ADD_MEMBERSHIP");
                 dashcdg_tx_cleanup();
                 return 1;
@@ -2788,6 +2855,18 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
+    if (is_multicast && multicast_interface_count > 0U) {
+        char preferred_interface[192];
+
+        dashcdg_tx_format_multicast_interface(&multicast_interfaces[0], preferred_interface, sizeof(preferred_interface));
+        fprintf(
+                stdout,
+                "[tx] multicast preferred interface: %s (joined PTP listener on %u interface%s)\n",
+                preferred_interface,
+                (unsigned int) joined_interface_count,
+                joined_interface_count == 1U ? "" : "s"
+        );
+    }
     fflush(stdout);
 
     pthread_create(&g_tx_state.audio_thread, NULL, dashcdg_tx_audio_thread_main, NULL);
