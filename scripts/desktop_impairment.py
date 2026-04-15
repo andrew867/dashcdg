@@ -24,6 +24,8 @@ class Counters:
     bytes_received: int = 0
     bytes_forwarded: int = 0
     pending_flushes: int = 0
+    throttle_events: int = 0
+    throttle_sleep_ms: int = 0
 
 
 @dataclass
@@ -61,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
   python scripts/desktop_impairment.py --listen-group 239.255.77.91 --listen-port 24684 --emit-group 239.255.77.92 --emit-port 24685 --reorder-every 9 --reorder-hold-ms 80
   python scripts/desktop_impairment.py --listen-group 239.255.77.91 --listen-port 24684 --emit-group 239.255.77.92 --emit-port 24685 --burst-every 25 --burst-length 3
   python scripts/desktop_impairment.py --listen-group 239.255.77.91 --listen-port 24684 --emit-group 239.255.77.92 --emit-port 24685 --drop-every 6 --reorder-every 11 --max-packets 200
+  python scripts/desktop_impairment.py --listen-group 239.255.77.91 --listen-port 24684 --emit-group 239.255.77.92 --emit-port 24685 --max-bytes-per-second 112500
 """
     parser = argparse.ArgumentParser(
         description="Relay multicast UDP with deterministic loss, reorder, and burst-loss impairments.",
@@ -78,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reorder-every", type=positive_int, default=0, help="Hold every Nth accepted packet and release it after the next accepted packet.")
     parser.add_argument("--reorder-hold-ms", type=non_negative_int, default=80, help="Flush held reorder packet after this many ms if no later packet arrives. Default: 80.")
     parser.add_argument("--ttl", type=positive_int, default=1, help="Multicast TTL for emitted packets. Default: 1.")
+    parser.add_argument(
+        "--max-bytes-per-second",
+        type=non_negative_int,
+        default=0,
+        help="Throttle emitted traffic to this many bytes/sec. Default: unlimited.",
+    )
     parser.add_argument("--max-packets", type=positive_int, default=0, help="Stop after this many received packets. Default: run until interrupted.")
     parser.add_argument("--stats-interval-ms", type=positive_int, default=1000, help="Print stats every N ms. Default: 1000.")
     parser.add_argument("--seed", type=int, default=0, help="Seed for repeatable random drop decisions. Default: 0.")
@@ -114,6 +123,7 @@ def print_config(args: argparse.Namespace) -> None:
         f" reorder_every={args.reorder_every}"
         f" reorder_hold_ms={args.reorder_hold_ms}"
         f" ttl={args.ttl}"
+        f" max_bytes_per_second={args.max_bytes_per_second}"
         f" max_packets={args.max_packets}"
         f" seed={args.seed}"
     )
@@ -124,12 +134,26 @@ def emit_packet(
     destination: tuple[str, int],
     payload: bytes,
     counters: Counters,
-) -> None:
+    max_bytes_per_second: int,
+    next_send_time: float,
+) -> float:
+    if max_bytes_per_second > 0:
+        now = time.monotonic()
+        send_at = max(now, next_send_time)
+        if send_at > now:
+            sleep_seconds = send_at - now
+            time.sleep(sleep_seconds)
+            counters.throttle_events += 1
+            counters.throttle_sleep_ms += int(sleep_seconds * 1000.0)
+
     sent = sock.sendto(payload, destination)
     if sent != len(payload):
         raise RuntimeError(f"short send: sent {sent} of {len(payload)} bytes")
     counters.forwarded += 1
     counters.bytes_forwarded += sent
+    if max_bytes_per_second > 0:
+        return max(time.monotonic(), next_send_time) + (sent / float(max_bytes_per_second))
+    return next_send_time
 
 
 def maybe_flush_pending(
@@ -138,12 +162,21 @@ def maybe_flush_pending(
     pending: Optional[PendingPacket],
     counters: Counters,
     now: float,
-) -> Optional[PendingPacket]:
+    max_bytes_per_second: int,
+    next_send_time: float,
+) -> tuple[Optional[PendingPacket], float]:
     if pending is not None and now >= pending.release_at:
-        emit_packet(output_sock, destination, pending.payload, counters)
+        next_send_time = emit_packet(
+            output_sock,
+            destination,
+            pending.payload,
+            counters,
+            max_bytes_per_second,
+            next_send_time,
+        )
         counters.pending_flushes += 1
-        return None
-    return pending
+        return None, next_send_time
+    return pending, next_send_time
 
 
 def print_stats(counters: Counters, started_at: float) -> None:
@@ -156,6 +189,8 @@ def print_stats(counters: Counters, started_at: float) -> None:
         f" burst_dropped={counters.burst_dropped}"
         f" reordered={counters.reordered}"
         f" pending_flushes={counters.pending_flushes}"
+        f" throttle_events={counters.throttle_events}"
+        f" throttle_sleep_ms={counters.throttle_sleep_ms}"
         f" bytes_in={counters.bytes_received}"
         f" bytes_out={counters.bytes_forwarded}"
         f" elapsed_ms={elapsed_ms}"
@@ -171,6 +206,7 @@ def run(args: argparse.Namespace) -> int:
     destination = (args.emit_group, args.emit_port)
     started_at = time.monotonic()
     last_report_at = started_at
+    next_send_time = started_at
 
     print_config(args)
     if args.dry_run:
@@ -185,7 +221,15 @@ def run(args: argparse.Namespace) -> int:
     try:
         while True:
             now = time.monotonic()
-            pending = maybe_flush_pending(output_sock, destination, pending, counters, now)
+            pending, next_send_time = maybe_flush_pending(
+                output_sock,
+                destination,
+                pending,
+                counters,
+                now,
+                args.max_bytes_per_second,
+                next_send_time,
+            )
 
             if args.max_packets and counters.received >= args.max_packets:
                 break
@@ -234,14 +278,43 @@ def run(args: argparse.Namespace) -> int:
                 counters.reordered += 1
                 continue
 
-            emit_packet(output_sock, destination, payload, counters)
+            next_send_time = emit_packet(
+                output_sock,
+                destination,
+                payload,
+                counters,
+                args.max_bytes_per_second,
+                next_send_time,
+            )
             if pending is not None:
-                emit_packet(output_sock, destination, pending.payload, counters)
+                next_send_time = emit_packet(
+                    output_sock,
+                    destination,
+                    pending.payload,
+                    counters,
+                    args.max_bytes_per_second,
+                    next_send_time,
+                )
                 pending = None
 
-        pending = maybe_flush_pending(output_sock, destination, pending, counters, time.monotonic() + 3600.0)
+        pending, next_send_time = maybe_flush_pending(
+            output_sock,
+            destination,
+            pending,
+            counters,
+            time.monotonic() + 3600.0,
+            args.max_bytes_per_second,
+            next_send_time,
+        )
         if pending is not None:
-            emit_packet(output_sock, destination, pending.payload, counters)
+            emit_packet(
+                output_sock,
+                destination,
+                pending.payload,
+                counters,
+                args.max_bytes_per_second,
+                next_send_time,
+            )
         print("relay: finished")
         print_stats(counters, started_at)
         return 0

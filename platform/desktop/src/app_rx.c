@@ -19,6 +19,7 @@
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
+#include "dashcdg/sbc_like_codec.h"
 #include "dashcdg/stream_runtime.h"
 
 #define DASHCDG_ATOMIC_GET(value) (__atomic_load_n(&(value), __ATOMIC_RELAXED))
@@ -38,6 +39,9 @@
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
         DASHCDG_MAX_CDG_SNAPSHOT_CHUNK)
+#define DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES (4U + (DASHCDG_CDG_SNAPSHOT_STATE_BYTES * 2U))
+#define DASHCDG_V4_ANCHOR_CHUNK_COUNT ((DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES + DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES - 1U) / \
+        DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES)
 
 static const struct {
     char c;
@@ -57,6 +61,8 @@ struct dashcdg_pending_audio_frame {
     int occupied;
     uint32_t media_sequence;
     uint8_t frame_ms;
+    uint8_t audio_profile_id;
+    uint8_t codec_id;
     uint16_t encoded_length;
     uint64_t playback_ms;
     uint8_t encoded_bytes[DASHCDG_MAX_AUDIO_FRAME_BYTES];
@@ -118,6 +124,14 @@ struct receiver_state {
     uint64_t ptp_follow_up_packets;
     uint64_t ptp_delay_req_packets;
     uint64_t ptp_delay_resp_packets;
+    uint64_t v4_session_info_packets;
+    uint64_t v4_loading_screen_packets;
+    uint64_t v4_video_anchor_packets;
+    uint64_t v4_audio_chunk_packets;
+    uint64_t v4_video_delta_packets;
+    uint64_t v4_repair_window_packets;
+    uint64_t v4_backfill_packets;
+    uint64_t v4_clock_sync_packets;
     uint64_t live_packets_applied;
     uint64_t audio_decode_failures;
     uint64_t audio_reordered_packets;
@@ -138,6 +152,9 @@ struct receiver_state {
     uint8_t announced_audio_channels;
     uint16_t announced_playout_delay_ms;
     uint8_t announced_audio_frame_ms;
+    uint8_t announced_transport_version;
+    uint8_t announced_audio_profile_id;
+    uint8_t announced_audio_codec_id;
     uint8_t announced_audio_fec_group_size;
     uint8_t announced_cdg_fec_group_size;
     uint64_t next_audio_playback_ms;
@@ -176,6 +193,16 @@ struct receiver_state {
     size_t active_snapshot_received_chunks;
     uint8_t active_snapshot_bytes[DASHCDG_CDG_SNAPSHOT_STATE_BYTES];
     uint8_t active_snapshot_chunk_seen[DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT];
+    uint32_t active_v4_anchor_id;
+    uint64_t active_v4_anchor_packet_index;
+    uint32_t active_v4_anchor_total_bytes;
+    size_t active_v4_anchor_received_bytes;
+    size_t active_v4_anchor_received_chunks;
+    uint8_t active_v4_anchor_bytes[DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES];
+    uint8_t active_v4_anchor_chunk_seen[DASHCDG_V4_ANCHOR_CHUNK_COUNT];
+    uint8_t v4_loading_screen_kind;
+    uint8_t v4_loading_screen_phase;
+    int v4_loading_screen_active;
     struct dashcdg_pending_audio_frame pending_audio[DASHCDG_AUDIO_JITTER_BUFFER_PACKETS];
     struct dashcdg_pending_cdg_batch pending_cdg[DASHCDG_CDG_JITTER_BUFFER_PACKETS];
     struct dashcdg_rx_fec_group audio_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
@@ -186,6 +213,7 @@ static struct receiver_state g_receiver;
 static struct dashcdg_desktop_audio *g_audio;
 static struct dashcdg_gl_renderer g_renderer;
 static struct dashcdg_opus_decoder g_opus_decoder;
+static struct dashcdg_sbc_like_decoder g_sbc_like_decoder;
 static const char *g_endpoint_address;
 static struct in_addr g_endpoint_in_addr;
 static int g_endpoint_is_multicast;
@@ -519,6 +547,14 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->ptp_follow_up_packets = 0;
     state->ptp_delay_req_packets = 0;
     state->ptp_delay_resp_packets = 0;
+    state->v4_session_info_packets = 0;
+    state->v4_loading_screen_packets = 0;
+    state->v4_video_anchor_packets = 0;
+    state->v4_audio_chunk_packets = 0;
+    state->v4_video_delta_packets = 0;
+    state->v4_repair_window_packets = 0;
+    state->v4_backfill_packets = 0;
+    state->v4_clock_sync_packets = 0;
     state->live_packets_applied = 0;
     state->audio_decode_failures = 0;
     state->audio_reordered_packets = 0;
@@ -539,6 +575,9 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->announced_audio_channels = 0;
     state->announced_playout_delay_ms = 0;
     state->announced_audio_frame_ms = 0;
+    state->announced_transport_version = 0;
+    state->announced_audio_profile_id = 0;
+    state->announced_audio_codec_id = 0;
     state->announced_audio_fec_group_size = 0;
     state->announced_cdg_fec_group_size = 0;
     state->next_audio_playback_ms = 0;
@@ -576,6 +615,16 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->active_snapshot_received_chunks = 0;
     memset(state->active_snapshot_bytes, 0, sizeof(state->active_snapshot_bytes));
     memset(state->active_snapshot_chunk_seen, 0, sizeof(state->active_snapshot_chunk_seen));
+    state->active_v4_anchor_id = 0;
+    state->active_v4_anchor_packet_index = 0;
+    state->active_v4_anchor_total_bytes = 0;
+    state->active_v4_anchor_received_bytes = 0;
+    state->active_v4_anchor_received_chunks = 0;
+    memset(state->active_v4_anchor_bytes, 0, sizeof(state->active_v4_anchor_bytes));
+    memset(state->active_v4_anchor_chunk_seen, 0, sizeof(state->active_v4_anchor_chunk_seen));
+    state->v4_loading_screen_kind = 0;
+    state->v4_loading_screen_phase = 0;
+    state->v4_loading_screen_active = 0;
     memset(state->pending_audio, 0, sizeof(state->pending_audio));
     memset(state->pending_cdg, 0, sizeof(state->pending_cdg));
     memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
@@ -783,6 +832,129 @@ static void dashcdg_rx_handle_snapshot_locked(struct receiver_state *state, cons
     }
 }
 
+static void dashcdg_rx_begin_v4_anchor_locked(
+        struct receiver_state *state,
+        uint32_t anchor_id,
+        uint64_t packet_index,
+        uint32_t total_bytes
+) {
+    if (state == NULL) {
+        return;
+    }
+
+    state->active_v4_anchor_id = anchor_id;
+    state->active_v4_anchor_packet_index = packet_index;
+    state->active_v4_anchor_total_bytes = total_bytes;
+    state->active_v4_anchor_received_bytes = 0;
+    state->active_v4_anchor_received_chunks = 0;
+    memset(state->active_v4_anchor_bytes, 0, sizeof(state->active_v4_anchor_bytes));
+    memset(state->active_v4_anchor_chunk_seen, 0, sizeof(state->active_v4_anchor_chunk_seen));
+}
+
+static int dashcdg_rx_decode_v4_anchor_locked(struct receiver_state *state) {
+    uint32_t expected_bytes;
+    size_t src_offset = 4;
+    size_t dst_offset = 0;
+
+    if (state == NULL || state->active_v4_anchor_total_bytes < 4U) {
+        return 0;
+    }
+
+    expected_bytes = dashcdg_rx_read_u32(state->active_v4_anchor_bytes);
+    if (expected_bytes != DASHCDG_CDG_SNAPSHOT_STATE_BYTES) {
+        return 0;
+    }
+
+    while (src_offset + 1U < state->active_v4_anchor_total_bytes && dst_offset < expected_bytes) {
+        uint8_t run_length = state->active_v4_anchor_bytes[src_offset++];
+        uint8_t value = state->active_v4_anchor_bytes[src_offset++];
+        if (run_length == 0) {
+            return 0;
+        }
+        while (run_length-- > 0 && dst_offset < expected_bytes) {
+            state->active_snapshot_bytes[dst_offset++] = value;
+        }
+    }
+
+    if (dst_offset != expected_bytes) {
+        return 0;
+    }
+
+    state->active_snapshot_id = state->active_v4_anchor_id;
+    state->active_snapshot_packet_index = state->active_v4_anchor_packet_index;
+    state->active_snapshot_total_bytes = expected_bytes;
+    state->active_snapshot_received_bytes = expected_bytes;
+    state->active_snapshot_received_chunks = DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT;
+    memset(state->active_snapshot_chunk_seen, 1, sizeof(state->active_snapshot_chunk_seen));
+    return dashcdg_rx_apply_snapshot_locked(state);
+}
+
+static void dashcdg_rx_apply_loading_screen_locked(
+        struct receiver_state *state,
+        uint8_t kind,
+        uint8_t phase
+) {
+    uint64_t now_ms = dashcdg_clock_now_ms();
+    int reconnecting = 0;
+
+    if (state == NULL) {
+        return;
+    }
+
+    reconnecting = (kind == DASHCDG_V4_LOADING_SCREEN_REPAIRING || kind == DASHCDG_V4_LOADING_SCREEN_LATE_JOIN) ? 1 : 0;
+    dashcdg_rx_render_connecting_state(&state->live_state, now_ms + ((uint64_t) phase * 125U), reconnecting);
+    state->v4_loading_screen_kind = kind;
+    state->v4_loading_screen_phase = phase;
+    state->v4_loading_screen_active = 1;
+}
+
+static void dashcdg_rx_handle_v4_anchor_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    size_t chunk_index;
+
+    if (state == NULL || view == NULL || view->v4_video_anchor.anchor_bytes == NULL) {
+        return;
+    }
+    if (view->v4_video_anchor.total_bytes == 0 ||
+            view->v4_video_anchor.total_bytes > DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES ||
+            view->v4_video_anchor.chunk_length == 0 ||
+            view->v4_video_anchor.anchor_offset + view->v4_video_anchor.chunk_length >
+                    view->v4_video_anchor.total_bytes) {
+        return;
+    }
+    if (view->v4_video_anchor.anchor_format != DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS) {
+        return;
+    }
+
+    if (state->active_v4_anchor_id != view->v4_video_anchor.anchor_id ||
+            state->active_v4_anchor_packet_index != view->v4_video_anchor.packet_index ||
+            state->active_v4_anchor_total_bytes != view->v4_video_anchor.total_bytes) {
+        dashcdg_rx_begin_v4_anchor_locked(
+                state,
+                view->v4_video_anchor.anchor_id,
+                view->v4_video_anchor.packet_index,
+                view->v4_video_anchor.total_bytes
+        );
+    }
+
+    chunk_index = view->v4_video_anchor.anchor_offset / DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES;
+    if (chunk_index >= DASHCDG_V4_ANCHOR_CHUNK_COUNT || state->active_v4_anchor_chunk_seen[chunk_index]) {
+        return;
+    }
+
+    memcpy(
+            state->active_v4_anchor_bytes + view->v4_video_anchor.anchor_offset,
+            view->v4_video_anchor.anchor_bytes,
+            view->v4_video_anchor.chunk_length
+    );
+    state->active_v4_anchor_chunk_seen[chunk_index] = 1;
+    state->active_v4_anchor_received_chunks++;
+    state->active_v4_anchor_received_bytes += view->v4_video_anchor.chunk_length;
+    if (state->active_v4_anchor_received_bytes >= state->active_v4_anchor_total_bytes &&
+            dashcdg_rx_decode_v4_anchor_locked(state)) {
+        state->v4_loading_screen_active = 0;
+    }
+}
+
 static size_t dashcdg_rx_pending_audio_count(const struct receiver_state *state) {
     size_t count = 0;
 
@@ -923,6 +1095,8 @@ static void dashcdg_rx_format_audio_gate_locked(
     buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
     if (!state->network_audio_enabled) {
         snprintf(buffer, buffer_size, "net-audio-off");
+    } else if (state->announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4 && !state->next_audio_initialized) {
+        snprintf(buffer, buffer_size, "wait-first-audio");
     } else if (!state->have_clock) {
         snprintf(buffer, buffer_size, "wait-ptp");
     } else if (state->playback_paused) {
@@ -957,6 +1131,9 @@ static void dashcdg_rx_format_render_gate_locked(
 
     if (state->playback_paused && state->cdg_snapshots_applied > 0) {
         snprintf(buffer, buffer_size, "pause-screen");
+    } else if (state->announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4 &&
+            state->v4_loading_screen_active && state->cdg_snapshots_applied == 0) {
+        snprintf(buffer, buffer_size, "loading-screen");
     } else if (state->reader_ready) {
         snprintf(buffer, buffer_size, "asset-ready");
     } else if (state->asset_size == 0 || state->chunk_count == 0) {
@@ -1203,6 +1380,8 @@ static int dashcdg_rx_insert_audio_pending_locked(
         uint32_t media_sequence,
         uint64_t playback_ms,
         uint8_t frame_ms,
+        uint8_t audio_profile_id,
+        uint8_t codec_id,
         const uint8_t *payload,
         uint16_t payload_length,
         int count_reorder
@@ -1250,6 +1429,8 @@ static int dashcdg_rx_insert_audio_pending_locked(
     slot->occupied = 1;
     slot->media_sequence = media_sequence;
     slot->frame_ms = frame_ms;
+    slot->audio_profile_id = audio_profile_id;
+    slot->codec_id = codec_id;
     slot->encoded_length = payload_length;
     slot->playback_ms = playback_ms;
     memcpy(slot->encoded_bytes, payload, payload_length);
@@ -1357,6 +1538,8 @@ static void dashcdg_rx_try_recover_audio_group_locked(
                 media_sequence,
                 playback_ms,
                 state->announced_audio_frame_ms,
+                state->announced_audio_profile_id,
+                state->announced_audio_codec_id ? state->announced_audio_codec_id : DASHCDG_V4_AUDIO_CODEC_OPUS,
                 recovered_payload,
                 recovered_length,
                 0
@@ -1540,6 +1723,8 @@ static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, con
                 view->audio_frame.media_sequence,
                 view->audio_frame.playback_ms,
                 view->audio_frame.frame_ms,
+                DASHCDG_V4_AUDIO_PROFILE_QUALITY,
+                DASHCDG_V4_AUDIO_CODEC_OPUS,
                 view->audio_frame.encoded_bytes,
                 view->audio_frame.encoded_length,
                 1
@@ -1582,13 +1767,23 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return 0;
     }
 
-    decoded_frames = dashcdg_opus_decode_frame(
-            &g_opus_decoder,
-            frame->encoded_bytes,
-            frame->encoded_length,
-            pcm,
-            sizeof(pcm) / sizeof(pcm[0])
-    );
+    if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE) {
+        decoded_frames = dashcdg_sbc_like_decode_frame(
+                &g_sbc_like_decoder,
+                frame->encoded_bytes,
+                frame->encoded_length,
+                pcm,
+                sizeof(pcm) / sizeof(pcm[0])
+        );
+    } else {
+        decoded_frames = dashcdg_opus_decode_frame(
+                &g_opus_decoder,
+                frame->encoded_bytes,
+                frame->encoded_length,
+                pcm,
+                sizeof(pcm) / sizeof(pcm[0])
+        );
+    }
     if (decoded_frames <= 0) {
         state->audio_decode_failures++;
         return 0;
@@ -1767,7 +1962,7 @@ static void dashcdg_rx_print_status_locked(void) {
 
     fprintf(
             stdout,
-            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu snap=%llu/%llu fec=%llu/%llu/%llu ptp=%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | repair aud=%llu live=%llu fail=%llu grp=%zu/%zu parity=%zu/%zu hot=%zu/%zu | audio buffered=%ums decode_fail=%llu started=%d muted=%d gate=%s render=%s | sync off=%lldms path=%lldms step=%lld/%lld peak=%lld/%lld upd=%llu ptp_ok=%llu fallback=%llu hold=%llums | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
+            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu snap=%llu/%llu fec=%llu/%llu/%llu ptp=%llu/%llu/%llu/%llu v4=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | repair aud=%llu live=%llu fail=%llu grp=%zu/%zu parity=%zu/%zu hot=%zu/%zu | audio buffered=%ums decode_fail=%llu started=%d muted=%d gate=%s render=%s | sync off=%lldms path=%lldms step=%lld/%lld peak=%lld/%lld upd=%llu ptp_ok=%llu fallback=%llu hold=%llums | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d proto=%u prof=%u codec=%u\n",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.bytes_received,
             (unsigned long long) g_receiver.parse_failures,
@@ -1785,6 +1980,14 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.ptp_follow_up_packets,
             (unsigned long long) g_receiver.ptp_delay_req_packets,
             (unsigned long long) g_receiver.ptp_delay_resp_packets,
+            (unsigned long long) g_receiver.v4_session_info_packets,
+            (unsigned long long) g_receiver.v4_loading_screen_packets,
+            (unsigned long long) g_receiver.v4_video_anchor_packets,
+            (unsigned long long) g_receiver.v4_audio_chunk_packets,
+            (unsigned long long) g_receiver.v4_video_delta_packets,
+            (unsigned long long) g_receiver.v4_repair_window_packets,
+            (unsigned long long) g_receiver.v4_backfill_packets,
+            (unsigned long long) g_receiver.v4_clock_sync_packets,
             (unsigned long long) g_receiver.unknown_packets,
             (unsigned int) prefix_bytes,
             (unsigned int) g_receiver.asset_size,
@@ -1831,7 +2034,10 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) stall_ms,
             g_receiver.reader_ready,
             g_receiver.have_clock,
-            g_receiver.playback_paused
+            g_receiver.playback_paused,
+            (unsigned int) g_receiver.announced_transport_version,
+            (unsigned int) g_receiver.announced_audio_profile_id,
+            (unsigned int) g_receiver.announced_audio_codec_id
     );
     fflush(stdout);
 }
@@ -1910,6 +2116,9 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     state->announced_audio_channels = view->announce.audio_channels;
     state->announced_playout_delay_ms = view->announce.playout_delay_ms;
     state->announced_audio_frame_ms = view->announce.audio_frame_ms;
+    state->announced_transport_version = DASHCDG_PROTOCOL_VERSION;
+    state->announced_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+    state->announced_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
     state->announced_audio_fec_group_size = view->announce.audio_fec_group_size;
     state->announced_cdg_fec_group_size = view->announce.cdg_fec_group_size;
     state->network_audio_enabled = has_network_audio;
@@ -1955,6 +2164,213 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
         fprintf(stdout, "[rx] announced %s (%u bytes)\n", state->song_id, view->announce.asset_size);
         fflush(stdout);
     }
+}
+
+static void dashcdg_rx_configure_audio_locked(
+        struct receiver_state *state,
+        uint16_t sample_rate,
+        uint8_t channels,
+        uint8_t frame_ms,
+        uint16_t playout_delay_ms,
+        uint8_t codec_id
+) {
+    if (state == NULL || !state->network_audio_enabled) {
+        return;
+    }
+
+    if (g_audio == NULL) {
+        g_audio = dashcdg_desktop_audio_new();
+    }
+    if (g_audio == NULL) {
+        return;
+    }
+
+    dashcdg_desktop_audio_stop_stream(g_audio);
+    dashcdg_desktop_audio_init_stream(
+            g_audio,
+            sample_rate,
+            channels,
+            playout_delay_ms > 0 ? (uint32_t) playout_delay_ms * 3U : 1500U
+    );
+    dashcdg_opus_decoder_free(&g_opus_decoder);
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+        dashcdg_opus_decoder_init(&g_opus_decoder, sample_rate, channels, frame_ms);
+    } else {
+        dashcdg_sbc_like_decoder_init(&g_sbc_like_decoder);
+    }
+    dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+    g_audio_stream_started = 0;
+    g_audio_start_inflight = 0;
+}
+
+static void handle_v4_session_info(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
+    int session_changed;
+    int asset_changed;
+    int codec_changed;
+    int has_network_audio;
+
+    if (state == NULL || view == NULL) {
+        return;
+    }
+
+    session_changed = state->session_start_ms != 0 && state->session_start_ms != view->v4_session_info.session_start_ms;
+    asset_changed = state->asset_size != view->v4_session_info.asset_size ||
+            state->chunk_size != DASHCDG_MAX_V4_BACKFILL_CHUNK;
+    codec_changed = state->announced_audio_codec_id != 0 &&
+            state->announced_audio_codec_id != view->v4_session_info.audio_codec_id;
+    has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
+            view->v4_session_info.audio_channels > 0 &&
+            view->v4_session_info.audio_frame_ms > 0;
+
+    if (session_changed || asset_changed || codec_changed) {
+        receiver_state_reset(state);
+    }
+
+    receiver_state_prepare_asset(state, view->v4_session_info.asset_size, DASHCDG_MAX_V4_BACKFILL_CHUNK);
+    state->session_start_ms = view->v4_session_info.session_start_ms;
+    state->announced_transport_version = DASHCDG_PROTOCOL_VERSION_V4;
+    state->announced_audio_sample_rate = view->v4_session_info.audio_sample_rate;
+    state->announced_audio_channels = view->v4_session_info.audio_channels;
+    state->announced_playout_delay_ms = view->v4_session_info.startup_preroll_ms;
+    state->announced_audio_frame_ms = view->v4_session_info.audio_frame_ms;
+    state->announced_audio_profile_id = view->v4_session_info.audio_profile_id;
+    state->announced_audio_codec_id = view->v4_session_info.audio_codec_id;
+    state->announced_audio_fec_group_size = view->v4_session_info.audio_join_redundancy > 0 ? 2 : 0;
+    state->network_audio_enabled = has_network_audio;
+
+    if (session_changed || asset_changed || codec_changed || !state->have_clock) {
+        dashcdg_media_clock_anchor(&state->sender_clock, (int64_t) local_now_ms, (int64_t) view->header.sender_time_ms);
+        state->have_clock = 1;
+        dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
+    }
+
+    if (has_network_audio) {
+        dashcdg_rx_configure_audio_locked(
+                state,
+                view->v4_session_info.audio_sample_rate,
+                view->v4_session_info.audio_channels,
+                view->v4_session_info.audio_frame_ms,
+                view->v4_session_info.startup_preroll_ms,
+                view->v4_session_info.audio_codec_id
+        );
+    } else if (g_audio != NULL) {
+        dashcdg_desktop_audio_stop_stream(g_audio);
+        dashcdg_opus_decoder_free(&g_opus_decoder);
+        g_audio_stream_started = 0;
+        g_audio_start_inflight = 0;
+    }
+}
+
+static int dashcdg_rx_store_v4_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL || view->v4_audio_chunk.encoded_bytes == NULL) {
+        return 0;
+    }
+
+    return dashcdg_rx_insert_audio_pending_locked(
+            state,
+            view->v4_audio_chunk.media_sequence,
+            view->v4_audio_chunk.playback_ms,
+            view->v4_audio_chunk.frame_ms,
+            view->v4_audio_chunk.audio_profile_id,
+            view->v4_audio_chunk.codec_id,
+            view->v4_audio_chunk.encoded_bytes,
+            view->v4_audio_chunk.encoded_length,
+            1
+    );
+}
+
+static void handle_v4_audio_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL || !state->network_audio_enabled) {
+        return;
+    }
+
+    dashcdg_rx_store_v4_audio_frame_locked(state, view);
+}
+
+static void handle_v4_video_delta(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL || view->v4_video_delta.delta_bytes == NULL) {
+        return;
+    }
+    if (view->v4_video_delta.delta_format != DASHCDG_V4_VIDEO_DELTA_MODE_CDG_PACKETS) {
+        return;
+    }
+
+    dashcdg_rx_insert_cdg_pending_locked(
+            state,
+            view->v4_video_delta.packet_start_index,
+            view->v4_video_delta.packet_count,
+            view->v4_video_delta.delta_bytes,
+            1
+    );
+}
+
+static void handle_v4_backfill_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    size_t chunk_index;
+    size_t old_prefix = 0;
+
+    if (state == NULL || view == NULL || view->v4_backfill_chunk.chunk_bytes == NULL ||
+            state->asset_bytes == NULL || state->chunk_seen == NULL) {
+        return;
+    }
+    if ((size_t) view->v4_backfill_chunk.asset_offset + view->v4_backfill_chunk.chunk_length > state->asset_size) {
+        return;
+    }
+
+    memcpy(
+            state->asset_bytes + view->v4_backfill_chunk.asset_offset,
+            view->v4_backfill_chunk.chunk_bytes,
+            view->v4_backfill_chunk.chunk_length
+    );
+    state->asset_bytes_written += view->v4_backfill_chunk.chunk_length;
+
+    chunk_index = view->v4_backfill_chunk.asset_offset / state->chunk_size;
+    if (chunk_index < state->chunk_count && state->chunk_seen[chunk_index] == 0) {
+        state->chunk_seen[chunk_index] = 1;
+        state->received_chunks++;
+    } else if (chunk_index < state->chunk_count) {
+        state->duplicate_chunks++;
+    }
+
+    old_prefix = state->contiguous_prefix_chunks;
+    receiver_state_refresh_prefix(state);
+    if (state->contiguous_prefix_chunks != old_prefix || state->received_chunks == state->chunk_count) {
+        state->last_progress_local_ms = dashcdg_clock_now_ms();
+    }
+    receiver_state_try_finalize(state);
+}
+
+static void handle_v4_repair_window(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    struct dashcdg_packet_view parity_view;
+
+    if (state == NULL || view == NULL || view->v4_repair_window.payload_bytes == NULL) {
+        return;
+    }
+    if (view->v4_repair_window.repair_mode != DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY) {
+        return;
+    }
+
+    memset(&parity_view, 0, sizeof(parity_view));
+    parity_view.fec_parity.stream_type = view->v4_repair_window.stream_type;
+    parity_view.fec_parity.group_size = view->v4_repair_window.group_size;
+    parity_view.fec_parity.payload_bytes = (uint8_t) (
+            view->v4_repair_window.payload_length > 255U ? 255U : view->v4_repair_window.payload_length
+    );
+    parity_view.fec_parity.group_id = view->v4_repair_window.group_id;
+    parity_view.fec_parity.payload_length_xor = view->v4_repair_window.payload_length;
+    parity_view.fec_parity.payload_xor = view->v4_repair_window.payload_bytes;
+    dashcdg_rx_observe_fec_parity_locked(state, &parity_view);
+}
+
+static void handle_v4_clock_sync(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
+    if (state == NULL || view == NULL) {
+        return;
+    }
+
+    dashcdg_media_clock_anchor(&state->sender_clock, (int64_t) local_now_ms, (int64_t) view->header.sender_time_ms);
+    state->have_clock = 1;
+    state->playback_base_ms = view->v4_clock_sync.playback_ms;
+    state->playback_base_sender_ms = view->header.sender_time_ms;
+    dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
 }
 
 static void handle_asset_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -2193,6 +2609,42 @@ static void *network_thread(void *user_data) {
                         g_receiver.pending_sync_valid = 0;
                         g_receiver.pending_delay_request_valid = 0;
                     }
+                    break;
+                case DASHCDG_PACKET_V4_SESSION_INFO:
+                    g_receiver.v4_session_info_packets++;
+                    handle_v4_session_info(&g_receiver, &view, local_now_ms);
+                    break;
+                case DASHCDG_PACKET_V4_LOADING_SCREEN:
+                    g_receiver.v4_loading_screen_packets++;
+                    dashcdg_rx_apply_loading_screen_locked(
+                            &g_receiver,
+                            view.v4_loading_screen.screen_kind,
+                            view.v4_loading_screen.animation_phase
+                    );
+                    break;
+                case DASHCDG_PACKET_V4_VIDEO_ANCHOR:
+                    g_receiver.v4_video_anchor_packets++;
+                    dashcdg_rx_handle_v4_anchor_locked(&g_receiver, &view);
+                    break;
+                case DASHCDG_PACKET_V4_AUDIO_CHUNK:
+                    g_receiver.v4_audio_chunk_packets++;
+                    handle_v4_audio_chunk(&g_receiver, &view);
+                    break;
+                case DASHCDG_PACKET_V4_VIDEO_DELTA:
+                    g_receiver.v4_video_delta_packets++;
+                    handle_v4_video_delta(&g_receiver, &view);
+                    break;
+                case DASHCDG_PACKET_V4_REPAIR_WINDOW:
+                    g_receiver.v4_repair_window_packets++;
+                    handle_v4_repair_window(&g_receiver, &view);
+                    break;
+                case DASHCDG_PACKET_V4_BACKFILL_CHUNK:
+                    g_receiver.v4_backfill_packets++;
+                    handle_v4_backfill_chunk(&g_receiver, &view);
+                    break;
+                case DASHCDG_PACKET_V4_CLOCK_SYNC:
+                    g_receiver.v4_clock_sync_packets++;
+                    handle_v4_clock_sync(&g_receiver, &view, local_now_ms);
                     break;
                 default:
                     g_receiver.unknown_packets++;

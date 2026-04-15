@@ -57,6 +57,8 @@ Recommended proof tooling:
 
 - use a constrained relay that can enforce throughput ceilings rather than only
   synthetic drop patterns
+- `python scripts/desktop_impairment.py --listen-group ... --emit-group ... --max-bytes-per-second 112500`
+  now provides a repeatable local throughput clamp for first-pass proof work
 
 Pass criteria:
 

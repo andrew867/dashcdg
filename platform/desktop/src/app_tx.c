@@ -1836,8 +1836,11 @@ static int dashcdg_tx_send_v4_session_info_locked(uint64_t now_ms, uint8_t *pack
     payload.audio_profile_id = g_tx_state.v4_audio_profile_id;
     payload.video_profile_id = 1U;
     payload.audio_codec_id = g_tx_state.v4_audio_codec_id;
-    payload.audio_sample_rate = g_tx_state.v4_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE ?
-            DASHCDG_SBC_LIKE_SAMPLE_RATE : DASHCDG_AUDIO_SAMPLE_RATE;
+    /*
+     * The SBC-like profile encodes a narrowband core, but the current receiver
+     * expands it back to the desktop playout rate before queueing audio.
+     */
+    payload.audio_sample_rate = DASHCDG_AUDIO_SAMPLE_RATE;
     payload.audio_channels = DASHCDG_AUDIO_CHANNELS;
     payload.audio_frame_ms = DASHCDG_AUDIO_FRAME_MS;
     payload.audio_bitrate_or_mode = g_tx_state.v4_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE ? 24U : DASHCDG_AUDIO_BITRATE_KBPS;
