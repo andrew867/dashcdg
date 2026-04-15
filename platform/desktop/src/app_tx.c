@@ -1294,6 +1294,13 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     }
 
     track = &g_tx_state.playlist.tracks[index];
+    fprintf(
+            stdout,
+            "[tx] preparing %s%s\n",
+            track->title,
+            apply_warmup ? " (queued with warmup)" : ""
+    );
+    fflush(stdout);
     if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
         fprintf(stderr, "failed to read CDG asset: %s\n", track->cdg_path);
         return 0;
@@ -1715,17 +1722,17 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
         if (view.header.type == DASHCDG_PACKET_PTP_DELAY_REQ) {
             struct dashcdg_ptp_delay_resp_payload payload;
             size_t packet_size;
-            uint64_t now_ms = dashcdg_clock_now_ms();
+            uint64_t now_ms;
 
             memset(&payload, 0, sizeof(payload));
-            payload.request_id = view.ptp_delay_req.request_id;
-            payload.request_rx_time_ms = now_ms;
-
             pthread_mutex_lock(&g_tx_state.mutex);
             if (g_tx_state.shutdown_requested) {
                 pthread_mutex_unlock(&g_tx_state.mutex);
                 break;
             }
+            now_ms = dashcdg_clock_now_ms();
+            payload.request_id = view.ptp_delay_req.request_id;
+            payload.request_rx_time_ms = now_ms;
             g_tx_state.header.flags = 0;
             g_tx_state.header.sequence = g_tx_state.sequence++;
             g_tx_state.header.sender_time_ms = now_ms;
@@ -2293,7 +2300,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
-    g_tx_state.warmup_ms = 3000;
+    g_tx_state.warmup_ms = 1000;
     srand((unsigned int) (time(NULL) ^ (time_t) dashcdg_clock_now_ms() ^ (time_t) (uintptr_t) &g_tx_state));
     pthread_mutex_init(&g_tx_state.mutex, NULL);
     dashcdg_cdg_reader_init(&g_tx_state.reader);

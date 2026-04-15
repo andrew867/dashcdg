@@ -30,6 +30,7 @@
 #define DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE 16U
 #define DASHCDG_TRACKED_FEC_GROUPS 32U
 #define DASHCDG_MAX_DRAIN_STEPS_PER_CALL 256U
+#define DASHCDG_MAX_PTP_EXCHANGE_AGE_MS 500U
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
@@ -1507,7 +1508,7 @@ static void send_ptp_delay_request(
     state->pending_delay_request_valid = 1;
 }
 
-static void handle_announce(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+static void handle_announce(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
     int song_changed = strcmp(state->song_id, view->announce.song_id) != 0;
     int session_changed = state->session_start_ms != 0 && state->session_start_ms != view->announce.session_start_ms;
     int asset_changed = state->asset_size != view->announce.asset_size ||
@@ -1532,6 +1533,11 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     state->announced_audio_fec_group_size = view->announce.audio_fec_group_size;
     state->announced_cdg_fec_group_size = view->announce.cdg_fec_group_size;
     state->network_audio_enabled = has_network_audio;
+    if (song_changed || session_changed || asset_changed || !state->have_clock) {
+        dashcdg_media_clock_anchor(&state->sender_clock, (int64_t) local_now_ms, (int64_t) view->header.sender_time_ms);
+        state->have_clock = 1;
+        dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
+    }
 
     if ((song_changed || session_changed || asset_changed) && has_network_audio) {
         if (g_audio == NULL) {
@@ -1702,7 +1708,7 @@ static void *network_thread(void *user_data) {
             switch (view.header.type) {
                 case DASHCDG_PACKET_ANNOUNCE:
                     g_receiver.announce_packets++;
-                    handle_announce(&g_receiver, &view);
+                    handle_announce(&g_receiver, &view, local_now_ms);
                     break;
                 case DASHCDG_PACKET_ASSET_CHUNK:
                     g_receiver.asset_chunk_packets++;
@@ -1741,10 +1747,13 @@ static void *network_thread(void *user_data) {
                     break;
                 case DASHCDG_PACKET_PTP_FOLLOW_UP:
                     g_receiver.ptp_follow_up_packets++;
-                    if (g_receiver.pending_sync_valid && view.ptp_follow_up.sync_id == g_receiver.pending_sync_id) {
+                    if (g_receiver.pending_sync_valid &&
+                            view.ptp_follow_up.sync_id == g_receiver.pending_sync_id &&
+                            local_now_ms - g_receiver.pending_sync_rx_local_ms <= DASHCDG_MAX_PTP_EXCHANGE_AGE_MS) {
                         g_receiver.pending_sync_origin_remote_ms = view.ptp_follow_up.origin_time_ms;
                         send_ptp_delay_request(&g_receiver, sockfd, &endpoint_addr, local_now_ms);
                     } else {
+                        g_receiver.pending_sync_valid = 0;
                         dashcdg_media_clock_observe(&g_receiver.sender_clock, (int64_t) local_now_ms, (int64_t) view.ptp_follow_up.origin_time_ms, 5);
                         dashcdg_rx_note_clock_update_locked(&g_receiver, local_now_ms, 0);
                     }
@@ -1754,6 +1763,8 @@ static void *network_thread(void *user_data) {
                 case DASHCDG_PACKET_PTP_DELAY_RESP:
                     g_receiver.ptp_delay_resp_packets++;
                     if (g_receiver.pending_sync_valid && g_receiver.pending_delay_request_valid &&
+                            local_now_ms >= g_receiver.pending_delay_request_local_ms &&
+                            local_now_ms - g_receiver.pending_delay_request_local_ms <= DASHCDG_MAX_PTP_EXCHANGE_AGE_MS &&
                             view.ptp_delay_resp.request_id == g_receiver.pending_delay_request_id) {
                         dashcdg_media_clock_observe_ptp_exchange(
                                 &g_receiver.sender_clock,
@@ -1765,6 +1776,11 @@ static void *network_thread(void *user_data) {
                                 5
                         );
                         dashcdg_rx_note_clock_update_locked(&g_receiver, local_now_ms, 1);
+                        g_receiver.pending_sync_valid = 0;
+                        g_receiver.pending_delay_request_valid = 0;
+                    } else if (g_receiver.pending_delay_request_valid &&
+                            local_now_ms >= g_receiver.pending_delay_request_local_ms &&
+                            local_now_ms - g_receiver.pending_delay_request_local_ms > DASHCDG_MAX_PTP_EXCHANGE_AGE_MS) {
                         g_receiver.pending_sync_valid = 0;
                         g_receiver.pending_delay_request_valid = 0;
                     }
