@@ -67,7 +67,7 @@ Integrated network modes through the player entrypoint:
 
 ```sh
 build/bin/desktop-player tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
-build/bin/desktop-player rx <multicast-address> <port> [local.mp3]
+build/bin/desktop-player rx <multicast-address> <port>
 ```
 
 Standalone multicast transmitter:
@@ -79,7 +79,7 @@ build/bin/desktop-tx [--display] <multicast-address> <port> [song-id] <file|fold
 Standalone multicast receiver:
 
 ```sh
-build/bin/desktop-rx [--headless] <multicast-address> <port> [local.mp3]
+build/bin/desktop-rx [--headless] <multicast-address> <port>
 ```
 
 ## Media resolution behavior
@@ -130,16 +130,16 @@ The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
 - `ANNOUNCE`, `ASSET_CHUNK`, and `CLOCK_BEACON` keep the original late-join bootstrap working
 - `AUDIO_FRAME` carries live Opus frames on the wire
 - `CDG_BATCH` carries timed groups of CD+G subchannel packets on the wire
-- `PTP_SYNC` and `PTP_FOLLOW_UP` are emitted and observed for sender clock tracking
+- `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` maintain a software-timestamped round-trip clock estimate
 - RX decodes network Opus into a queue-driven PortAudio stream when audio metadata is present
-- RX can still optionally use a local MP3 fallback path when launched with `[local.mp3]`
+- RX now uses bounded pending queues plus deadline-based skip logic for reordered or missing live audio/CD+G packets
 
 Current TX defaults:
 
 - audio sample rate: 48 kHz
 - channels: 2
 - Opus frame size: 20 ms
-- Opus bitrate target: 96 kbps
+- Opus bitrate target: 128 kbps
 - announced playout delay: 500 ms
 - announced audio FEC group size: 5
 - announced CDG FEC group size: 9
@@ -151,7 +151,7 @@ Current TX defaults:
 - The protocol declares `FEC_PARITY`, but the desktop proof does not yet use it end-to-end.
 - Clock discipline now includes software-timestamped `PTP_DELAY_REQ` / `PTP_DELAY_RESP`, but it is still not a hardware-timestamped or sub-millisecond implementation.
 - Late join is still guaranteed by repeated asset replay, not bounded FEC recovery.
-- RX startup can still show a small number of early Opus decode failures during bring-up before the steady-state queue settles.
+- RX startup can still show a small number of early Opus decode failures or deadline skips during bring-up before the steady-state queue settles.
 - This is a proof tranche, not a finished venue-grade transport stack.
 
 ## Related documentation

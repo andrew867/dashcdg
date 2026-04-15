@@ -21,6 +21,26 @@
 #define DASHCDG_ATOMIC_GET(value) (__atomic_load_n(&(value), __ATOMIC_RELAXED))
 #define DASHCDG_AUDIO_SAMPLE_RATE 48000U
 #define DASHCDG_AUDIO_CHANNELS 2U
+#define DASHCDG_AUDIO_JITTER_BUFFER_PACKETS 64U
+#define DASHCDG_CDG_JITTER_BUFFER_PACKETS 64U
+#define DASHCDG_AUDIO_LATE_GRACE_MS 80U
+#define DASHCDG_CDG_LATE_GRACE_MS 80U
+
+struct dashcdg_pending_audio_frame {
+    int occupied;
+    uint32_t media_sequence;
+    uint8_t frame_ms;
+    uint16_t encoded_length;
+    uint64_t playback_ms;
+    uint8_t encoded_bytes[DASHCDG_MAX_AUDIO_FRAME_BYTES];
+};
+
+struct dashcdg_pending_cdg_batch {
+    int occupied;
+    uint8_t packet_count;
+    uint64_t packet_start_index;
+    uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+};
 
 struct receiver_state {
     pthread_mutex_t mutex;
@@ -56,8 +76,18 @@ struct receiver_state {
     uint64_t ptp_delay_resp_packets;
     uint64_t live_packets_applied;
     uint64_t audio_decode_failures;
+    uint64_t audio_reordered_packets;
+    uint64_t audio_missing_skips;
+    uint64_t audio_pending_drops;
+    uint64_t live_reordered_batches;
+    uint64_t live_missing_skips;
+    uint64_t live_pending_drops;
     uint16_t announced_playout_delay_ms;
+    uint8_t announced_audio_frame_ms;
+    uint64_t next_audio_playback_ms;
+    uint32_t next_audio_media_sequence;
     uint64_t next_live_packet_index;
+    uint64_t next_live_playback_ms;
     uint32_t pending_sync_id;
     uint64_t pending_sync_rx_local_ms;
     uint64_t pending_sync_origin_remote_ms;
@@ -71,8 +101,12 @@ struct receiver_state {
     int have_clock;
     int playback_paused;
     int network_audio_enabled;
+    int next_audio_initialized;
+    int next_live_packet_initialized;
     int pending_sync_valid;
     int pending_delay_request_valid;
+    struct dashcdg_pending_audio_frame pending_audio[DASHCDG_AUDIO_JITTER_BUFFER_PACKETS];
+    struct dashcdg_pending_cdg_batch pending_cdg[DASHCDG_CDG_JITTER_BUFFER_PACKETS];
 };
 
 static struct receiver_state g_receiver;
@@ -80,8 +114,6 @@ static struct dashcdg_desktop_audio *g_audio;
 static struct dashcdg_gl_renderer g_renderer;
 static struct dashcdg_opus_decoder g_opus_decoder;
 static const char *g_multicast_address;
-static const char *g_mp3_path;
-static int g_audio_thread_started = 0;
 static int g_headless = 0;
 static int g_audio_stream_started = 0;
 
@@ -110,8 +142,18 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->ptp_delay_resp_packets = 0;
     state->live_packets_applied = 0;
     state->audio_decode_failures = 0;
+    state->audio_reordered_packets = 0;
+    state->audio_missing_skips = 0;
+    state->audio_pending_drops = 0;
+    state->live_reordered_batches = 0;
+    state->live_missing_skips = 0;
+    state->live_pending_drops = 0;
     state->announced_playout_delay_ms = 0;
+    state->announced_audio_frame_ms = 0;
+    state->next_audio_playback_ms = 0;
+    state->next_audio_media_sequence = 0;
     state->next_live_packet_index = 0;
+    state->next_live_playback_ms = 0;
     state->pending_sync_id = 0;
     state->pending_sync_rx_local_ms = 0;
     state->pending_sync_origin_remote_ms = 0;
@@ -124,8 +166,12 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->have_clock = 0;
     state->playback_paused = 0;
     state->network_audio_enabled = 0;
+    state->next_audio_initialized = 0;
+    state->next_live_packet_initialized = 0;
     state->pending_sync_valid = 0;
     state->pending_delay_request_valid = 0;
+    memset(state->pending_audio, 0, sizeof(state->pending_audio));
+    memset(state->pending_cdg, 0, sizeof(state->pending_cdg));
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -218,12 +264,289 @@ static void receiver_state_refresh_prefix(struct receiver_state *state) {
     }
 }
 
+static size_t dashcdg_rx_pending_audio_count(const struct receiver_state *state) {
+    size_t count = 0;
+
+    if (state == NULL) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_BUFFER_PACKETS; ++i) {
+        if (state->pending_audio[i].occupied) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static size_t dashcdg_rx_pending_cdg_count(const struct receiver_state *state) {
+    size_t count = 0;
+
+    if (state == NULL) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
+        if (state->pending_cdg[i].occupied) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static struct dashcdg_pending_audio_frame *dashcdg_rx_find_audio_frame_locked(
+        struct receiver_state *state,
+        uint32_t media_sequence
+) {
+    if (state == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_BUFFER_PACKETS; ++i) {
+        if (state->pending_audio[i].occupied && state->pending_audio[i].media_sequence == media_sequence) {
+            return &state->pending_audio[i];
+        }
+    }
+
+    return NULL;
+}
+
+static struct dashcdg_pending_cdg_batch *dashcdg_rx_find_cdg_batch_locked(
+        struct receiver_state *state,
+        uint64_t packet_start_index
+) {
+    if (state == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
+        if (state->pending_cdg[i].occupied && state->pending_cdg[i].packet_start_index == packet_start_index) {
+            return &state->pending_cdg[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    struct dashcdg_pending_audio_frame *slot = NULL;
+
+    if (state == NULL || view == NULL || view->audio_frame.encoded_bytes == NULL ||
+            view->audio_frame.encoded_length == 0 || view->audio_frame.encoded_length > DASHCDG_MAX_AUDIO_FRAME_BYTES) {
+        return 0;
+    }
+
+    if (!state->next_audio_initialized) {
+        state->next_audio_media_sequence = view->audio_frame.media_sequence;
+        state->next_audio_playback_ms = view->audio_frame.playback_ms;
+        state->next_audio_initialized = 1;
+    } else if (view->audio_frame.media_sequence < state->next_audio_media_sequence) {
+        state->audio_pending_drops++;
+        return 0;
+    } else if (view->audio_frame.media_sequence > state->next_audio_media_sequence) {
+        state->audio_reordered_packets++;
+    }
+
+    if (dashcdg_rx_find_audio_frame_locked(state, view->audio_frame.media_sequence) != NULL) {
+        state->audio_pending_drops++;
+        return 0;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_BUFFER_PACKETS; ++i) {
+        if (!state->pending_audio[i].occupied) {
+            slot = &state->pending_audio[i];
+            break;
+        }
+    }
+    if (slot == NULL) {
+        state->audio_pending_drops++;
+        return 0;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->occupied = 1;
+    slot->media_sequence = view->audio_frame.media_sequence;
+    slot->frame_ms = view->audio_frame.frame_ms;
+    slot->encoded_length = view->audio_frame.encoded_length;
+    slot->playback_ms = view->audio_frame.playback_ms;
+    memcpy(slot->encoded_bytes, view->audio_frame.encoded_bytes, view->audio_frame.encoded_length);
+    return 1;
+}
+
+static int dashcdg_rx_store_cdg_batch_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    struct dashcdg_pending_cdg_batch *slot = NULL;
+    size_t packet_bytes;
+
+    if (state == NULL || view == NULL || view->cdg_batch.packet_bytes == NULL || view->cdg_batch.packet_count == 0) {
+        return 0;
+    }
+
+    packet_bytes = (size_t) view->cdg_batch.packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    if (view->cdg_batch.packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
+        return 0;
+    }
+
+    if (!state->next_live_packet_initialized) {
+        state->next_live_packet_index = view->cdg_batch.packet_start_index;
+        state->next_live_playback_ms = dashcdg_packet_count_to_ms(view->cdg_batch.packet_start_index);
+        state->next_live_packet_initialized = 1;
+    } else if (view->cdg_batch.packet_start_index < state->next_live_packet_index) {
+        state->live_pending_drops++;
+        return 0;
+    } else if (view->cdg_batch.packet_start_index > state->next_live_packet_index) {
+        state->live_reordered_batches++;
+    }
+
+    if (dashcdg_rx_find_cdg_batch_locked(state, view->cdg_batch.packet_start_index) != NULL) {
+        state->live_pending_drops++;
+        return 0;
+    }
+
+    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
+        if (!state->pending_cdg[i].occupied) {
+            slot = &state->pending_cdg[i];
+            break;
+        }
+    }
+    if (slot == NULL) {
+        state->live_pending_drops++;
+        return 0;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->occupied = 1;
+    slot->packet_count = view->cdg_batch.packet_count;
+    slot->packet_start_index = view->cdg_batch.packet_start_index;
+    memcpy(slot->packet_bytes, view->cdg_batch.packet_bytes, packet_bytes);
+    return 1;
+}
+
+static int dashcdg_rx_apply_audio_frame_locked(
+        struct receiver_state *state,
+        const struct dashcdg_pending_audio_frame *frame
+) {
+    int16_t pcm[DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_CHANNELS / 50U];
+    int decoded_frames;
+    size_t queued_frames;
+
+    if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio == NULL) {
+        return 0;
+    }
+
+    decoded_frames = dashcdg_opus_decode_frame(
+            &g_opus_decoder,
+            frame->encoded_bytes,
+            frame->encoded_length,
+            pcm,
+            sizeof(pcm) / sizeof(pcm[0])
+    );
+    if (decoded_frames <= 0) {
+        state->audio_decode_failures++;
+        return 0;
+    }
+
+    queued_frames = dashcdg_desktop_audio_queue_frames(
+            g_audio,
+            pcm,
+            (size_t) decoded_frames,
+            (int64_t) frame->playback_ms
+    );
+    if (queued_frames != (size_t) decoded_frames) {
+        state->audio_decode_failures++;
+        return 0;
+    }
+
+    return 1;
+}
+
+static void dashcdg_rx_apply_cdg_batch_locked(
+        struct receiver_state *state,
+        const struct dashcdg_pending_cdg_batch *batch
+) {
+    const struct dashcdg_subchannel_packet *packets;
+
+    if (state == NULL || batch == NULL || batch->packet_count == 0) {
+        return;
+    }
+
+    packets = (const struct dashcdg_subchannel_packet *) batch->packet_bytes;
+    for (uint8_t i = 0; i < batch->packet_count; ++i) {
+        dashcdg_cdg_state_process_packet(&state->live_state, &packets[i]);
+        state->next_live_packet_index++;
+        state->live_packets_applied++;
+    }
+    state->last_progress_local_ms = dashcdg_clock_now_ms();
+}
+
+static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t local_now_ms) {
+    int64_t sender_now_ms = -1;
+
+    if (state == NULL) {
+        return;
+    }
+
+    if (state->have_clock) {
+        sender_now_ms = dashcdg_media_clock_remote_now(&state->sender_clock, (int64_t) local_now_ms);
+    }
+
+    while (state->next_audio_initialized) {
+        struct dashcdg_pending_audio_frame *frame = dashcdg_rx_find_audio_frame_locked(state, state->next_audio_media_sequence);
+
+        if (frame != NULL) {
+            uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
+
+            dashcdg_rx_apply_audio_frame_locked(state, frame);
+            state->next_audio_media_sequence++;
+            state->next_audio_playback_ms = frame->playback_ms + frame_ms;
+            frame->occupied = 0;
+            continue;
+        }
+
+        if (sender_now_ms >= 0 && state->announced_audio_frame_ms > 0 &&
+                sender_now_ms > (int64_t) (state->next_audio_playback_ms + DASHCDG_AUDIO_LATE_GRACE_MS)) {
+            state->audio_missing_skips++;
+            state->next_audio_media_sequence++;
+            state->next_audio_playback_ms += state->announced_audio_frame_ms;
+            continue;
+        }
+        break;
+    }
+
+    while (state->next_live_packet_initialized) {
+        struct dashcdg_pending_cdg_batch *batch = dashcdg_rx_find_cdg_batch_locked(state, state->next_live_packet_index);
+
+        if (batch != NULL) {
+            uint64_t next_packet_index = batch->packet_start_index + batch->packet_count;
+
+            dashcdg_rx_apply_cdg_batch_locked(state, batch);
+            state->next_live_playback_ms = dashcdg_packet_count_to_ms(next_packet_index);
+            batch->occupied = 0;
+            continue;
+        }
+
+        if (sender_now_ms >= 0 &&
+                sender_now_ms > (int64_t) (state->next_live_playback_ms + DASHCDG_CDG_LATE_GRACE_MS)) {
+            uint64_t skipped_packet_index = state->next_live_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
+
+            state->live_missing_skips++;
+            state->next_live_packet_index = skipped_packet_index;
+            state->next_live_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
+            continue;
+        }
+        break;
+    }
+}
+
 static void dashcdg_rx_print_status_locked(void) {
     uint32_t prefix_bytes = receiver_prefix_bytes_snapshot(&g_receiver);
     uint64_t now_ms = dashcdg_clock_now_ms();
     uint64_t stall_ms = 0;
     uint64_t since_last_dg_ms = 0;
     uint32_t audio_buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+    size_t pending_audio = dashcdg_rx_pending_audio_count(&g_receiver);
+    size_t pending_cdg = dashcdg_rx_pending_cdg_count(&g_receiver);
 
     if (g_receiver.last_progress_local_ms > 0U) {
         stall_ms = now_ms - g_receiver.last_progress_local_ms;
@@ -235,7 +558,7 @@ static void dashcdg_rx_print_status_locked(void) {
 
     fprintf(
             stdout,
-            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu ptp=%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | audio buffered=%ums decode_fail=%llu started=%d | sync off=%lldms path=%lldms | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
+            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu ptp=%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | audio buffered=%ums decode_fail=%llu started=%d | sync off=%lldms path=%lldms | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.bytes_received,
             (unsigned long long) g_receiver.parse_failures,
@@ -257,6 +580,14 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.duplicate_chunks,
             (unsigned long long) g_receiver.asset_bytes_written,
             (unsigned long long) g_receiver.live_packets_applied,
+            pending_audio,
+            (unsigned long long) g_receiver.audio_missing_skips,
+            (unsigned long long) g_receiver.audio_pending_drops,
+            (unsigned long long) g_receiver.audio_reordered_packets,
+            pending_cdg,
+            (unsigned long long) g_receiver.live_missing_skips,
+            (unsigned long long) g_receiver.live_pending_drops,
+            (unsigned long long) g_receiver.live_reordered_batches,
             (unsigned int) audio_buffered_ms,
             (unsigned long long) g_receiver.audio_decode_failures,
             g_audio_stream_started,
@@ -272,54 +603,19 @@ static void dashcdg_rx_print_status_locked(void) {
 }
 
 static void handle_live_cdg_batch(struct receiver_state *state, const struct dashcdg_packet_view *view) {
-    const struct dashcdg_subchannel_packet *packets;
-
     if (state == NULL || view == NULL) {
         return;
     }
 
-    packets = (const struct dashcdg_subchannel_packet *) view->cdg_batch.packet_bytes;
-    if (view->cdg_batch.packet_start_index != state->next_live_packet_index) {
-        return;
-    }
-
-    for (uint8_t i = 0; i < view->cdg_batch.packet_count; ++i) {
-        dashcdg_cdg_state_process_packet(&state->live_state, &packets[i]);
-        state->next_live_packet_index++;
-        state->live_packets_applied++;
-    }
+    dashcdg_rx_store_cdg_batch_locked(state, view);
 }
 
 static void handle_audio_frame(struct receiver_state *state, const struct dashcdg_packet_view *view) {
-    int16_t pcm[DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_CHANNELS / 50U];
-    int decoded_frames;
-    size_t queued_frames;
-
-    if (state == NULL || view == NULL || !state->network_audio_enabled || g_audio == NULL) {
+    if (state == NULL || view == NULL || !state->network_audio_enabled) {
         return;
     }
 
-    decoded_frames = dashcdg_opus_decode_frame(
-            &g_opus_decoder,
-            view->audio_frame.encoded_bytes,
-            view->audio_frame.encoded_length,
-            pcm,
-            sizeof(pcm) / sizeof(pcm[0])
-    );
-    if (decoded_frames <= 0) {
-        state->audio_decode_failures++;
-        return;
-    }
-
-    queued_frames = dashcdg_desktop_audio_queue_frames(
-            g_audio,
-            pcm,
-            (size_t) decoded_frames,
-            (int64_t) view->audio_frame.playback_ms
-    );
-    if (queued_frames != (size_t) decoded_frames) {
-        state->audio_decode_failures++;
-    }
+    dashcdg_rx_store_audio_frame_locked(state, view);
 }
 
 static void send_ptp_delay_request(
@@ -363,6 +659,7 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     int session_changed = state->session_start_ms != 0 && state->session_start_ms != view->announce.session_start_ms;
     int asset_changed = state->asset_size != view->announce.asset_size ||
             state->chunk_size != (view->announce.chunk_size == 0 ? DASHCDG_MAX_ASSET_CHUNK : view->announce.chunk_size);
+    int has_network_audio = view->announce.audio_sample_rate > 0 && view->announce.audio_channels > 0 && view->announce.audio_frame_ms > 0;
 
     if (song_changed || session_changed || asset_changed) {
         receiver_state_reset(state);
@@ -376,10 +673,10 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     strncpy(state->song_id, view->announce.song_id, sizeof(state->song_id) - 1U);
     state->session_start_ms = view->announce.session_start_ms;
     state->announced_playout_delay_ms = view->announce.playout_delay_ms;
+    state->announced_audio_frame_ms = view->announce.audio_frame_ms;
+    state->network_audio_enabled = has_network_audio;
 
-    if ((song_changed || session_changed || asset_changed) &&
-            view->announce.audio_sample_rate > 0 && view->announce.audio_channels > 0 && view->announce.audio_frame_ms > 0) {
-        state->network_audio_enabled = 1;
+    if ((song_changed || session_changed || asset_changed) && has_network_audio) {
         if (g_audio == NULL) {
             g_audio = dashcdg_desktop_audio_new();
         }
@@ -400,6 +697,12 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
             );
             g_audio_stream_started = 0;
         }
+    }
+
+    if (!has_network_audio && g_audio != NULL) {
+        dashcdg_desktop_audio_stop_stream(g_audio);
+        dashcdg_opus_decoder_free(&g_opus_decoder);
+        g_audio_stream_started = 0;
     }
 
     if (song_changed || session_changed || asset_changed) {
@@ -593,6 +896,7 @@ static void *network_thread(void *user_data) {
                     g_receiver.unknown_packets++;
                     break;
             }
+            dashcdg_rx_drain_media_locked(&g_receiver, local_now_ms);
             pthread_mutex_unlock(&g_receiver.mutex);
         }
     }
@@ -601,76 +905,25 @@ static void *network_thread(void *user_data) {
     return NULL;
 }
 
-static void *audio_thread(void *unused) {
-    (void) unused;
-
-    if (!dashcdg_desktop_audio_load_file(g_audio, g_mp3_path)) {
-        fprintf(stderr, "failed to load MP3 file\n");
-        return NULL;
-    }
-
-    for (;;) {
-        int should_start = 0;
-        uint64_t start_ms = 0;
-
-        pthread_mutex_lock(&g_receiver.mutex);
-        if (g_receiver.have_clock && g_receiver.reader_ready) {
-            uint64_t local_now_ms = dashcdg_clock_now_ms();
-            int64_t sender_now_ms = dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
-
-            if (sender_now_ms >= (int64_t) g_receiver.playback_base_sender_ms) {
-                start_ms = g_receiver.playback_base_ms;
-                if (!g_receiver.playback_paused) {
-                    start_ms += (uint64_t) (sender_now_ms - (int64_t) g_receiver.playback_base_sender_ms);
-                }
-                should_start = start_ms > 0 || g_receiver.session_start_ms == 0;
-            }
-        }
-        pthread_mutex_unlock(&g_receiver.mutex);
-
-        if (should_start) {
-            dashcdg_desktop_audio_seek_ms(g_audio, (uint32_t) start_ms);
-            break;
-        }
-
-        dashcdg_sleep_ms(10);
-    }
-
-    dashcdg_desktop_audio_play(g_audio);
-    return NULL;
-}
-
 static int dashcdg_rx_claim_audio_start_locked(void) {
     uint64_t local_now_ms;
     uint64_t sender_now_ms;
 
-    if (g_receiver.network_audio_enabled) {
-        if (g_audio_stream_started || g_audio == NULL || !g_receiver.have_clock) {
-            return 0;
-        }
-
-        local_now_ms = dashcdg_clock_now_ms();
-        sender_now_ms = (uint64_t) dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
-        if (dashcdg_desktop_audio_buffered_ms(g_audio) < g_receiver.announced_playout_delay_ms / 2U) {
-            return 0;
-        }
-        if (sender_now_ms < g_receiver.session_start_ms) {
-            return 0;
-        }
-
-        g_audio_stream_started = 1;
-        return 1;
-    }
-
-    if (g_audio_thread_started || g_audio == NULL || g_mp3_path == NULL) {
+    if (!g_receiver.network_audio_enabled || g_audio_stream_started || g_audio == NULL || !g_receiver.have_clock) {
         return 0;
     }
 
-    if (!g_receiver.reader_ready || !g_receiver.have_clock) {
+    if (dashcdg_desktop_audio_buffered_ms(g_audio) < g_receiver.announced_playout_delay_ms / 2U) {
         return 0;
     }
 
-    g_audio_thread_started = 1;
+    local_now_ms = dashcdg_clock_now_ms();
+    sender_now_ms = (uint64_t) dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
+    if (sender_now_ms < g_receiver.session_start_ms) {
+        return 0;
+    }
+
+    g_audio_stream_started = 1;
     return 1;
 }
 
@@ -685,8 +938,11 @@ static void display(void) {
     uint32_t hud_prefix_bytes = 0;
     uint64_t hud_since_last_dg_ms = 0;
     uint64_t hud_stall_ms = 0;
+    size_t pending_audio = 0;
+    size_t pending_cdg = 0;
 
     pthread_mutex_lock(&g_receiver.mutex);
+    dashcdg_rx_drain_media_locked(&g_receiver, local_now_ms);
     if (g_receiver.have_clock) {
         sender_now_ms = (uint64_t) dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
 
@@ -708,7 +964,8 @@ static void display(void) {
     }
 
     should_start_audio = dashcdg_rx_claim_audio_start_locked();
-
+    pending_audio = dashcdg_rx_pending_audio_count(&g_receiver);
+    pending_cdg = dashcdg_rx_pending_cdg_count(&g_receiver);
     hud_prefix_bytes = receiver_prefix_bytes_snapshot(&g_receiver);
     if (g_receiver.last_datagram_local_ms > 0U) {
         hud_since_last_dg_ms = local_now_ms - g_receiver.last_datagram_local_ms;
@@ -734,21 +991,21 @@ static void display(void) {
     snprintf(
             hud_line_b,
             sizeof(hud_line_b),
-            "prefix:%u/%u ch:%zu/%zu rcv:%zu dup:%llu | off:%lld path:%lld dg:%llums stall:%llums rdy:%d clk:%d%s%s",
+            "prefix:%u/%u pend:%zu/%zu skip:%llu/%llu drop:%llu/%llu | off:%lld path:%lld dg:%llums stall:%llums rdy:%d clk:%d aud:net",
             (unsigned int) hud_prefix_bytes,
             (unsigned int) g_receiver.asset_size,
-            g_receiver.contiguous_prefix_chunks,
-            g_receiver.chunk_count,
-            g_receiver.received_chunks,
-            (unsigned long long) g_receiver.duplicate_chunks,
+            pending_audio,
+            pending_cdg,
+            (unsigned long long) g_receiver.audio_missing_skips,
+            (unsigned long long) g_receiver.live_missing_skips,
+            (unsigned long long) g_receiver.audio_pending_drops,
+            (unsigned long long) g_receiver.live_pending_drops,
             (long long) g_receiver.sender_offset_ms,
             (long long) g_receiver.sender_path_delay_ms,
             (unsigned long long) hud_since_last_dg_ms,
             (unsigned long long) hud_stall_ms,
             g_receiver.reader_ready,
-            g_receiver.have_clock,
-            g_receiver.network_audio_enabled ? " aud:net" : "",
-            g_mp3_path != NULL && !g_receiver.network_audio_enabled ? " mp3:local" : ""
+            g_receiver.have_clock
     );
 
     dashcdg_gl_renderer_render(&g_renderer, g_receiver.reader_ready ? &g_receiver.reader.state : &g_receiver.live_state);
@@ -784,11 +1041,7 @@ static void display(void) {
     glutSwapBuffers();
 
     if (should_start_audio) {
-        if (g_receiver.network_audio_enabled) {
-            dashcdg_desktop_audio_start_stream(g_audio);
-        } else {
-            pthread_create(&g_audio->thread, NULL, audio_thread, NULL);
-        }
+        dashcdg_desktop_audio_start_stream(g_audio);
     }
 
     glutPostRedisplay();
@@ -811,7 +1064,7 @@ static void resize_callback(int width, int height) {
 
 int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_t rx_thread;
-    const char *positionals[3] = { NULL, NULL, NULL };
+    const char *positionals[2] = { NULL, NULL };
     int positional_index = 0;
     int port;
 
@@ -821,29 +1074,27 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             continue;
         }
 
-        if (positional_index >= 3) {
-            fprintf(stderr, "usage: %s [--headless] <multicast-address> <port> [local.mp3]\n", argv[0]);
+        if (positional_index >= 2) {
+            fprintf(stderr, "usage: %s [--headless] <multicast-address> <port>\n", argv[0]);
             return 1;
         }
 
         positionals[positional_index++] = argv[i];
     }
 
-    if (positional_index != 2 && positional_index != 3) {
-        fprintf(stderr, "usage: %s [--headless] <multicast-address> <port> [local.mp3]\n", argv[0]);
+    if (positional_index != 2) {
+        fprintf(stderr, "usage: %s [--headless] <multicast-address> <port>\n", argv[0]);
         return 1;
     }
 
     g_multicast_address = positionals[0];
     port = atoi(positionals[1]);
-    g_mp3_path = positional_index == 3 ? positionals[2] : NULL;
 
     fprintf(
             stdout,
-            "[rx] listening on %s:%d%s%s\n",
+            "[rx] listening on %s:%d%s\n",
             g_multicast_address,
             port,
-            g_mp3_path != NULL ? " with local MP3" : "",
             g_headless ? " (headless stdout stats mode)" : " (HUD on window; press S for stats line to stdout)"
     );
     fflush(stdout);
@@ -857,16 +1108,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_mutex_init(&g_receiver.mutex, NULL);
     dashcdg_cdg_reader_init(&g_receiver.reader);
     dashcdg_media_clock_init(&g_receiver.sender_clock);
-
-    if (g_mp3_path != NULL) {
-        g_audio = dashcdg_desktop_audio_new();
-        if (g_audio == NULL) {
-            fprintf(stderr, "failed to allocate audio state\n");
-            return 1;
-        }
-    } else {
-        g_audio = NULL;
-    }
+    g_audio = NULL;
 
     pthread_create(&rx_thread, NULL, network_thread, &port);
 
@@ -878,6 +1120,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             uint64_t now_ms = dashcdg_clock_now_ms();
 
             pthread_mutex_lock(&g_receiver.mutex);
+            dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
             should_start_audio = dashcdg_rx_claim_audio_start_locked();
             if (last_status_ms == 0 || now_ms - last_status_ms >= 1000U) {
                 dashcdg_rx_print_status_locked();
@@ -886,11 +1129,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             pthread_mutex_unlock(&g_receiver.mutex);
 
             if (should_start_audio) {
-                if (g_receiver.network_audio_enabled) {
-                    dashcdg_desktop_audio_start_stream(g_audio);
-                } else {
-                    pthread_create(&g_audio->thread, NULL, audio_thread, NULL);
-                }
+                dashcdg_desktop_audio_start_stream(g_audio);
             }
 
             dashcdg_sleep_ms(100);

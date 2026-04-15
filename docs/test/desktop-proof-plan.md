@@ -16,6 +16,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 - receiver can also advance a live CD+G state from `CDG_BATCH`
 - receiver starts network Opus audio near the announced playout boundary
 - receiver follows network clock traffic before the bootstrap asset is fully complete
+- receiver tolerates bounded reordering on live audio and CD+G before declaring packets late
 - headless RX and TX status output make stalls and packet flow visible
 
 ## Observability requirements
@@ -25,6 +26,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 - explicit asset size and chunk size in announces
 - explicit live media counters for audio, timed CD+G, and sync traffic
 - RX audio queue depth and decode-failure visibility
+- RX jitter queue, skip, drop, and reorder visibility
 - deterministic test vectors for protocol parsing
 
 ## Impairment tests
@@ -44,5 +46,4 @@ The next automation step should inject and measure:
 - no hardware-timestamp or sub-millisecond PTP discipline yet
 - no session catalog or operator control UI
 - no dedicated network metrics UI beyond HUD/stdout status lines
-- RX still supports a legacy optional local-MP3 fallback path, so the codebase currently contains both network-audio and local-audio bring-up paths
-- startup can still show a small number of early Opus decode failures before the steady-state playout queue settles
+- startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles

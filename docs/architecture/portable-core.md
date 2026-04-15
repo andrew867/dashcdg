@@ -27,8 +27,8 @@ The core is intentionally free of renderer, audio-device, and socket runtime dep
 
 Current state:
 
-- this is still a simple offset estimator
-- it is not yet a full PTP round-trip implementation with path-delay exchange
+- this now includes software-timestamped `PTP_SYNC` / `PTP_FOLLOW_UP` / `PTP_DELAY_REQ` / `PTP_DELAY_RESP`
+- it is still a bounded software estimator rather than a hardware-timestamped or sub-millisecond discipline loop
 
 ### `protocol`
 
@@ -45,7 +45,9 @@ Current protocol v2 coverage includes:
 - `CDG_BATCH`
 - `PTP_SYNC`
 - `PTP_FOLLOW_UP`
-- declared but not yet active desktop use of `PTP_DELAY_REQ`, `PTP_DELAY_RESP`, and `FEC_PARITY`
+- `PTP_DELAY_REQ`
+- `PTP_DELAY_RESP`
+- declared but not yet active desktop use of `FEC_PARITY`
 
 ## Core correctness strategy
 

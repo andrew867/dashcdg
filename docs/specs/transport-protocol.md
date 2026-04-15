@@ -241,7 +241,7 @@ Current implementation status:
 - audio sample rate: `48000`
 - channels: `2`
 - Opus frame duration: `20 ms`
-- Opus bitrate target: `96 kbps`
+- Opus bitrate target: `128 kbps`
 - announced playout delay: `500 ms`
 - announced audio FEC group size: `5`
 - announced CDG FEC group size: `9`
@@ -257,7 +257,7 @@ The current desktop receiver uses both bootstrap and live paths:
 4. `AUDIO_FRAME` feeds the Opus decoder and PortAudio queue
 5. `CDG_BATCH` advances the live CD+G state
 
-If a local MP3 path is provided on RX startup, the legacy local-file audio fallback path still exists. If `ANNOUNCE` advertises audio metadata, RX prefers the network Opus streaming path.
+RX startup is now network-audio-only for multicast mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late.
 
 ## Late-join behavior
 

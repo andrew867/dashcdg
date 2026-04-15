@@ -26,7 +26,7 @@
 #define DASHCDG_AUDIO_CHANNELS 2U
 #define DASHCDG_AUDIO_FRAME_MS 20U
 #define DASHCDG_AUDIO_FRAME_SAMPLES ((DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_FRAME_MS) / 1000U)
-#define DASHCDG_AUDIO_BITRATE_KBPS 96U
+#define DASHCDG_AUDIO_BITRATE_KBPS 128U
 #define DASHCDG_PAYOUT_DELAY_MS 500U
 #define DASHCDG_AUDIO_GROUP_SIZE 5U
 #define DASHCDG_CDG_GROUP_SIZE 9U
@@ -526,32 +526,62 @@ static const struct dashcdg_tx_track *dashcdg_tx_current_track(void) {
     return &g_tx_state.playlist.tracks[g_tx_state.playlist.current_index];
 }
 
+static int16_t dashcdg_tx_clamp_i16(int32_t sample) {
+    if (sample > 32767) {
+        return 32767;
+    }
+    if (sample < -32768) {
+        return -32768;
+    }
+
+    return (int16_t) sample;
+}
+
 static int16_t *dashcdg_tx_resample_pcm(
         const int16_t *input,
         size_t input_frames,
         int input_rate,
-        int channels,
+        int input_channels,
+        int output_channels,
         size_t *output_frames
 ) {
     int16_t *output;
     size_t frames_out;
 
-    if (output_frames == NULL || input == NULL || input_frames == 0U || input_rate <= 0 || channels <= 0) {
+    if (output_frames == NULL || input == NULL || input_frames == 0U || input_rate <= 0 ||
+            input_channels <= 0 || output_channels <= 0) {
         return NULL;
     }
 
     if (input_rate == (int) DASHCDG_AUDIO_SAMPLE_RATE) {
-        output = (int16_t *) malloc(input_frames * (size_t) channels * sizeof(int16_t));
+        output = (int16_t *) malloc(input_frames * (size_t) output_channels * sizeof(int16_t));
         if (output == NULL) {
             return NULL;
         }
-        memcpy(output, input, input_frames * (size_t) channels * sizeof(int16_t));
+
+        for (size_t frame_index = 0; frame_index < input_frames; ++frame_index) {
+            int16_t left;
+            int16_t right;
+
+            if (input_channels == 1) {
+                left = input[frame_index];
+                right = left;
+            } else {
+                left = input[frame_index * (size_t) input_channels];
+                right = input[frame_index * (size_t) input_channels + 1U];
+            }
+
+            output[frame_index * (size_t) output_channels] = left;
+            if (output_channels > 1) {
+                output[frame_index * (size_t) output_channels + 1U] = right;
+            }
+        }
         *output_frames = input_frames;
         return output;
     }
 
     frames_out = (input_frames * (size_t) DASHCDG_AUDIO_SAMPLE_RATE + (size_t) input_rate - 1U) / (size_t) input_rate;
-    output = (int16_t *) malloc(frames_out * (size_t) channels * sizeof(int16_t));
+    output = (int16_t *) malloc(frames_out * (size_t) output_channels * sizeof(int16_t));
     if (output == NULL) {
         return NULL;
     }
@@ -569,12 +599,13 @@ static int16_t *dashcdg_tx_resample_pcm(
             right_index = input_frames - 1U;
         }
 
-        for (int channel = 0; channel < channels; ++channel) {
-            int32_t left = input[left_index * (size_t) channels + (size_t) channel];
-            int32_t right = input[right_index * (size_t) channels + (size_t) channel];
+        for (int channel = 0; channel < output_channels; ++channel) {
+            int source_channel = input_channels == 1 ? 0 : channel;
+            int32_t left = input[left_index * (size_t) input_channels + (size_t) source_channel];
+            int32_t right = input[right_index * (size_t) input_channels + (size_t) source_channel];
             int32_t mixed = (int32_t) ((((int64_t) left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
                     ((int64_t) right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
-            output[out_index * (size_t) channels + (size_t) channel] = (int16_t) mixed;
+            output[out_index * (size_t) output_channels + (size_t) channel] = dashcdg_tx_clamp_i16(mixed);
         }
     }
 
@@ -618,6 +649,7 @@ static int dashcdg_tx_build_audio_frames_locked(const struct dashcdg_tx_track *t
             audio->file_info.samples / (size_t) audio->file_info.channels,
             audio->file_info.hz,
             audio->file_info.channels,
+            DASHCDG_AUDIO_CHANNELS,
             &resampled_frames
     );
     if (resampled_pcm == NULL) {

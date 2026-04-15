@@ -22,8 +22,8 @@ That architecture is now preserved in a more explicit form:
 - The transport and local player both convert between milliseconds and packet counts using integer helpers in `core/include/dashcdg/common.h`.
 - The receiver stack currently supports two practical timing sources:
   - `network audio playout clock`: when `AUDIO_FRAME` decoding and streaming playback are active.
-  - `network-disciplined sender clock`: during startup, before playout begins, or when the local-file fallback path is used.
-- A legacy optional local MP3 fallback still exists in RX, but it is no longer the only synchronization path.
+  - `network-disciplined sender clock`: during startup, before playout begins, or while the receiver is still filling its live jitter queues.
+- RX multicast mode now uses network audio only; local-file audio remains a local-player concern rather than a network-receiver fallback.
 
 ## Portability contract
 
