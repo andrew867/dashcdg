@@ -25,10 +25,10 @@
 #include "dashcdg/protocol.h"
 
 #define DASHCDG_AUDIO_SAMPLE_RATE 48000U
-#define DASHCDG_AUDIO_CHANNELS 2U
+#define DASHCDG_AUDIO_CHANNELS 1U
 #define DASHCDG_AUDIO_FRAME_MS 20U
 #define DASHCDG_AUDIO_FRAME_SAMPLES ((DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_FRAME_MS) / 1000U)
-#define DASHCDG_AUDIO_BITRATE_KBPS 128U
+#define DASHCDG_AUDIO_BITRATE_KBPS 80U
 #define DASHCDG_PAYOUT_DELAY_MS 500U
 #define DASHCDG_AUDIO_GROUP_SIZE 5U
 #define DASHCDG_CDG_GROUP_SIZE 9U
@@ -297,9 +297,7 @@ static void dashcdg_tx_render_pause_state_locked(uint64_t now_ms) {
     g_tx_state.pause_state.color_table[7] = 0xFFFFFF;
     g_tx_state.pause_state.color_table[8] = 0x2E8BFF;
     g_tx_state.pause_state.color_table[9] = 0x5CFF7A;
-    for (int i = 0; i < DASHCDG_COLORS; ++i) {
-        g_tx_state.pause_state.transparency[i] = (uint8_t) i;
-    }
+    memset(g_tx_state.pause_state.transparency, 0, sizeof(g_tx_state.pause_state.transparency));
 
     dashcdg_tx_pause_fill_rect(
             &g_tx_state.pause_state,
@@ -873,6 +871,10 @@ static int16_t dashcdg_tx_clamp_i16(int32_t sample) {
     return (int16_t) sample;
 }
 
+static int16_t dashcdg_tx_mix_to_mono_i16(int16_t left, int16_t right) {
+    return dashcdg_tx_clamp_i16(((int32_t) left + (int32_t) right) / 2);
+}
+
 static int16_t *dashcdg_tx_resample_pcm(
         const int16_t *input,
         size_t input_frames,
@@ -907,7 +909,9 @@ static int16_t *dashcdg_tx_resample_pcm(
                 right = input[frame_index * (size_t) input_channels + 1U];
             }
 
-            output[frame_index * (size_t) output_channels] = left;
+            output[frame_index * (size_t) output_channels] = output_channels == 1 ?
+                    dashcdg_tx_mix_to_mono_i16(left, right) :
+                    left;
             if (output_channels > 1) {
                 output[frame_index * (size_t) output_channels + 1U] = right;
             }
@@ -936,12 +940,29 @@ static int16_t *dashcdg_tx_resample_pcm(
         }
 
         for (int channel = 0; channel < output_channels; ++channel) {
-            int source_channel = input_channels == 1 ? 0 : channel;
-            int32_t left = input[left_index * (size_t) input_channels + (size_t) source_channel];
-            int32_t right = input[right_index * (size_t) input_channels + (size_t) source_channel];
-            int32_t mixed = (int32_t) ((((int64_t) left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
-                    ((int64_t) right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
-            output[out_index * (size_t) output_channels + (size_t) channel] = dashcdg_tx_clamp_i16(mixed);
+            if (output_channels == 1 && input_channels > 1) {
+                int32_t left_a = input[left_index * (size_t) input_channels];
+                int32_t left_b = input[left_index * (size_t) input_channels + 1U];
+                int32_t right_a = input[right_index * (size_t) input_channels];
+                int32_t right_b = input[right_index * (size_t) input_channels + 1U];
+                int32_t mono_left = (left_a + left_b) / 2;
+                int32_t mono_right = (right_a + right_b) / 2;
+                int32_t mixed = (int32_t) ((((int64_t) mono_left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
+                        ((int64_t) mono_right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
+
+                output[out_index * (size_t) output_channels] = dashcdg_tx_clamp_i16(mixed);
+                break;
+            }
+
+            {
+                int source_channel = input_channels == 1 ? 0 : channel;
+                int32_t left = input[left_index * (size_t) input_channels + (size_t) source_channel];
+                int32_t right = input[right_index * (size_t) input_channels + (size_t) source_channel];
+                int32_t mixed = (int32_t) ((((int64_t) left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
+                        ((int64_t) right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
+
+                output[out_index * (size_t) output_channels + (size_t) channel] = dashcdg_tx_clamp_i16(mixed);
+            }
         }
     }
 
@@ -2273,7 +2294,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
     g_tx_state.warmup_ms = 3000;
-    srand((unsigned int) time(NULL));
+    srand((unsigned int) (time(NULL) ^ (time_t) dashcdg_clock_now_ms() ^ (time_t) (uintptr_t) &g_tx_state));
     pthread_mutex_init(&g_tx_state.mutex, NULL);
     dashcdg_cdg_reader_init(&g_tx_state.reader);
 
@@ -2362,6 +2383,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             dashcdg_tx_cleanup();
             return 1;
         }
+        dashcdg_tx_playlist_shuffle(&g_tx_state.playlist);
     } else if (!dashcdg_tx_playlist_add_auto_paired_track(&g_tx_state.playlist, source_path)) {
         fprintf(stderr, "failed to resolve transmitter source path: %s\n", source_path);
         dashcdg_tx_cleanup();

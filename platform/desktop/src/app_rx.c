@@ -436,10 +436,11 @@ static void dashcdg_rx_begin_snapshot_locked(
 static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
     size_t offset = 0;
 
-    if (state == NULL || state->reader_ready || state->active_snapshot_total_bytes != DASHCDG_CDG_SNAPSHOT_STATE_BYTES) {
+    if (state == NULL || state->active_snapshot_total_bytes != DASHCDG_CDG_SNAPSHOT_STATE_BYTES) {
         return 0;
     }
-    if (state->next_live_packet_initialized &&
+    if (!state->playback_paused &&
+            state->next_live_packet_initialized &&
             state->active_snapshot_packet_index < state->next_live_packet_index) {
         return 0;
     }
@@ -515,22 +516,6 @@ static void dashcdg_rx_handle_snapshot_locked(struct receiver_state *state, cons
     if (state->active_snapshot_received_bytes >= state->active_snapshot_total_bytes) {
         dashcdg_rx_apply_snapshot_locked(state);
     }
-}
-
-static void dashcdg_rx_reset_audio_stream_locked(struct receiver_state *state) {
-    if (state == NULL || g_audio == NULL || state->announced_audio_sample_rate == 0 || state->announced_audio_channels == 0) {
-        return;
-    }
-
-    dashcdg_desktop_audio_stop_stream(g_audio);
-    dashcdg_desktop_audio_init_stream(
-            g_audio,
-            state->announced_audio_sample_rate,
-            state->announced_audio_channels,
-            state->announced_playout_delay_ms > 0 ? (uint32_t) state->announced_playout_delay_ms * 3U : 1500U
-    );
-    g_audio_stream_started = 0;
-    g_audio_start_inflight = 0;
 }
 
 static size_t dashcdg_rx_pending_audio_count(const struct receiver_state *state) {
@@ -1622,8 +1607,6 @@ static void handle_asset_chunk(struct receiver_state *state, const struct dashcd
 }
 
 static void handle_clock_beacon(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
-    int was_paused = state->playback_paused;
-
     dashcdg_media_clock_observe(
             &state->sender_clock,
             (int64_t) local_now_ms,
@@ -1635,9 +1618,6 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
     state->playback_base_ms = view->clock_beacon.playback_ms;
     state->playback_base_sender_ms = view->header.sender_time_ms;
     state->playback_paused = (view->header.flags & DASHCDG_PACKET_FLAG_PAUSED) != 0;
-    if (!was_paused && state->playback_paused) {
-        dashcdg_rx_reset_audio_stream_locked(state);
-    }
 }
 
 static void *network_thread(void *user_data) {
