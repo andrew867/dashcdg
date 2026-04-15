@@ -4,7 +4,7 @@
 
 This tranche proves the architecture on computer hardware before MCU work:
 
-- `apps/desktop-tx/main.c`: multicast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, and basic PTP-style sync traffic
+- `apps/desktop-tx/main.c`: multicast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, and software-timestamped PTP-style sync traffic
 - `apps/desktop-rx/main.c`: multicast receiver with live network audio decode, bootstrap asset reconstruction, and OpenGL rendering
 - `apps/desktop-player/main.c`: local non-network player for baseline regression checks
 
@@ -41,7 +41,7 @@ The next automation step should inject and measure:
 ## Current proof limitations
 
 - no active `FEC_PARITY` generation or recovery
-- no `PTP_DELAY_REQ` / `PTP_DELAY_RESP` round-trip clock discipline yet
+- no hardware-timestamp or sub-millisecond PTP discipline yet
 - no session catalog or operator control UI
 - no dedicated network metrics UI beyond HUD/stdout status lines
 - RX still supports a legacy optional local-MP3 fallback path, so the codebase currently contains both network-audio and local-audio bring-up paths

@@ -5,7 +5,9 @@
 
 struct dashcdg_media_clock {
     int initialized;
+    int path_delay_initialized;
     int64_t offset_ms;
+    int64_t path_delay_ms;
 };
 
 uint64_t dashcdg_clock_now_ms(void);
@@ -16,6 +18,15 @@ void dashcdg_media_clock_observe(
         int64_t local_ms,
         int64_t remote_ms,
         int64_t max_step_ms
+);
+void dashcdg_media_clock_observe_ptp_exchange(
+        struct dashcdg_media_clock *clock_state,
+        int64_t sync_origin_remote_ms,
+        int64_t sync_rx_local_ms,
+        int64_t delay_req_local_ms,
+        int64_t delay_resp_remote_ms,
+        int64_t max_offset_step_ms,
+        int64_t max_path_delay_step_ms
 );
 int64_t dashcdg_media_clock_remote_now(const struct dashcdg_media_clock *clock_state, int64_t local_ms);
 

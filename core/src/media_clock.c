@@ -46,7 +46,9 @@ void dashcdg_media_clock_init(struct dashcdg_media_clock *clock_state) {
     }
 
     clock_state->initialized = 0;
+    clock_state->path_delay_initialized = 0;
     clock_state->offset_ms = 0;
+    clock_state->path_delay_ms = 0;
 }
 
 void dashcdg_media_clock_anchor(struct dashcdg_media_clock *clock_state, int64_t local_ms, int64_t remote_ms) {
@@ -81,6 +83,48 @@ void dashcdg_media_clock_observe(
 
     delta = target_offset - clock_state->offset_ms;
     clock_state->offset_ms += dashcdg_clamp_delta(delta, max_step_ms);
+}
+
+void dashcdg_media_clock_observe_ptp_exchange(
+        struct dashcdg_media_clock *clock_state,
+        int64_t sync_origin_remote_ms,
+        int64_t sync_rx_local_ms,
+        int64_t delay_req_local_ms,
+        int64_t delay_resp_remote_ms,
+        int64_t max_offset_step_ms,
+        int64_t max_path_delay_step_ms
+) {
+    int64_t target_offset_ms;
+    int64_t target_path_delay_ms;
+    int64_t delta;
+
+    if (clock_state == NULL) {
+        return;
+    }
+
+    target_offset_ms = ((sync_origin_remote_ms - sync_rx_local_ms) +
+            (delay_resp_remote_ms - delay_req_local_ms)) / 2;
+    target_path_delay_ms = ((sync_rx_local_ms - sync_origin_remote_ms) +
+            (delay_resp_remote_ms - delay_req_local_ms)) / 2;
+    if (target_path_delay_ms < 0) {
+        target_path_delay_ms = 0;
+    }
+
+    if (!clock_state->initialized) {
+        clock_state->initialized = 1;
+        clock_state->offset_ms = target_offset_ms;
+    } else {
+        delta = target_offset_ms - clock_state->offset_ms;
+        clock_state->offset_ms += dashcdg_clamp_delta(delta, max_offset_step_ms);
+    }
+
+    if (!clock_state->path_delay_initialized) {
+        clock_state->path_delay_initialized = 1;
+        clock_state->path_delay_ms = target_path_delay_ms;
+    } else {
+        delta = target_path_delay_ms - clock_state->path_delay_ms;
+        clock_state->path_delay_ms += dashcdg_clamp_delta(delta, max_path_delay_step_ms);
+    }
 }
 
 int64_t dashcdg_media_clock_remote_now(const struct dashcdg_media_clock *clock_state, int64_t local_ms) {

@@ -52,15 +52,27 @@ struct receiver_state {
     uint64_t cdg_batch_packets;
     uint64_t ptp_sync_packets;
     uint64_t ptp_follow_up_packets;
+    uint64_t ptp_delay_req_packets;
+    uint64_t ptp_delay_resp_packets;
     uint64_t live_packets_applied;
     uint64_t audio_decode_failures;
     uint16_t announced_playout_delay_ms;
     uint64_t next_live_packet_index;
+    uint32_t pending_sync_id;
+    uint64_t pending_sync_rx_local_ms;
+    uint64_t pending_sync_origin_remote_ms;
+    uint32_t next_delay_request_id;
+    uint32_t pending_delay_request_id;
+    uint64_t pending_delay_request_local_ms;
+    int64_t sender_offset_ms;
+    int64_t sender_path_delay_ms;
     struct dashcdg_cdg_state live_state;
     int reader_ready;
     int have_clock;
     int playback_paused;
     int network_audio_enabled;
+    int pending_sync_valid;
+    int pending_delay_request_valid;
 };
 
 static struct receiver_state g_receiver;
@@ -94,14 +106,26 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->cdg_batch_packets = 0;
     state->ptp_sync_packets = 0;
     state->ptp_follow_up_packets = 0;
+    state->ptp_delay_req_packets = 0;
+    state->ptp_delay_resp_packets = 0;
     state->live_packets_applied = 0;
     state->audio_decode_failures = 0;
     state->announced_playout_delay_ms = 0;
     state->next_live_packet_index = 0;
+    state->pending_sync_id = 0;
+    state->pending_sync_rx_local_ms = 0;
+    state->pending_sync_origin_remote_ms = 0;
+    state->next_delay_request_id = 1;
+    state->pending_delay_request_id = 0;
+    state->pending_delay_request_local_ms = 0;
+    state->sender_offset_ms = 0;
+    state->sender_path_delay_ms = 0;
     state->reader_ready = 0;
     state->have_clock = 0;
     state->playback_paused = 0;
     state->network_audio_enabled = 0;
+    state->pending_sync_valid = 0;
+    state->pending_delay_request_valid = 0;
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -211,7 +235,7 @@ static void dashcdg_rx_print_status_locked(void) {
 
     fprintf(
             stdout,
-            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu ptp=%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | audio buffered=%ums decode_fail=%llu started=%d | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
+            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu ptp=%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | audio buffered=%ums decode_fail=%llu started=%d | sync off=%lldms path=%lldms | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.bytes_received,
             (unsigned long long) g_receiver.parse_failures,
@@ -222,6 +246,8 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.cdg_batch_packets,
             (unsigned long long) g_receiver.ptp_sync_packets,
             (unsigned long long) g_receiver.ptp_follow_up_packets,
+            (unsigned long long) g_receiver.ptp_delay_req_packets,
+            (unsigned long long) g_receiver.ptp_delay_resp_packets,
             (unsigned long long) g_receiver.unknown_packets,
             (unsigned int) prefix_bytes,
             (unsigned int) g_receiver.asset_size,
@@ -234,6 +260,8 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned int) audio_buffered_ms,
             (unsigned long long) g_receiver.audio_decode_failures,
             g_audio_stream_started,
+            (long long) g_receiver.sender_offset_ms,
+            (long long) g_receiver.sender_path_delay_ms,
             (unsigned long long) since_last_dg_ms,
             (unsigned long long) stall_ms,
             g_receiver.reader_ready,
@@ -292,6 +320,42 @@ static void handle_audio_frame(struct receiver_state *state, const struct dashcd
     if (queued_frames != (size_t) decoded_frames) {
         state->audio_decode_failures++;
     }
+}
+
+static void send_ptp_delay_request(
+        struct receiver_state *state,
+        dashcdg_socket_t sockfd,
+        const struct sockaddr_in *destination,
+        uint64_t local_now_ms
+) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    struct dashcdg_packet_header header;
+    struct dashcdg_ptp_delay_req_payload payload;
+    size_t packet_size;
+
+    if (state == NULL || destination == NULL || sockfd == DASHCDG_INVALID_SOCKET) {
+        return;
+    }
+
+    memset(&header, 0, sizeof(header));
+    memset(&payload, 0, sizeof(payload));
+    header.sequence = (uint32_t) (state->datagrams_received + state->ptp_delay_req_packets + 1U);
+    header.sender_time_ms = local_now_ms;
+    payload.request_id = state->next_delay_request_id++;
+
+    packet_size = dashcdg_protocol_serialize_ptp_delay_req(packet, sizeof(packet), &header, &payload);
+    if (packet_size == 0) {
+        return;
+    }
+    if (sendto(sockfd, (const char *) packet, (int) packet_size, 0, (const struct sockaddr *) destination, sizeof(*destination)) !=
+            (int) packet_size) {
+        return;
+    }
+
+    state->ptp_delay_req_packets++;
+    state->pending_delay_request_id = payload.request_id;
+    state->pending_delay_request_local_ms = local_now_ms;
+    state->pending_delay_request_valid = 1;
 }
 
 static void handle_announce(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -387,6 +451,8 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
             (int64_t) view->header.sender_time_ms,
             20
     );
+    state->sender_offset_ms = state->sender_clock.offset_ms;
+    state->sender_path_delay_ms = state->sender_clock.path_delay_ms;
     state->have_clock = 1;
     state->session_start_ms = view->clock_beacon.session_start_ms;
     state->playback_base_ms = view->clock_beacon.playback_ms;
@@ -399,6 +465,7 @@ static void *network_thread(void *user_data) {
     dashcdg_socket_t sockfd;
     struct ip_mreq membership;
     struct sockaddr_in local_addr;
+    struct sockaddr_in multicast_addr;
     struct sockaddr_in sender_addr;
     socklen_t sender_addr_len;
     uint8_t buffer[DASHCDG_MAX_PACKET_SIZE];
@@ -432,6 +499,11 @@ static void *network_thread(void *user_data) {
         dashcdg_socket_close(sockfd);
         return NULL;
     }
+
+    memset(&multicast_addr, 0, sizeof(multicast_addr));
+    multicast_addr.sin_family = AF_INET;
+    multicast_addr.sin_port = htons((uint16_t) port);
+    multicast_addr.sin_addr.s_addr = inet_addr(g_multicast_address);
 
     for (;;) {
         sender_addr_len = (socklen_t) sizeof(sender_addr);
@@ -482,11 +554,40 @@ static void *network_thread(void *user_data) {
                     break;
                 case DASHCDG_PACKET_PTP_SYNC:
                     g_receiver.ptp_sync_packets++;
-                    dashcdg_media_clock_observe(&g_receiver.sender_clock, (int64_t) local_now_ms, (int64_t) view.header.sender_time_ms, 5);
+                    g_receiver.pending_sync_id = view.ptp_sync.sync_id;
+                    g_receiver.pending_sync_rx_local_ms = local_now_ms;
+                    g_receiver.pending_sync_valid = 1;
                     break;
                 case DASHCDG_PACKET_PTP_FOLLOW_UP:
                     g_receiver.ptp_follow_up_packets++;
-                    dashcdg_media_clock_observe(&g_receiver.sender_clock, (int64_t) local_now_ms, (int64_t) view.ptp_follow_up.origin_time_ms, 5);
+                    if (g_receiver.pending_sync_valid && view.ptp_follow_up.sync_id == g_receiver.pending_sync_id) {
+                        g_receiver.pending_sync_origin_remote_ms = view.ptp_follow_up.origin_time_ms;
+                        send_ptp_delay_request(&g_receiver, sockfd, &multicast_addr, local_now_ms);
+                    } else {
+                        dashcdg_media_clock_observe(&g_receiver.sender_clock, (int64_t) local_now_ms, (int64_t) view.ptp_follow_up.origin_time_ms, 5);
+                    }
+                    break;
+                case DASHCDG_PACKET_PTP_DELAY_REQ:
+                    break;
+                case DASHCDG_PACKET_PTP_DELAY_RESP:
+                    g_receiver.ptp_delay_resp_packets++;
+                    if (g_receiver.pending_sync_valid && g_receiver.pending_delay_request_valid &&
+                            view.ptp_delay_resp.request_id == g_receiver.pending_delay_request_id) {
+                        dashcdg_media_clock_observe_ptp_exchange(
+                                &g_receiver.sender_clock,
+                                (int64_t) g_receiver.pending_sync_origin_remote_ms,
+                                (int64_t) g_receiver.pending_sync_rx_local_ms,
+                                (int64_t) g_receiver.pending_delay_request_local_ms,
+                                (int64_t) view.ptp_delay_resp.request_rx_time_ms,
+                                5,
+                                5
+                        );
+                        g_receiver.sender_offset_ms = g_receiver.sender_clock.offset_ms;
+                        g_receiver.sender_path_delay_ms = g_receiver.sender_clock.path_delay_ms;
+                        g_receiver.have_clock = 1;
+                        g_receiver.pending_sync_valid = 0;
+                        g_receiver.pending_delay_request_valid = 0;
+                    }
                     break;
                 default:
                     g_receiver.unknown_packets++;
@@ -619,25 +720,29 @@ static void display(void) {
     snprintf(
             hud_line_a,
             sizeof(hud_line_a),
-            "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu",
+            "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu ptp:%llu/%llu",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.parse_failures,
             (unsigned long long) g_receiver.announce_packets,
             (unsigned long long) g_receiver.asset_chunk_packets,
             (unsigned long long) g_receiver.clock_beacon_packets,
             (unsigned long long) g_receiver.audio_packets,
-            (unsigned long long) g_receiver.cdg_batch_packets
+            (unsigned long long) g_receiver.cdg_batch_packets,
+            (unsigned long long) g_receiver.ptp_delay_req_packets,
+            (unsigned long long) g_receiver.ptp_delay_resp_packets
     );
     snprintf(
             hud_line_b,
             sizeof(hud_line_b),
-            "prefix:%u/%u ch:%zu/%zu rcv:%zu dup:%llu | dg:%llums stall:%llums rdy:%d clk:%d%s%s",
+            "prefix:%u/%u ch:%zu/%zu rcv:%zu dup:%llu | off:%lld path:%lld dg:%llums stall:%llums rdy:%d clk:%d%s%s",
             (unsigned int) hud_prefix_bytes,
             (unsigned int) g_receiver.asset_size,
             g_receiver.contiguous_prefix_chunks,
             g_receiver.chunk_count,
             g_receiver.received_chunks,
             (unsigned long long) g_receiver.duplicate_chunks,
+            (long long) g_receiver.sender_offset_ms,
+            (long long) g_receiver.sender_path_delay_ms,
             (unsigned long long) hud_since_last_dg_ms,
             (unsigned long long) hud_stall_ms,
             g_receiver.reader_ready,

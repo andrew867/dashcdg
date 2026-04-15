@@ -193,7 +193,8 @@ Fields:
 Current implementation status:
 
 - parser/serializer exists
-- desktop proof does not emit or consume it in the media loop
+- RX now emits it after matching `PTP_SYNC` plus `PTP_FOLLOW_UP`
+- TX listens for it and answers with `PTP_DELAY_RESP`
 
 ### `PTP_DELAY_RESP`
 
@@ -210,7 +211,8 @@ Fields:
 Current implementation status:
 
 - parser/serializer exists
-- desktop proof does not emit or consume it in the media loop
+- TX emits it in response to `PTP_DELAY_REQ`
+- RX consumes it and updates sender offset/path-delay estimates
 
 ### `FEC_PARITY`
 
@@ -251,7 +253,7 @@ The current desktop receiver uses both bootstrap and live paths:
 
 1. `ANNOUNCE` prepares or resets session state
 2. `ASSET_CHUNK` rebuilds the full CD+G asset for deterministic late join
-3. `CLOCK_BEACON`, `PTP_SYNC`, and `PTP_FOLLOW_UP` maintain a bounded sender/local offset estimate
+3. `CLOCK_BEACON`, `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` maintain a bounded sender/local offset estimate and path-delay estimate
 4. `AUDIO_FRAME` feeds the Opus decoder and PortAudio queue
 5. `CDG_BATCH` advances the live CD+G state
 
@@ -273,7 +275,7 @@ In practice, RX can start live audio before the bootstrap asset is complete, but
 - no authenticated control plane
 - no retransmit, NACK, or repair-request path
 - no playlist/session catalog packet family
-- no full PTP delay-request/response discipline yet
+- no hardware-timestamp or sub-millisecond PTP discipline yet; current proof uses millisecond software timestamps
 - no active `FEC_PARITY` generation or recovery yet
 - no wire-level compatibility promise for protocol v1 peers
 

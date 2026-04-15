@@ -125,6 +125,8 @@ static void test_protocol_roundtrip(void) {
     struct dashcdg_asset_chunk_payload chunk;
     struct dashcdg_clock_beacon_payload beacon;
     struct dashcdg_audio_frame_payload audio_frame;
+    struct dashcdg_ptp_delay_req_payload delay_req;
+    struct dashcdg_ptp_delay_resp_payload delay_resp;
     uint8_t chunk_bytes[] = { 1, 2, 3, 4 };
     uint8_t audio_bytes[] = { 9, 8, 7, 6 };
     size_t size;
@@ -191,6 +193,22 @@ static void test_protocol_roundtrip(void) {
     assert(view.audio_frame.media_sequence == 3);
     assert(view.audio_frame.playback_ms == 40);
     assert(memcmp(view.audio_frame.encoded_bytes, audio_bytes, sizeof(audio_bytes)) == 0);
+
+    memset(&delay_req, 0, sizeof(delay_req));
+    delay_req.request_id = 77;
+    size = dashcdg_protocol_serialize_ptp_delay_req(buffer, sizeof(buffer), &header, &delay_req);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.ptp_delay_req.request_id == 77);
+
+    memset(&delay_resp, 0, sizeof(delay_resp));
+    delay_resp.request_id = 77;
+    delay_resp.request_rx_time_ms = 9876;
+    size = dashcdg_protocol_serialize_ptp_delay_resp(buffer, sizeof(buffer), &header, &delay_resp);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.ptp_delay_resp.request_id == 77);
+    assert(view.ptp_delay_resp.request_rx_time_ms == 9876);
 }
 
 static void test_media_clock(void) {
@@ -202,6 +220,15 @@ static void test_media_clock(void) {
     dashcdg_media_clock_observe(&clock_state, 1010, 1500, 25);
     assert(clock_state.offset_ms == 225);
     assert(dashcdg_media_clock_remote_now(&clock_state, 2000) == 2225);
+
+    dashcdg_media_clock_init(&clock_state);
+    dashcdg_media_clock_observe_ptp_exchange(&clock_state, 1000, 905, 1200, 1315, 10, 10);
+    assert(clock_state.offset_ms == 105);
+    assert(clock_state.path_delay_ms == 10);
+
+    dashcdg_media_clock_observe_ptp_exchange(&clock_state, 2000, 1908, 2200, 2316, 4, 3);
+    assert(clock_state.offset_ms == 104);
+    assert(clock_state.path_delay_ms == 12);
 }
 
 int main(void) {

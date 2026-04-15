@@ -68,6 +68,7 @@ struct dashcdg_tx_playlist {
 struct dashcdg_tx_state {
     pthread_mutex_t mutex;
     dashcdg_socket_t sockfd;
+    dashcdg_socket_t ptp_sockfd;
     struct sockaddr_in destination;
     struct dashcdg_packet_header header;
     struct dashcdg_announce_payload announce;
@@ -77,6 +78,7 @@ struct dashcdg_tx_state {
     struct dashcdg_tx_playlist playlist;
     pthread_t tx_thread;
     pthread_t control_thread;
+    pthread_t ptp_thread;
     uint8_t *asset_bytes;
     size_t asset_size;
     size_t next_asset_offset;
@@ -112,6 +114,7 @@ struct dashcdg_tx_state {
     uint64_t cdg_batch_packets_sent;
     uint64_t ptp_sync_packets_sent;
     uint64_t ptp_follow_up_packets_sent;
+    uint64_t ptp_delay_resp_packets_sent;
     uint32_t ptp_sync_id;
     uint64_t last_ptp_sync_ms;
     int preview_enabled;
@@ -569,8 +572,8 @@ static int16_t *dashcdg_tx_resample_pcm(
         for (int channel = 0; channel < channels; ++channel) {
             int32_t left = input[left_index * (size_t) channels + (size_t) channel];
             int32_t right = input[right_index * (size_t) channels + (size_t) channel];
-            int32_t mixed = (int32_t) (((uint64_t) left * (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
-                    ((uint64_t) right * frac)) / (int32_t) DASHCDG_AUDIO_SAMPLE_RATE;
+            int32_t mixed = (int32_t) ((((int64_t) left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
+                    ((int64_t) right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
             output[out_index * (size_t) channels + (size_t) channel] = (int16_t) mixed;
         }
     }
@@ -824,7 +827,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu ptp=%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | head_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | head_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -835,6 +838,7 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
             (unsigned long long) g_tx_state.ptp_sync_packets_sent,
             (unsigned long long) g_tx_state.ptp_follow_up_packets_sent,
+            (unsigned long long) g_tx_state.ptp_delay_resp_packets_sent,
             (unsigned int) available_prefix_bytes,
             (unsigned int) g_tx_state.beacon.total_asset_bytes,
             prefix_chunks,
@@ -906,6 +910,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.cdg_batch_packets_sent = 0;
     g_tx_state.ptp_sync_packets_sent = 0;
     g_tx_state.ptp_follow_up_packets_sent = 0;
+    g_tx_state.ptp_delay_resp_packets_sent = 0;
     g_tx_state.ptp_sync_id = 0;
     g_tx_state.last_ptp_sync_ms = 0;
     g_tx_state.send_failures = 0;
@@ -1001,6 +1006,69 @@ static int dashcdg_tx_send_packet(const uint8_t *packet, size_t packet_size) {
     );
 
     return sent == (int) packet_size;
+}
+
+static void *dashcdg_tx_ptp_thread_main(void *unused) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    struct sockaddr_in source_addr;
+    socklen_t source_addr_len;
+
+    (void) unused;
+
+    for (;;) {
+        int received;
+        struct dashcdg_packet_view view;
+
+        source_addr_len = (socklen_t) sizeof(source_addr);
+        received = (int) recvfrom(
+                g_tx_state.ptp_sockfd,
+                (char *) packet,
+                sizeof(packet),
+                0,
+                (struct sockaddr *) &source_addr,
+                &source_addr_len
+        );
+        if (received <= 0) {
+            break;
+        }
+        if (!dashcdg_protocol_parse_packet(&view, packet, (size_t) received)) {
+            continue;
+        }
+        if (view.header.type == DASHCDG_PACKET_PTP_DELAY_REQ) {
+            struct dashcdg_ptp_delay_resp_payload payload;
+            size_t packet_size;
+            uint64_t now_ms = dashcdg_clock_now_ms();
+
+            memset(&payload, 0, sizeof(payload));
+            payload.request_id = view.ptp_delay_req.request_id;
+            payload.request_rx_time_ms = now_ms;
+
+            pthread_mutex_lock(&g_tx_state.mutex);
+            if (g_tx_state.shutdown_requested) {
+                pthread_mutex_unlock(&g_tx_state.mutex);
+                break;
+            }
+            g_tx_state.header.flags = 0;
+            g_tx_state.header.sequence = g_tx_state.sequence++;
+            g_tx_state.header.sender_time_ms = now_ms;
+            packet_size = dashcdg_protocol_serialize_ptp_delay_resp(
+                    packet,
+                    sizeof(packet),
+                    &g_tx_state.header,
+                    &payload
+            );
+            if (packet_size > 0 && dashcdg_tx_send_packet(packet, packet_size)) {
+                g_tx_state.datagrams_sent++;
+                g_tx_state.bytes_sent += packet_size;
+                g_tx_state.ptp_delay_resp_packets_sent++;
+            } else {
+                g_tx_state.send_failures++;
+            }
+            pthread_mutex_unlock(&g_tx_state.mutex);
+        }
+    }
+
+    return NULL;
 }
 
 static void dashcdg_tx_print_help(void) {
@@ -1382,7 +1450,7 @@ static void dashcdg_tx_preview_display(void) {
             "loops:%llu off:%zu %s",
             (unsigned long long) g_tx_state.asset_loops_completed,
             g_tx_state.next_asset_offset,
-            track != NULL && track->mp3_path != NULL ? "MP3+G (audio is local on RX)" : "CDG-only"
+            track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
     );
     pthread_mutex_unlock(&g_tx_state.mutex);
 
@@ -1438,6 +1506,10 @@ static void dashcdg_tx_cleanup(void) {
         dashcdg_socket_close(g_tx_state.sockfd);
         g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
     }
+    if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_tx_state.ptp_sockfd);
+        g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+    }
     dashcdg_cdg_reader_free(&g_tx_state.reader);
     dashcdg_tx_playlist_free(&g_tx_state.playlist);
     dashcdg_net_cleanup();
@@ -1457,6 +1529,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
+    g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
     g_tx_state.warmup_ms = 3000;
     pthread_mutex_init(&g_tx_state.mutex, NULL);
@@ -1559,6 +1632,44 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         return 1;
     }
 
+    g_tx_state.ptp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_tx_state.ptp_sockfd == DASHCDG_INVALID_SOCKET) {
+        perror("socket");
+        dashcdg_tx_cleanup();
+        return 1;
+    }
+
+    {
+        int reuse = 1;
+        struct sockaddr_in local_addr;
+        struct ip_mreq membership;
+
+        setsockopt(g_tx_state.ptp_sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+        memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_port = htons((uint16_t) port);
+        local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(g_tx_state.ptp_sockfd, (struct sockaddr *) &local_addr, sizeof(local_addr)) != 0) {
+            perror("bind");
+            dashcdg_tx_cleanup();
+            return 1;
+        }
+
+        membership.imr_multiaddr = g_tx_state.destination.sin_addr;
+        membership.imr_interface.s_addr = htonl(INADDR_ANY);
+        if (setsockopt(
+                g_tx_state.ptp_sockfd,
+                IPPROTO_IP,
+                IP_ADD_MEMBERSHIP,
+                (const char *) &membership,
+                sizeof(membership)
+        ) != 0) {
+            perror("IP_ADD_MEMBERSHIP");
+            dashcdg_tx_cleanup();
+            return 1;
+        }
+    }
+
     g_tx_state.sequence = 1;
     if (!dashcdg_tx_load_track_locked(0, 1)) {
         dashcdg_tx_cleanup();
@@ -1569,10 +1680,16 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     fflush(stdout);
 
     pthread_create(&g_tx_state.tx_thread, NULL, dashcdg_tx_thread_main, NULL);
+    pthread_create(&g_tx_state.ptp_thread, NULL, dashcdg_tx_ptp_thread_main, NULL);
     pthread_create(&g_tx_state.control_thread, NULL, dashcdg_tx_control_thread_main, NULL);
 
     if (!g_tx_state.display_requested) {
         pthread_join(g_tx_state.tx_thread, NULL);
+        if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+            dashcdg_socket_close(g_tx_state.ptp_sockfd);
+            g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+        }
+        pthread_join(g_tx_state.ptp_thread, NULL);
         dashcdg_tx_cleanup();
         return 0;
     }
@@ -1589,6 +1706,11 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         fprintf(stderr, "failed to initialize TX preview renderer\n");
         g_tx_state.shutdown_requested = 1;
         pthread_join(g_tx_state.tx_thread, NULL);
+        if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+            dashcdg_socket_close(g_tx_state.ptp_sockfd);
+            g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+        }
+        pthread_join(g_tx_state.ptp_thread, NULL);
         dashcdg_tx_cleanup();
         return 1;
     }
@@ -1600,6 +1722,11 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
+    if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_tx_state.ptp_sockfd);
+        g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+    }
+    pthread_join(g_tx_state.ptp_thread, NULL);
     dashcdg_tx_cleanup();
     return 0;
 }

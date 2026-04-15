@@ -148,8 +148,8 @@ Current TX defaults:
 
 ## Important current limitations
 
-- The protocol declares `PTP_DELAY_REQ`, `PTP_DELAY_RESP`, and `FEC_PARITY`, but the desktop proof does not yet use them end-to-end.
-- Clock discipline is still a lightweight sender-offset estimator, not a full PTP round-trip implementation.
+- The protocol declares `FEC_PARITY`, but the desktop proof does not yet use it end-to-end.
+- Clock discipline now includes software-timestamped `PTP_DELAY_REQ` / `PTP_DELAY_RESP`, but it is still not a hardware-timestamped or sub-millisecond implementation.
 - Late join is still guaranteed by repeated asset replay, not bounded FEC recovery.
 - RX startup can still show a small number of early Opus decode failures during bring-up before the steady-state queue settles.
 - This is a proof tranche, not a finished venue-grade transport stack.
