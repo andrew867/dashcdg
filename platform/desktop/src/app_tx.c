@@ -33,6 +33,9 @@
 #define DASHCDG_AUDIO_GROUP_SIZE 5U
 #define DASHCDG_CDG_GROUP_SIZE 9U
 #define DASHCDG_CDG_BATCH_PACKETS DASHCDG_MAX_CDG_BATCH_PACKETS
+#define DASHCDG_CDG_SNAPSHOT_INTERVAL_MS 1000U
+#define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
+        (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_DEFAULT_LIBRARY_DIR "cdg"
 
 struct dashcdg_tx_audio_frame {
@@ -117,11 +120,17 @@ struct dashcdg_tx_state {
     uint64_t cdg_batch_packets_sent;
     uint64_t fec_audio_packets_sent;
     uint64_t fec_cdg_packets_sent;
+    uint64_t cdg_snapshot_packets_sent;
     uint64_t ptp_sync_packets_sent;
     uint64_t ptp_follow_up_packets_sent;
     uint64_t ptp_delay_resp_packets_sent;
     uint32_t ptp_sync_id;
     uint64_t last_ptp_sync_ms;
+    uint64_t last_cdg_snapshot_ms;
+    uint32_t cdg_snapshot_id;
+    uint64_t cdg_snapshot_packet_index;
+    size_t cdg_snapshot_offset;
+    uint8_t cdg_snapshot_state[DASHCDG_CDG_SNAPSHOT_STATE_BYTES];
     size_t *track_history;
     size_t track_history_count;
     size_t track_history_capacity;
@@ -150,6 +159,37 @@ static char *dashcdg_strdup(const char *value) {
 
     memcpy(copy, value, length + 1U);
     return copy;
+}
+
+static void dashcdg_tx_write_u32(uint8_t *dst, uint32_t value) {
+    dst[0] = (uint8_t) ((value >> 24U) & 0xFFU);
+    dst[1] = (uint8_t) ((value >> 16U) & 0xFFU);
+    dst[2] = (uint8_t) ((value >> 8U) & 0xFFU);
+    dst[3] = (uint8_t) (value & 0xFFU);
+}
+
+static size_t dashcdg_tx_serialize_cdg_snapshot_state(
+        const struct dashcdg_cdg_state *state,
+        uint8_t *buffer,
+        size_t buffer_size
+) {
+    size_t offset = 0;
+
+    if (state == NULL || buffer == NULL || buffer_size < DASHCDG_CDG_SNAPSHOT_STATE_BYTES) {
+        return 0;
+    }
+
+    buffer[offset++] = state->display_h_offset;
+    buffer[offset++] = state->display_v_offset;
+    memcpy(buffer + offset, state->transparency, DASHCDG_COLORS);
+    offset += DASHCDG_COLORS;
+    for (size_t i = 0; i < DASHCDG_COLORS; ++i) {
+        dashcdg_tx_write_u32(buffer + offset, (uint32_t) state->color_table[i]);
+        offset += 4U;
+    }
+    memcpy(buffer + offset, state->framebuffer, DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT);
+    offset += DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT;
+    return offset;
 }
 
 static int dashcdg_char_equal_ignore_case(char left, char right) {
@@ -1015,7 +1055,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | lead aud=%lldms live=%lldms start_in=%llums head_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -1024,6 +1064,7 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) g_tx_state.asset_chunk_packets_sent,
             (unsigned long long) g_tx_state.audio_packets_sent,
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
+            (unsigned long long) g_tx_state.cdg_snapshot_packets_sent,
             (unsigned long long) g_tx_state.fec_audio_packets_sent,
             (unsigned long long) g_tx_state.fec_cdg_packets_sent,
             (unsigned int) fec_overhead_pct,
@@ -1041,7 +1082,8 @@ static void dashcdg_tx_print_status_locked(void) {
             (long long) audio_lead_ms,
             (long long) cdg_lead_ms,
             (unsigned long long) until_start_ms,
-            g_tx_state.next_asset_offset
+            g_tx_state.next_asset_offset,
+            g_tx_state.cdg_snapshot_offset
     );
     fflush(stdout);
 }
@@ -1106,11 +1148,16 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.cdg_batch_packets_sent = 0;
     g_tx_state.fec_audio_packets_sent = 0;
     g_tx_state.fec_cdg_packets_sent = 0;
+    g_tx_state.cdg_snapshot_packets_sent = 0;
     g_tx_state.ptp_sync_packets_sent = 0;
     g_tx_state.ptp_follow_up_packets_sent = 0;
     g_tx_state.ptp_delay_resp_packets_sent = 0;
     g_tx_state.ptp_sync_id = 0;
     g_tx_state.last_ptp_sync_ms = 0;
+    g_tx_state.last_cdg_snapshot_ms = 0;
+    g_tx_state.cdg_snapshot_id = 0;
+    g_tx_state.cdg_snapshot_packet_index = 0;
+    g_tx_state.cdg_snapshot_offset = sizeof(g_tx_state.cdg_snapshot_state);
     g_tx_state.send_failures = 0;
     g_tx_state.playlist.current_index = index;
     g_tx_state.next_asset_offset = 0;
@@ -1312,6 +1359,81 @@ static int dashcdg_tx_send_fec_parity_locked(
         g_tx_state.fec_cdg_packets_sent++;
     }
     return 1;
+}
+
+static int dashcdg_tx_prepare_cdg_snapshot_locked(uint64_t now_ms) {
+    uint64_t packet_count;
+    uint64_t packet_index;
+
+    if (g_tx_state.asset_bytes == NULL || g_tx_state.asset_size == 0U) {
+        return 0;
+    }
+
+    packet_count = g_tx_state.asset_size / DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    if (packet_count == 0U) {
+        return 0;
+    }
+
+    if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
+        packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
+    } else {
+        packet_index = packet_count;
+    }
+
+    dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_index);
+    if (dashcdg_tx_serialize_cdg_snapshot_state(
+                &g_tx_state.reader.state,
+                g_tx_state.cdg_snapshot_state,
+                sizeof(g_tx_state.cdg_snapshot_state)
+        ) != sizeof(g_tx_state.cdg_snapshot_state)) {
+        return 0;
+    }
+
+    g_tx_state.cdg_snapshot_id++;
+    g_tx_state.cdg_snapshot_packet_index = packet_index;
+    g_tx_state.cdg_snapshot_offset = 0;
+    g_tx_state.last_cdg_snapshot_ms = now_ms;
+    return 1;
+}
+
+static void dashcdg_tx_send_cdg_snapshot_chunk_locked(uint64_t now_ms) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    struct dashcdg_cdg_snapshot_payload payload;
+    size_t remaining_bytes;
+    size_t chunk_bytes;
+    size_t packet_size;
+
+    if (g_tx_state.cdg_snapshot_offset >= sizeof(g_tx_state.cdg_snapshot_state)) {
+        return;
+    }
+
+    remaining_bytes = sizeof(g_tx_state.cdg_snapshot_state) - g_tx_state.cdg_snapshot_offset;
+    chunk_bytes = remaining_bytes > DASHCDG_MAX_CDG_SNAPSHOT_CHUNK ? DASHCDG_MAX_CDG_SNAPSHOT_CHUNK : remaining_bytes;
+
+    memset(&payload, 0, sizeof(payload));
+    payload.snapshot_id = g_tx_state.cdg_snapshot_id;
+    payload.packet_index = g_tx_state.cdg_snapshot_packet_index;
+    payload.total_bytes = (uint32_t) sizeof(g_tx_state.cdg_snapshot_state);
+    payload.snapshot_offset = (uint32_t) g_tx_state.cdg_snapshot_offset;
+    payload.chunk_length = (uint16_t) chunk_bytes;
+    payload.snapshot_bytes = g_tx_state.cdg_snapshot_state + g_tx_state.cdg_snapshot_offset;
+
+    g_tx_state.header.flags = 0;
+    g_tx_state.header.sequence = g_tx_state.sequence++;
+    g_tx_state.header.sender_time_ms = now_ms;
+    packet_size = dashcdg_protocol_serialize_cdg_snapshot(packet, sizeof(packet), &g_tx_state.header, &payload);
+    if (packet_size == 0) {
+        return;
+    }
+    if (!dashcdg_tx_send_packet(packet, packet_size)) {
+        g_tx_state.send_failures++;
+        return;
+    }
+
+    g_tx_state.datagrams_sent++;
+    g_tx_state.bytes_sent += packet_size;
+    g_tx_state.cdg_snapshot_packets_sent++;
+    g_tx_state.cdg_snapshot_offset += chunk_bytes;
 }
 
 static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t group_id) {
@@ -1733,6 +1855,17 @@ static void *dashcdg_tx_thread_main(void *unused) {
             }
         }
 
+        if (g_tx_state.asset_size > 0U &&
+                (g_tx_state.cdg_snapshot_offset >= sizeof(g_tx_state.cdg_snapshot_state))) {
+            if (g_tx_state.last_cdg_snapshot_ms == 0U ||
+                    now_ms - g_tx_state.last_cdg_snapshot_ms >= DASHCDG_CDG_SNAPSHOT_INTERVAL_MS) {
+                dashcdg_tx_prepare_cdg_snapshot_locked(now_ms);
+            }
+        }
+        if (g_tx_state.cdg_snapshot_offset < sizeof(g_tx_state.cdg_snapshot_state)) {
+            dashcdg_tx_send_cdg_snapshot_chunk_locked(now_ms);
+        }
+
         if (g_tx_state.asset_size > 0) {
             struct dashcdg_asset_chunk_payload chunk;
             size_t chunk_size = g_tx_state.asset_size - g_tx_state.next_asset_offset;
@@ -1836,11 +1969,12 @@ static void dashcdg_tx_preview_display(void) {
     snprintf(
             hud_line_a,
             sizeof(hud_line_a),
-            "TX dg:%llu fail:%llu live:%llu aud:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
+            "TX dg:%llu fail:%llu live:%llu aud:%llu snap:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
             (unsigned long long) g_tx_state.audio_packets_sent,
+            (unsigned long long) g_tx_state.cdg_snapshot_packets_sent,
             (unsigned long long) g_tx_state.fec_audio_packets_sent,
             (unsigned long long) g_tx_state.fec_cdg_packets_sent,
             (unsigned int) fec_overhead_pct,
@@ -1850,9 +1984,10 @@ static void dashcdg_tx_preview_display(void) {
     snprintf(
             hud_line_b,
             sizeof(hud_line_b),
-            "loops:%llu off:%zu lead:%lld/%lldms prof:%u/%u %s",
+            "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s",
             (unsigned long long) g_tx_state.asset_loops_completed,
             g_tx_state.next_asset_offset,
+            g_tx_state.cdg_snapshot_offset,
             (long long) audio_lead_ms,
             (long long) cdg_lead_ms,
             (unsigned int) g_tx_state.announce.audio_fec_group_size,

@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define DASHCDG_PROTOCOL_MAGIC 0x444B4731U
-#define DASHCDG_PROTOCOL_VERSION 2U
+#define DASHCDG_PROTOCOL_VERSION 3U
 #define DASHCDG_MAX_SONG_ID 64U
 #define DASHCDG_MAX_PACKET_SIZE 1400U
 #define DASHCDG_MAX_ASSET_CHUNK 1024U
@@ -14,6 +14,7 @@
 #define DASHCDG_MAX_FEC_PAYLOAD_BYTES 255U
 #define DASHCDG_SUBCHANNEL_PACKET_BYTES 24U
 #define DASHCDG_PACKET_FLAG_PAUSED 0x0001U
+#define DASHCDG_MAX_CDG_SNAPSHOT_CHUNK 1024U
 
 #define DASHCDG_STREAM_TYPE_AUDIO 1U
 #define DASHCDG_STREAM_TYPE_CDG 2U
@@ -29,7 +30,8 @@ enum dashcdg_packet_type {
     DASHCDG_PACKET_PTP_FOLLOW_UP = 8,
     DASHCDG_PACKET_PTP_DELAY_REQ = 9,
     DASHCDG_PACKET_PTP_DELAY_RESP = 10,
-    DASHCDG_PACKET_FEC_PARITY = 11
+    DASHCDG_PACKET_FEC_PARITY = 11,
+    DASHCDG_PACKET_CDG_SNAPSHOT = 12
 };
 
 struct dashcdg_packet_header {
@@ -126,6 +128,16 @@ struct dashcdg_fec_parity_payload {
     const uint8_t *payload_xor;
 };
 
+struct dashcdg_cdg_snapshot_payload {
+    uint32_t snapshot_id;
+    uint64_t packet_index;
+    uint32_t total_bytes;
+    uint32_t snapshot_offset;
+    uint16_t chunk_length;
+    uint16_t reserved;
+    const uint8_t *snapshot_bytes;
+};
+
 struct dashcdg_packet_view {
     struct dashcdg_packet_header header;
     struct dashcdg_announce_payload announce;
@@ -138,6 +150,7 @@ struct dashcdg_packet_view {
     struct dashcdg_ptp_delay_req_payload ptp_delay_req;
     struct dashcdg_ptp_delay_resp_payload ptp_delay_resp;
     struct dashcdg_fec_parity_payload fec_parity;
+    struct dashcdg_cdg_snapshot_payload cdg_snapshot;
 };
 
 size_t dashcdg_protocol_serialize_announce(
@@ -208,6 +221,13 @@ size_t dashcdg_protocol_serialize_fec_parity(
         size_t buffer_size,
         const struct dashcdg_packet_header *header,
         const struct dashcdg_fec_parity_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_cdg_snapshot(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_cdg_snapshot_payload *payload
 );
 
 int dashcdg_protocol_parse_packet(

@@ -354,6 +354,43 @@ size_t dashcdg_protocol_serialize_fec_parity(
     return offset;
 }
 
+size_t dashcdg_protocol_serialize_cdg_snapshot(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_cdg_snapshot_payload *payload
+) {
+    size_t payload_length;
+    size_t offset;
+
+    if (payload == NULL || payload->snapshot_bytes == NULL || payload->chunk_length == 0 ||
+            payload->chunk_length > DASHCDG_MAX_CDG_SNAPSHOT_CHUNK) {
+        return 0;
+    }
+
+    payload_length = 4U + 8U + 4U + 4U + 2U + 2U + payload->chunk_length;
+    if (buffer_size < DASHCDG_PACKET_HEADER_SIZE + payload_length) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header(buffer, buffer_size, header, DASHCDG_PACKET_CDG_SNAPSHOT, (uint16_t) payload_length);
+    dashcdg_write_u32(buffer + offset, payload->snapshot_id);
+    offset += 4U;
+    dashcdg_write_u64(buffer + offset, payload->packet_index);
+    offset += 8U;
+    dashcdg_write_u32(buffer + offset, payload->total_bytes);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->snapshot_offset);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->chunk_length);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->reserved);
+    offset += 2U;
+    memcpy(buffer + offset, payload->snapshot_bytes, payload->chunk_length);
+    offset += payload->chunk_length;
+    return offset;
+}
+
 int dashcdg_protocol_parse_packet(
         struct dashcdg_packet_view *view,
         const uint8_t *buffer,
@@ -557,6 +594,30 @@ int dashcdg_protocol_parse_packet(
                 return 0;
             }
             view->fec_parity.payload_xor = buffer + offset;
+            return 1;
+
+        case DASHCDG_PACKET_CDG_SNAPSHOT:
+            if (payload_length < 24U) {
+                return 0;
+            }
+            view->cdg_snapshot.snapshot_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->cdg_snapshot.packet_index = dashcdg_read_u64(buffer + offset);
+            offset += 8U;
+            view->cdg_snapshot.total_bytes = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->cdg_snapshot.snapshot_offset = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->cdg_snapshot.chunk_length = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->cdg_snapshot.reserved = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            if ((size_t) view->cdg_snapshot.chunk_length != payload_length - 24U ||
+                    view->cdg_snapshot.chunk_length > DASHCDG_MAX_CDG_SNAPSHOT_CHUNK ||
+                    view->cdg_snapshot.snapshot_offset + view->cdg_snapshot.chunk_length > view->cdg_snapshot.total_bytes) {
+                return 0;
+            }
+            view->cdg_snapshot.snapshot_bytes = buffer + offset;
             return 1;
 
         default:

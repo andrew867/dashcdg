@@ -1,4 +1,4 @@
-# Karaoke Transport Protocol v2
+# Karaoke Transport Protocol v3
 
 ## Goals
 
@@ -15,7 +15,7 @@ Every datagram starts with the fixed header defined in `proto/include/dashcdg/pr
 Header fields:
 
 - `magic`: `DKG1`
-- `version`: protocol version, currently `2`
+- `version`: protocol version, currently `3`
 - `type`: packet discriminator
 - `flags`: transport flags; today `DASHCDG_PACKET_FLAG_PAUSED` is used to advertise paused playback state
 - `sequence`: sender-wide monotonically increasing datagram sequence
@@ -29,6 +29,7 @@ Important framing constants:
 - `DASHCDG_MAX_ASSET_CHUNK = 1024`
 - `DASHCDG_MAX_AUDIO_FRAME_BYTES = 255`
 - `DASHCDG_MAX_CDG_BATCH_PACKETS = 6`
+- `DASHCDG_MAX_CDG_SNAPSHOT_CHUNK = 1024`
 - `DASHCDG_MAX_FEC_PAYLOAD_BYTES = 255`
 - `DASHCDG_SUBCHANNEL_PACKET_BYTES = 24`
 
@@ -145,6 +146,28 @@ Current desktop behavior:
 - each batch carries up to 6 raw CD+G subchannel packets
 - TX timestamps batches by the source CD+G packet index converted into milliseconds
 - RX applies batches in order to a live `dashcdg_cdg_state`
+
+### `CDG_SNAPSHOT`
+
+Purpose:
+
+- bounded late-join video state keyframe
+- immediate live framebuffer bootstrap before the full asset is rebuilt
+
+Fields:
+
+- `snapshot_id`
+- `packet_index`
+- `total_bytes`
+- `snapshot_offset`
+- `chunk_length`
+- `snapshot_bytes`
+
+Current desktop behavior:
+
+- TX periodically serializes the current live `dashcdg_cdg_state` into bounded 1024-byte chunks
+- RX reassembles the snapshot, restores the live framebuffer/palette state, and resumes from the aligned live `CDG_BATCH` packet index
+- the full `ASSET_CHUNK` replay still continues in parallel so deterministic seek/bootstrap completes in the background
 
 ### `PTP_SYNC`
 

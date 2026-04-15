@@ -5,7 +5,7 @@
 - deterministic CD+G decode and seek
 - a versioned UDP-friendly wire protocol
 - desktop proof applications for local playback plus multicast-or-broadcast network transmit/receive
-- a live on-wire `Opus + timed CDG` proof path with late-join bootstrap
+- a live on-wire `Opus + timed CDG` proof path with late-join bootstrap plus bounded live CDG state keyframes
 
 ## Current repository contents
 
@@ -145,6 +145,7 @@ The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
 - `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` maintain a software-timestamped round-trip clock estimate
 - RX decodes network Opus into a queue-driven PortAudio stream when audio metadata is present
 - RX now uses bounded pending queues plus deadline-based skip logic for reordered or missing live audio/CD+G packets
+- TX now emits periodic bounded `CDG_SNAPSHOT` keyframes, and RX can apply them immediately so late-join video starts before the full `.cdg` asset has finished replaying
 - TX now emits bounded `FEC_PARITY` packets for audio and CD+G groups, and RX attempts single-missing-packet repair before treating a group as lost
 - TX/RX status lines now expose startup gates, clock-update quality, repair hotness, and FEC profile/overhead telemetry
 - desktop TX/RX now default to `239.255.77.77:24684`, while also allowing explicit multicast or IPv4 broadcast endpoints
@@ -180,7 +181,7 @@ Current TX defaults:
 
 - The desktop proof now has a repeatable impairment relay and validation workflow, but long-duration impaired multicast soak data is still incomplete.
 - Clock discipline now includes software-timestamped `PTP_DELAY_REQ` / `PTP_DELAY_RESP`, but it is still not a hardware-timestamped or sub-millisecond implementation.
-- Late join is still guaranteed primarily by repeated asset replay, not by long-window FEC or retransmit.
+- Late join video now has periodic live state keyframes, but full asset replay is still required for deterministic seek/backfill and for long-running recovery after missed keyframes.
 - RX startup can still show a small number of early Opus decode failures or deadline skips during bring-up before the steady-state queue settles.
 - This is a proof tranche, not a finished venue-grade transport stack.
 

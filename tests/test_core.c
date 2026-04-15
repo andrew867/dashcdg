@@ -127,11 +127,13 @@ static void test_protocol_roundtrip(void) {
     struct dashcdg_clock_beacon_payload beacon;
     struct dashcdg_audio_frame_payload audio_frame;
     struct dashcdg_fec_parity_payload fec_parity;
+    struct dashcdg_cdg_snapshot_payload cdg_snapshot;
     struct dashcdg_ptp_delay_req_payload delay_req;
     struct dashcdg_ptp_delay_resp_payload delay_resp;
     uint8_t chunk_bytes[] = { 1, 2, 3, 4 };
     uint8_t audio_bytes[] = { 9, 8, 7, 6 };
     uint8_t fec_bytes[] = { 0x10, 0x20, 0x30, 0x40 };
+    uint8_t snapshot_bytes[] = { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
     size_t size;
 
     memset(&header, 0, sizeof(header));
@@ -228,6 +230,23 @@ static void test_protocol_roundtrip(void) {
     assert(view.fec_parity.group_id == 1);
     assert(view.fec_parity.payload_length_xor == sizeof(fec_bytes));
     assert(memcmp(view.fec_parity.payload_xor, fec_bytes, sizeof(fec_bytes)) == 0);
+
+    memset(&cdg_snapshot, 0, sizeof(cdg_snapshot));
+    cdg_snapshot.snapshot_id = 5;
+    cdg_snapshot.packet_index = 1234;
+    cdg_snapshot.total_bytes = 32;
+    cdg_snapshot.snapshot_offset = 7;
+    cdg_snapshot.chunk_length = sizeof(snapshot_bytes);
+    cdg_snapshot.snapshot_bytes = snapshot_bytes;
+    size = dashcdg_protocol_serialize_cdg_snapshot(buffer, sizeof(buffer), &header, &cdg_snapshot);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.cdg_snapshot.snapshot_id == 5);
+    assert(view.cdg_snapshot.packet_index == 1234);
+    assert(view.cdg_snapshot.total_bytes == 32);
+    assert(view.cdg_snapshot.snapshot_offset == 7);
+    assert(view.cdg_snapshot.chunk_length == sizeof(snapshot_bytes));
+    assert(memcmp(view.cdg_snapshot.snapshot_bytes, snapshot_bytes, sizeof(snapshot_bytes)) == 0);
 }
 
 static void test_media_clock(void) {
