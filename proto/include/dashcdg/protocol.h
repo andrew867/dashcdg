@@ -6,6 +6,7 @@
 
 #define DASHCDG_PROTOCOL_MAGIC 0x444B4731U
 #define DASHCDG_PROTOCOL_VERSION 3U
+#define DASHCDG_PROTOCOL_VERSION_V4 4U
 #define DASHCDG_MAX_SONG_ID 64U
 #define DASHCDG_MAX_PACKET_SIZE 1400U
 #define DASHCDG_MAX_ASSET_CHUNK 1024U
@@ -15,6 +16,10 @@
 #define DASHCDG_SUBCHANNEL_PACKET_BYTES 24U
 #define DASHCDG_PACKET_FLAG_PAUSED 0x0001U
 #define DASHCDG_MAX_CDG_SNAPSHOT_CHUNK 1024U
+#define DASHCDG_MAX_V4_LOADING_TEXT 32U
+#define DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES 1024U
+#define DASHCDG_MAX_V4_VIDEO_DELTA_BYTES 1024U
+#define DASHCDG_MAX_V4_BACKFILL_CHUNK 1024U
 
 #define DASHCDG_STREAM_TYPE_AUDIO 1U
 #define DASHCDG_STREAM_TYPE_CDG 2U
@@ -31,7 +36,44 @@ enum dashcdg_packet_type {
     DASHCDG_PACKET_PTP_DELAY_REQ = 9,
     DASHCDG_PACKET_PTP_DELAY_RESP = 10,
     DASHCDG_PACKET_FEC_PARITY = 11,
-    DASHCDG_PACKET_CDG_SNAPSHOT = 12
+    DASHCDG_PACKET_CDG_SNAPSHOT = 12,
+    DASHCDG_PACKET_V4_SESSION_INFO = 13,
+    DASHCDG_PACKET_V4_LOADING_SCREEN = 14,
+    DASHCDG_PACKET_V4_VIDEO_ANCHOR = 15,
+    DASHCDG_PACKET_V4_AUDIO_CHUNK = 16,
+    DASHCDG_PACKET_V4_VIDEO_DELTA = 17,
+    DASHCDG_PACKET_V4_REPAIR_WINDOW = 18,
+    DASHCDG_PACKET_V4_BACKFILL_CHUNK = 19,
+    DASHCDG_PACKET_V4_CLOCK_SYNC = 20
+};
+
+enum dashcdg_v4_audio_profile_id {
+    DASHCDG_V4_AUDIO_PROFILE_QUALITY = 1,
+    DASHCDG_V4_AUDIO_PROFILE_RESILIENCE = 2
+};
+
+enum dashcdg_v4_audio_codec_id {
+    DASHCDG_V4_AUDIO_CODEC_OPUS = 1,
+    DASHCDG_V4_AUDIO_CODEC_SBC_LIKE = 2
+};
+
+enum dashcdg_v4_loading_screen_kind {
+    DASHCDG_V4_LOADING_SCREEN_CONNECTING = 1,
+    DASHCDG_V4_LOADING_SCREEN_LATE_JOIN = 2,
+    DASHCDG_V4_LOADING_SCREEN_REPAIRING = 3
+};
+
+enum dashcdg_v4_video_anchor_mode {
+    DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS = 1
+};
+
+enum dashcdg_v4_video_delta_mode {
+    DASHCDG_V4_VIDEO_DELTA_MODE_CDG_PACKETS = 1,
+    DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN = 2
+};
+
+enum dashcdg_v4_repair_mode {
+    DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY = 1
 };
 
 struct dashcdg_packet_header {
@@ -138,6 +180,101 @@ struct dashcdg_cdg_snapshot_payload {
     const uint8_t *snapshot_bytes;
 };
 
+struct dashcdg_v4_session_info_payload {
+    char song_id[DASHCDG_MAX_SONG_ID];
+    uint8_t transport_version;
+    uint8_t audio_profile_id;
+    uint8_t video_profile_id;
+    uint8_t audio_codec_id;
+    uint16_t audio_sample_rate;
+    uint8_t audio_channels;
+    uint8_t audio_frame_ms;
+    uint16_t audio_bitrate_or_mode;
+    uint16_t startup_preroll_ms;
+    uint8_t audio_join_redundancy;
+    uint8_t repair_mode;
+    uint8_t video_anchor_mode;
+    uint8_t video_delta_mode;
+    uint8_t startup_backfill_mode;
+    uint8_t loading_screen_mode;
+    uint32_t asset_size;
+    uint64_t session_start_ms;
+};
+
+struct dashcdg_v4_loading_screen_payload {
+    uint32_t screen_id;
+    uint8_t screen_kind;
+    uint8_t animation_phase;
+    uint8_t reserved_a;
+    uint8_t reserved_b;
+    uint64_t anchor_packet_index;
+    char primary_text[DASHCDG_MAX_V4_LOADING_TEXT];
+};
+
+struct dashcdg_v4_video_anchor_payload {
+    uint32_t anchor_id;
+    uint8_t anchor_format;
+    uint8_t flags;
+    uint16_t chunk_length;
+    uint64_t packet_index;
+    uint32_t total_bytes;
+    uint32_t anchor_offset;
+    const uint8_t *anchor_bytes;
+};
+
+struct dashcdg_v4_audio_chunk_payload {
+    uint32_t media_sequence;
+    uint32_t group_id;
+    uint8_t group_index;
+    uint8_t frame_ms;
+    uint8_t audio_profile_id;
+    uint8_t codec_id;
+    uint8_t chunk_flags;
+    uint8_t reserved;
+    uint64_t playback_ms;
+    uint16_t encoded_length;
+    const uint8_t *encoded_bytes;
+};
+
+struct dashcdg_v4_video_delta_payload {
+    uint32_t media_sequence;
+    uint32_t group_id;
+    uint8_t group_index;
+    uint8_t delta_format;
+    uint8_t delta_flags;
+    uint8_t packet_count;
+    uint64_t packet_start_index;
+    uint16_t encoded_length;
+    uint16_t reserved;
+    const uint8_t *delta_bytes;
+};
+
+struct dashcdg_v4_repair_window_payload {
+    uint8_t stream_type;
+    uint8_t repair_mode;
+    uint8_t redundancy_index;
+    uint8_t group_size;
+    uint32_t group_id;
+    uint16_t payload_length;
+    uint16_t reserved;
+    const uint8_t *payload_bytes;
+};
+
+struct dashcdg_v4_backfill_chunk_payload {
+    uint32_t asset_offset;
+    uint16_t chunk_length;
+    uint8_t backfill_mode;
+    uint8_t reserved;
+    const uint8_t *chunk_bytes;
+};
+
+struct dashcdg_v4_clock_sync_payload {
+    uint64_t session_start_ms;
+    uint64_t playback_ms;
+    uint32_t startup_state;
+    uint32_t reserved;
+};
+
 struct dashcdg_packet_view {
     struct dashcdg_packet_header header;
     struct dashcdg_announce_payload announce;
@@ -151,6 +288,14 @@ struct dashcdg_packet_view {
     struct dashcdg_ptp_delay_resp_payload ptp_delay_resp;
     struct dashcdg_fec_parity_payload fec_parity;
     struct dashcdg_cdg_snapshot_payload cdg_snapshot;
+    struct dashcdg_v4_session_info_payload v4_session_info;
+    struct dashcdg_v4_loading_screen_payload v4_loading_screen;
+    struct dashcdg_v4_video_anchor_payload v4_video_anchor;
+    struct dashcdg_v4_audio_chunk_payload v4_audio_chunk;
+    struct dashcdg_v4_video_delta_payload v4_video_delta;
+    struct dashcdg_v4_repair_window_payload v4_repair_window;
+    struct dashcdg_v4_backfill_chunk_payload v4_backfill_chunk;
+    struct dashcdg_v4_clock_sync_payload v4_clock_sync;
 };
 
 size_t dashcdg_protocol_serialize_announce(
@@ -228,6 +373,62 @@ size_t dashcdg_protocol_serialize_cdg_snapshot(
         size_t buffer_size,
         const struct dashcdg_packet_header *header,
         const struct dashcdg_cdg_snapshot_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_session_info(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_session_info_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_loading_screen(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_loading_screen_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_video_anchor(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_video_anchor_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_audio_chunk(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_audio_chunk_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_video_delta(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_video_delta_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_repair_window(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_repair_window_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_backfill_chunk(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_backfill_chunk_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_clock_sync(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_clock_sync_payload *payload
 );
 
 int dashcdg_protocol_parse_packet(

@@ -275,6 +275,157 @@ static void test_protocol_roundtrip(void) {
     assert(memcmp(view.cdg_snapshot.snapshot_bytes, snapshot_bytes, sizeof(snapshot_bytes)) == 0);
 }
 
+static void test_protocol_v4_roundtrip(void) {
+    uint8_t buffer[DASHCDG_MAX_PACKET_SIZE];
+    struct dashcdg_packet_header header;
+    struct dashcdg_packet_view view;
+    struct dashcdg_v4_session_info_payload session_info;
+    struct dashcdg_v4_loading_screen_payload loading_screen;
+    struct dashcdg_v4_video_anchor_payload video_anchor;
+    struct dashcdg_v4_audio_chunk_payload audio_chunk;
+    struct dashcdg_v4_video_delta_payload video_delta;
+    struct dashcdg_v4_repair_window_payload repair_window;
+    struct dashcdg_v4_backfill_chunk_payload backfill_chunk;
+    struct dashcdg_v4_clock_sync_payload clock_sync;
+    uint8_t anchor_bytes[] = { 0x01, 0x02, 0x03, 0x04 };
+    uint8_t audio_bytes[] = { 0x11, 0x22, 0x33, 0x44 };
+    uint8_t delta_bytes[] = { 0x21, 0x22, 0x23, 0x24, 0x25 };
+    uint8_t repair_bytes[] = { 0x31, 0x32, 0x33 };
+    uint8_t backfill_bytes[] = { 0x41, 0x42, 0x43, 0x44 };
+    size_t size;
+
+    memset(&header, 0, sizeof(header));
+    header.sequence = 77;
+    header.sender_time_ms = 9999;
+
+    memset(&session_info, 0, sizeof(session_info));
+    strcpy(session_info.song_id, "badnet-song");
+    session_info.transport_version = DASHCDG_PROTOCOL_VERSION_V4;
+    session_info.audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+    session_info.video_profile_id = 1;
+    session_info.audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
+    session_info.audio_sample_rate = 16000;
+    session_info.audio_channels = 1;
+    session_info.audio_frame_ms = 20;
+    session_info.audio_bitrate_or_mode = 24;
+    session_info.startup_preroll_ms = 240;
+    session_info.audio_join_redundancy = 3;
+    session_info.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
+    session_info.video_anchor_mode = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
+    session_info.video_delta_mode = DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN;
+    session_info.startup_backfill_mode = 1;
+    session_info.loading_screen_mode = DASHCDG_V4_LOADING_SCREEN_CONNECTING;
+    session_info.asset_size = 8192;
+    session_info.session_start_ms = 4567;
+    size = dashcdg_protocol_serialize_v4_session_info(buffer, sizeof(buffer), &header, &session_info);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.header.version == DASHCDG_PROTOCOL_VERSION_V4);
+    assert(strcmp(view.v4_session_info.song_id, "badnet-song") == 0);
+    assert(view.v4_session_info.audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE);
+    assert(view.v4_session_info.startup_preroll_ms == 240);
+
+    memset(&loading_screen, 0, sizeof(loading_screen));
+    loading_screen.screen_id = 7;
+    loading_screen.screen_kind = DASHCDG_V4_LOADING_SCREEN_LATE_JOIN;
+    loading_screen.animation_phase = 2;
+    loading_screen.anchor_packet_index = 321;
+    strcpy(loading_screen.primary_text, "RECONNECT");
+    size = dashcdg_protocol_serialize_v4_loading_screen(buffer, sizeof(buffer), &header, &loading_screen);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_loading_screen.screen_kind == DASHCDG_V4_LOADING_SCREEN_LATE_JOIN);
+    assert(view.v4_loading_screen.anchor_packet_index == 321);
+    assert(strcmp(view.v4_loading_screen.primary_text, "RECONNECT") == 0);
+
+    memset(&video_anchor, 0, sizeof(video_anchor));
+    video_anchor.anchor_id = 5;
+    video_anchor.anchor_format = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
+    video_anchor.packet_index = 654;
+    video_anchor.total_bytes = 64;
+    video_anchor.anchor_offset = 4;
+    video_anchor.chunk_length = sizeof(anchor_bytes);
+    video_anchor.anchor_bytes = anchor_bytes;
+    size = dashcdg_protocol_serialize_v4_video_anchor(buffer, sizeof(buffer), &header, &video_anchor);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_video_anchor.anchor_id == 5);
+    assert(view.v4_video_anchor.packet_index == 654);
+    assert(memcmp(view.v4_video_anchor.anchor_bytes, anchor_bytes, sizeof(anchor_bytes)) == 0);
+
+    memset(&audio_chunk, 0, sizeof(audio_chunk));
+    audio_chunk.media_sequence = 12;
+    audio_chunk.group_id = 4;
+    audio_chunk.group_index = 1;
+    audio_chunk.frame_ms = 20;
+    audio_chunk.audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+    audio_chunk.codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+    audio_chunk.chunk_flags = 1;
+    audio_chunk.playback_ms = 777;
+    audio_chunk.encoded_length = sizeof(audio_bytes);
+    audio_chunk.encoded_bytes = audio_bytes;
+    size = dashcdg_protocol_serialize_v4_audio_chunk(buffer, sizeof(buffer), &header, &audio_chunk);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_audio_chunk.media_sequence == 12);
+    assert(view.v4_audio_chunk.codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS);
+    assert(memcmp(view.v4_audio_chunk.encoded_bytes, audio_bytes, sizeof(audio_bytes)) == 0);
+
+    memset(&video_delta, 0, sizeof(video_delta));
+    video_delta.media_sequence = 33;
+    video_delta.group_id = 6;
+    video_delta.group_index = 0;
+    video_delta.delta_format = DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN;
+    video_delta.delta_flags = 1;
+    video_delta.packet_count = 3;
+    video_delta.packet_start_index = 900;
+    video_delta.encoded_length = sizeof(delta_bytes);
+    video_delta.delta_bytes = delta_bytes;
+    size = dashcdg_protocol_serialize_v4_video_delta(buffer, sizeof(buffer), &header, &video_delta);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_video_delta.delta_format == DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN);
+    assert(view.v4_video_delta.packet_start_index == 900);
+    assert(memcmp(view.v4_video_delta.delta_bytes, delta_bytes, sizeof(delta_bytes)) == 0);
+
+    memset(&repair_window, 0, sizeof(repair_window));
+    repair_window.stream_type = DASHCDG_STREAM_TYPE_AUDIO;
+    repair_window.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
+    repair_window.redundancy_index = 1;
+    repair_window.group_size = 4;
+    repair_window.group_id = 88;
+    repair_window.payload_length = sizeof(repair_bytes);
+    repair_window.payload_bytes = repair_bytes;
+    size = dashcdg_protocol_serialize_v4_repair_window(buffer, sizeof(buffer), &header, &repair_window);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_repair_window.group_id == 88);
+    assert(view.v4_repair_window.redundancy_index == 1);
+    assert(memcmp(view.v4_repair_window.payload_bytes, repair_bytes, sizeof(repair_bytes)) == 0);
+
+    memset(&backfill_chunk, 0, sizeof(backfill_chunk));
+    backfill_chunk.asset_offset = 1024;
+    backfill_chunk.chunk_length = sizeof(backfill_bytes);
+    backfill_chunk.backfill_mode = 1;
+    backfill_chunk.chunk_bytes = backfill_bytes;
+    size = dashcdg_protocol_serialize_v4_backfill_chunk(buffer, sizeof(buffer), &header, &backfill_chunk);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_backfill_chunk.asset_offset == 1024);
+    assert(memcmp(view.v4_backfill_chunk.chunk_bytes, backfill_bytes, sizeof(backfill_bytes)) == 0);
+
+    memset(&clock_sync, 0, sizeof(clock_sync));
+    clock_sync.session_start_ms = 4567;
+    clock_sync.playback_ms = 1234;
+    clock_sync.startup_state = 2;
+    size = dashcdg_protocol_serialize_v4_clock_sync(buffer, sizeof(buffer), &header, &clock_sync);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.v4_clock_sync.session_start_ms == 4567);
+    assert(view.v4_clock_sync.playback_ms == 1234);
+    assert(view.v4_clock_sync.startup_state == 2);
+}
+
 static void test_media_clock(void) {
     struct dashcdg_media_clock clock_state;
 
@@ -326,6 +477,7 @@ int main(void) {
     test_scroll_copy_direction_and_offset_clamp();
     test_reader_seek_and_keyframes();
     test_protocol_roundtrip();
+    test_protocol_v4_roundtrip();
     test_media_clock();
     test_fec_recovery();
 
