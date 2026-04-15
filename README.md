@@ -7,6 +7,11 @@
 - desktop TX/RX proof apps for multicast and IPv4 broadcast transport
 - live on-wire `Opus + timed CDG` playout with late-join bootstrap, bounded FEC, and periodic CDG state keyframes
 
+The current desktop TX already sends audio and CD+G in parallel on the wire.
+The next portability/slimdown tranche focuses on reducing TX-side CD+G memory
+duplication and clearly separating modern desktop support from legacy Windows
+research.
+
 ## What Exists Today
 
 The active desktop proof is a hybrid transport:
@@ -232,6 +237,10 @@ Implemented and documented:
 - startup, repair, and clock telemetry in both TX and RX
 - measured isolated soak proving steady-state RX playout progression no longer falls back into `wait-preroll` while traffic continues
 - measured forced session restart to a different track proving RX can tear down the old session and lock onto a fresh announce/bootstrap cycle cleanly
+- a separate TX CD+G source/memory slimdown spec now defines how to remove
+  duplicated batch storage without changing protocol semantics in place
+- a separate portability baseline now distinguishes modern desktop support from
+  legacy Windows GUI feasibility research
 
 Still rough or incomplete:
 
@@ -239,13 +248,16 @@ Still rough or incomplete:
 - long impaired-network soak data is still incomplete
 - current FEC only repairs one missing payload per protected group
 - some desktop proof scenarios can still show a small burst of early decode failures while queues settle after startup
+- TX still duplicates CD+G payload storage by keeping both the raw asset and
+  prebuilt `CDG_BATCH` payload copies
 
 ## Important Current Limitations
 
 - This is a desktop proof transport, not a finished venue-grade production stack.
 - Long-duration impaired multicast soak data is still incomplete.
 - Full asset replay is still required for deterministic seek/backfill even though snapshots now accelerate late join and recovery.
-- TX still preloads the `.cdg` asset and is not yet a fully streaming bootstrap pipeline end-to-end.
+- TX still preloads the `.cdg` asset and also prebuilds duplicated timed-batch
+  payload storage; the staged removal plan is documented separately.
 - Embedded receiver work is still documentation-first; there is no buildable ESP-IDF receiver in the repo yet.
 
 ## Related documentation
@@ -253,9 +265,13 @@ Still rough or incomplete:
 - `docs/architecture/desktop-streaming.md`: end-to-end desktop TX/RX architecture and runtime diagrams
 - `docs/architecture/threaded-streaming-runtime.md`: implemented task/queue ownership model for the threaded desktop runtime
 - `docs/specs/transport-protocol.md`: full protocol v3 field-level documentation
+- `docs/specs/tx-cdg-source-model.md`: current TX CD+G duplication and staged slimdown plan
 - `docs/specs/receiver-progress-invariants.md`: receiver rules that prevent long-play ingress-without-playout stalls
 - `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove and how to read its status
+- `docs/test/portability-streaming-validation.md`: portability/slimdown validation matrix for live wire behavior and platform smoke coverage
 - `docs/test/desktop-impairment-validation.md`: repeatable impaired-network proof workflow and expected counters
 - `docs/architecture/portable-core.md`: portable vs desktop-specific boundaries
+- `docs/architecture/modern-desktop-baseline.md`: supported modern Windows/Linux/macOS desktop baseline
+- `docs/architecture/legacy-windows-gui-feasibility.md`: separate legacy full-GUI Windows feasibility tranche
 - `docs/hardware/`: future ESP32 receiver and productization docs
 - `docs/ops/quality-gates.md`: current tranche release criteria

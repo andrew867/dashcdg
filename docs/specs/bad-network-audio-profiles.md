@@ -31,6 +31,16 @@ Starting direction:
 - allow in-band or transport-level repair, but do not assume heavy startup
   bursts
 
+First-tranche lock:
+
+- codec family: Opus
+- network sample rate: `48 kHz`
+- channels: mono for the desktop network path
+- nominal frame size: `20 ms`
+- nominal bitrate target: start from the current desktop proof range and carry
+  the exact configured bitrate on the wire
+- startup policy: light join redundancy, then steady-state paced send
+
 ### `resilience`
 
 Purpose:
@@ -47,12 +57,15 @@ Target behavior:
 - better tolerance of startup packet loss through redundancy or shorter decoder
   dependency chains
 
-Candidate codec directions to evaluate in implementation:
+First-tranche lock:
 
-- lower-rate Opus
-- `mu-law` or `A-law`
-- a simple SBC-like low-bitrate framed mode
-- another codec that has both floating-point desktop and fixed-point MCU paths
+- codec family: SBC-like framed low-bitrate mode
+- target purpose: weak-link survival and deterministic debugging profile
+- expected properties:
+  - materially lower steady-state bitrate than `quality`
+  - short independent frames with shallow dependency chains
+  - simple enough decode path that a future MCU receiver is plausible
+  - explicit join redundancy for the first audio groups
 
 ## Wire Signaling
 
@@ -66,6 +79,19 @@ Every session announcement for the new transport must expose:
 - `bitrate_or_mode`
 - `join_redundancy_mode`
 - `fec_or_repair_mode`
+
+For the first v4 rollout, the metadata should be concrete enough that RX can
+instantiate either decoder immediately:
+
+- `audio_profile_id = quality | resilience`
+- `codec_id = opus | sbc_like`
+- `sample_rate`
+- `channels`
+- `frame_ms`
+- `bitrate_or_mode`
+- `join_redundancy_mode`
+- `fec_or_repair_mode`
+- `startup_preroll_ms`
 
 Late-join receivers must not need out-of-band configuration to start decoding.
 
@@ -82,6 +108,18 @@ Required concepts:
 - observability that states whether RX is waiting on packets, decoder config,
   preroll depth, or repair completion
 
+First-tranche startup policy:
+
+- `quality`
+  - modest join redundancy for the first audio groups
+  - preserve the current desktop feel on healthy links
+  - prefer Opus continuity over aggressive startup duplication
+- `resilience`
+  - duplicate or otherwise redundantly send the first few audio groups
+  - use a smaller, simpler frame format to reduce dependency on one perfect
+    initial burst
+  - expose a lower startup preroll target than `quality` if testing supports it
+
 ## Profile Selection Policy
 
 The operator-facing runtime should eventually support:
@@ -92,6 +130,12 @@ The operator-facing runtime should eventually support:
 
 Automatic profile switching is not required in the first tranche. It may be
 added later, but the wire format should not prevent it.
+
+First-tranche operator policy:
+
+- default to `quality`
+- allow an explicit forced `resilience` mode in TX
+- make the active mode visible in both TX and RX status output
 
 ## Proof Requirements
 
@@ -105,3 +149,9 @@ added later, but the wire format should not prevent it.
 - materially lower link budget
 - successful late-join audio startup under the weak-Wi-Fi validation matrix
 - explicit operator-visible indication that the resilience profile is active
+
+The first implementation should additionally prove:
+
+- decoder bring-up from wire metadata alone for both codecs
+- recovery from damage to the first audio groups without a permanent
+  video-only-started / audio-never-started wedge

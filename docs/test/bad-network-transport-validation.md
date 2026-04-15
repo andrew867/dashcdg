@@ -24,6 +24,10 @@ For every case below, capture:
 - worst one-second burst bitrate
 - RX startup state transitions
 - RX repair and failure counters
+- explicit active audio profile and codec id
+- explicit active anchor mode and repair mode
+- structured event timestamps for `loading_screen`, `first_anchor`,
+  `first_audio`, and `running`
 
 ## Matrix
 
@@ -48,6 +52,11 @@ Conditions:
 
 - constrained relay bandwidth representative of weak Wi-Fi
 - no added loss beyond clamp side effects
+
+Recommended proof tooling:
+
+- use a constrained relay that can enforce throughput ceilings rather than only
+  synthetic drop patterns
 
 Pass criteria:
 
@@ -120,6 +129,13 @@ Every validation run should summarize:
 - observed bitrate averages and peaks
 - whether first visual or first audio missed target and why
 
+For the first v4 rollout, the report should also include:
+
+- active codec id (`opus` or `sbc_like`)
+- startup redundancy mode
+- startup preroll target
+- whether recovery used redundancy, parity, retry, or deadline skip
+
 ## Exit Criteria
 
 The bad-network tranche is not considered proven until:
@@ -129,3 +145,5 @@ The bad-network tranche is not considered proven until:
 - late-join audio and video both have objective startup evidence
 - the observed logs are specific enough to diagnose whether failures came from
   bandwidth pressure, repair exhaustion, anchor delay, or audio bootstrap loss
+- the structured event logs are stable enough that repeated runs can be compared
+  mechanically rather than only by eye

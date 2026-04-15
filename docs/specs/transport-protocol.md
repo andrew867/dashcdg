@@ -4,6 +4,10 @@ This document describes the current protocol v3 desktop proof. The separate
 bad-network redesign tranche lives in `docs/specs/bad-network-transport.md` and
 is allowed to introduce a future protocol v4 or equivalent wire break.
 
+The TX CD+G source/memory slimdown work is documented separately in
+`docs/specs/tx-cdg-source-model.md`. That tranche is intended to preserve the
+current packet families while changing how TX stores and reads CD+G data.
+
 ## Goals
 
 - Wi-Fi-first, UDP multicast/broadcast-friendly transport
@@ -87,6 +91,13 @@ Current desktop behavior:
 - TX repeatedly loops the entire CD+G file in 1024-byte slices
 - RX accepts out-of-order and duplicate chunks
 - RX declares `ready` once it has the full asset and can seek deterministically
+- current TX sources those slices from a fully loaded `asset_bytes` buffer
+
+Slimdown target:
+
+- `ASSET_CHUNK` stays byte-addressed on the wire
+- TX should eventually be able to source chunks from a random-access CD+G source
+  rather than only from one permanent in-memory blob
 
 ### `CLOCK_BEACON`
 
@@ -127,7 +138,9 @@ Fields:
 
 Current desktop behavior:
 
-- TX pre-encodes the source `.mp3` into 48 kHz mono Opus frames
+- TX produces 48 kHz mono Opus frames incrementally on a dedicated audio thread
+- a bounded `audio_ready_queue` is the handoff boundary between audio
+  production and packet pacing
 - TX sends 20 ms audio frames
 - RX decodes frames into a queue-driven PortAudio stream
 - RX uses the announced playout delay to decide when to start the stream
@@ -160,11 +173,19 @@ Current desktop behavior:
 - each batch carries up to 6 raw CD+G subchannel packets
 - TX timestamps batches by the source CD+G packet index converted into milliseconds
 - RX applies batches in order to a live `dashcdg_cdg_state`
+- current TX prebuilds all batches for a track and duplicates packet payloads in
+  `cdg_batches`
 
 Threaded-runtime target:
 
 - live CDG batches are produced from a timeline-driven video task and handed to the network sender through a bounded queue or equivalent publish boundary
 - RX video progression and RX bootstrap progression become independent subsystems
+
+Slimdown target:
+
+- TX should stop storing copied packet payloads per batch
+- batch scheduling metadata can stay precomputed, but payload bytes should be
+  read from the canonical CD+G source at send time
 
 ### `CDG_SNAPSHOT`
 
@@ -350,6 +371,9 @@ In practice, RX can start live audio before the bootstrap asset is complete, can
 - audio recovery still relies on playout delay and bounded FEC rather than a separate audio-state snapshot/keyframe model
 - no wire-level compatibility promise for protocol v1 peers
 - the threaded-runtime queue ownership model is a desktop architecture refactor and does not change protocol v3 packet formats by itself
+- TX still preloads the `.cdg` asset and also prebuilds duplicated `CDG_BATCH`
+  payload storage; the staged removal plan is tracked in
+  `docs/specs/tx-cdg-source-model.md`
 - the bad-network redesign work now intentionally targets a separate transport tranche rather than stretching v3 indefinitely
 
 These are intentional current omissions, not undocumented behavior.

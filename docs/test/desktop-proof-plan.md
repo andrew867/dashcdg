@@ -76,6 +76,16 @@ Implemented:
 - measured isolated multicast soak where RX stayed in `running`, `live_applied` kept climbing, and audio buffering remained stable instead of regressing to a false long-play stall
 - measured forced session restart to a different track, proving RX can drain an ended session and cleanly acquire a new announce/bootstrap/live cycle
 - a separate bad-network redesign tranche has been specified in `docs/specs/bad-network-transport.md` so weak-Wi-Fi transport changes can advance without rewriting this proof document in place
+- a separate portability/slimdown tranche has been specified in `docs/specs/tx-cdg-source-model.md` and companion portability docs so TX memory and platform-support planning can advance without pretending the refactor is already complete
+
+The current proof document should now be read alongside two separate forward
+tranches:
+
+- `docs/specs/tx-cdg-source-model.md` for TX storage/runtime slimdown inside the
+  existing proof behavior
+- `docs/specs/bad-network-transport.md` plus
+  `docs/specs/bad-network-audio-profiles.md` for the explicit protocol-v4
+  weak-link redesign
 
 Still to prove more deeply:
 
@@ -83,6 +93,7 @@ Still to prove more deeply:
 - quantified recovery thresholds under real burst loss
 - operational limits for rapid repeated track switches under sustained live send pressure
 - the full bad-network transport redesign, including new late-join audio startup behavior and lower-burst bootstrap rules
+- the staged TX CD+G slimdown, especially removal of duplicated `CDG_BATCH` payload storage and proof that later source abstractions preserve late-join behavior
 
 ## Current Proof Limitations
 
@@ -91,5 +102,5 @@ Still to prove more deeply:
 - no dedicated network metrics UI beyond HUD/stdout status lines
 - long-duration impaired-network soak data for actual repair thresholds is still incomplete; use `docs/test/desktop-impairment-validation.md` for the current repeatable matrix
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles
-- TX still preloads the `.cdg` asset before a session is fully established, so bootstrap is not yet a purely streaming asset path
+- TX still preloads the `.cdg` asset and currently duplicates timed CD+G payload storage in prebuilt batches, so the portability/slimdown runtime is not yet complete
 - the current proof is not the bad-network-optimized transport; that redesign is now tracked separately and is expected to introduce different packet, pacing, and startup rules

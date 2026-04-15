@@ -70,15 +70,19 @@ When TX starts or changes tracks, it:
 1. resolves a song or directory entry
 2. loads the `.cdg` asset for bootstrap replay
 3. pairs an `.mp3` if present
-4. resamples audio to `48 kHz`
-5. downmixes to mono for the network send path
-6. pre-encodes `20 ms` Opus frames
-7. opens a new session with a default `1000 ms` warmup
+4. prepares a bounded audio-production queue for live send
+5. opens a new session with a default `1000 ms` warmup
+6. lets the dedicated TX audio thread stream MP3 decode, resample to `48 kHz`,
+   downmix to mono, and encode rolling `20 ms` Opus frames just ahead of send
 
 Important current behavior:
 
-- TX currently does this work synchronously.
-- Console output now prints a preparation line immediately, but the actual media preparation cost is still on the hot path.
+- TX still performs CD+G asset load and batch preparation synchronously on the
+  track-change hot path.
+- TX audio production is no longer whole-track pre-encode; a dedicated producer
+  thread fills a bounded `audio_ready_queue` during live send.
+- Console output now prints a preparation line immediately, but some media
+  preparation cost is still on the hot path.
 - Directory playback defaults to the local `cdg/` folder when no TX source path is provided.
 - TX shuffles on initial directory load and reshuffles when the playlist wraps.
 
@@ -94,6 +98,13 @@ Important current behavior:
 - pause-screen snapshot generation
 - preview HUD and terminal stats
 - operator commands for pause, next, back, restart, rebroadcast, and visibility
+
+Current threading split inside the desktop proof:
+
+- TX audio production happens on `dashcdg_tx_audio_thread_main()`
+- TX packet pacing and control traffic still run in the main TX scheduler loop
+- CD+G batch creation is still done up front and currently duplicates payload
+  storage, which is the next slimdown target
 
 ### Pause Mode
 
@@ -195,12 +206,15 @@ Desktop-specific today:
 - socket setup and network threads
 - PortAudio stream management
 - OpenGL renderer and preview HUD
-- synchronous track preparation and playlist controls
+- track preparation, playlist controls, and current TX scheduler policy
 - pause-screen generator art
 
 ## Current Gaps
 
-- TX track preparation is still synchronous rather than background or incremental.
+- TX track preparation is still synchronous for CD+G asset and batch setup even
+  though audio encode is now incremental.
+- TX still preloads the full `.cdg` asset and duplicates live CD+G payload
+  storage in prebuilt batches.
 - The clock loop is software timestamped and millisecond scale, not venue-grade hardware timestamping.
 - FEC is intentionally bounded and only repairs one missing payload per group.
 - Long impaired-network soak validation is still incomplete.

@@ -11,6 +11,21 @@ This document defines the target desktop runtime that replaces the earlier coars
 - separate clock, network, audio, video, and render responsibilities into task-like modules
 - make ownership and queue boundaries explicit so the design can later map onto RTOS tasks
 
+## Current Implemented Subset
+
+Parts of this target runtime already exist in the desktop proof:
+
+- TX incremental audio production on a dedicated audio thread
+- a bounded `tx_audio_ready` queue between audio production and packet pacing
+- RX audio queue-driven PortAudio playout
+
+Still not fully split today:
+
+- TX video production and network pacing are still largely coupled in one main
+  scheduler loop
+- RX packet receive, live media progression, and render publication are not yet
+  fully separated into the ideal task boundaries below
+
 ## Runtime Topology
 
 ```mermaid
