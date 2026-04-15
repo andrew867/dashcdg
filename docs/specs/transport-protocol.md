@@ -1,5 +1,9 @@
 # Karaoke Transport Protocol v3
 
+This document describes the current protocol v3 desktop proof. The separate
+bad-network redesign tranche lives in `docs/specs/bad-network-transport.md` and
+is allowed to introduce a future protocol v4 or equivalent wire break.
+
 ## Goals
 
 - Wi-Fi-first, UDP multicast/broadcast-friendly transport
@@ -346,5 +350,6 @@ In practice, RX can start live audio before the bootstrap asset is complete, can
 - audio recovery still relies on playout delay and bounded FEC rather than a separate audio-state snapshot/keyframe model
 - no wire-level compatibility promise for protocol v1 peers
 - the threaded-runtime queue ownership model is a desktop architecture refactor and does not change protocol v3 packet formats by itself
+- the bad-network redesign work now intentionally targets a separate transport tranche rather than stretching v3 indefinitely
 
 These are intentional current omissions, not undocumented behavior.

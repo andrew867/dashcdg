@@ -6,6 +6,11 @@ This document defines a repeatable desktop proof workflow for loss, reorder, and
 
 For simple direct TX/RX bring-up, the desktop apps now default to `239.255.77.77:24684` and can also run against explicit IPv4 broadcast endpoints. This document intentionally uses separate multicast input/output groups so the relay can isolate clean input traffic from impaired output traffic.
 
+The current matrix validates the protocol v3 desktop proof. The next weak-Wi-Fi
+transport tranche is specified separately in
+`docs/specs/bad-network-transport.md`, with a dedicated validation matrix in
+`docs/test/bad-network-transport-validation.md`.
+
 ## Topology
 
 Use two multicast groups:
@@ -169,3 +174,7 @@ Relay:
 
 - Passing baseline plus periodic single-loss runs demonstrates the intended proof target for the current bounded XOR FEC design.
 - Burst-loss runs are expected to show limits, because the current desktop proof repairs only one missing media payload per protected group.
+- The bad-network redesign work should eventually replace this document's
+  "expected proof" interpretation with a stricter matrix that includes startup
+  loading-screen latency, first-audio deadlines, throughput pressure, and
+  profile-specific pass criteria.

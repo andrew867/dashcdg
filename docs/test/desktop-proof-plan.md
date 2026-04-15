@@ -75,12 +75,14 @@ Implemented:
 - threaded TX/RX runtime split with explicit queues for TX audio production and RX media progression/render publication
 - measured isolated multicast soak where RX stayed in `running`, `live_applied` kept climbing, and audio buffering remained stable instead of regressing to a false long-play stall
 - measured forced session restart to a different track, proving RX can drain an ended session and cleanly acquire a new announce/bootstrap/live cycle
+- a separate bad-network redesign tranche has been specified in `docs/specs/bad-network-transport.md` so weak-Wi-Fi transport changes can advance without rewriting this proof document in place
 
 Still to prove more deeply:
 
 - repeated long impaired-network soak runs with captured logs
 - quantified recovery thresholds under real burst loss
 - operational limits for rapid repeated track switches under sustained live send pressure
+- the full bad-network transport redesign, including new late-join audio startup behavior and lower-burst bootstrap rules
 
 ## Current Proof Limitations
 
@@ -90,3 +92,4 @@ Still to prove more deeply:
 - long-duration impaired-network soak data for actual repair thresholds is still incomplete; use `docs/test/desktop-impairment-validation.md` for the current repeatable matrix
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles
 - TX still preloads the `.cdg` asset before a session is fully established, so bootstrap is not yet a purely streaming asset path
+- the current proof is not the bad-network-optimized transport; that redesign is now tracked separately and is expected to introduce different packet, pacing, and startup rules

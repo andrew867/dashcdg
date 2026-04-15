@@ -17,6 +17,7 @@
 - repeatable desktop impairment relay workflow available from the repo
 - packet captures can be analyzed via sequence and sender timestamps
 - developer-facing docs explain the current TX/RX architecture, protocol families, proof claims, and known gaps without stale `v2`/local-MP3 wording
+- when transport redesign work begins, a separate bad-network spec must exist before runtime behavior is changed in incompatible ways
 
 ## Tranche 4-6
 
@@ -25,6 +26,7 @@
 - explicit network-audio feasibility gate written before committing to onboard audio
 - protocol docs must call out implemented vs reserved packet families so proof behavior is not overstated
 - desktop proof docs must clearly separate "implemented", "proven", and "planned" so new developers do not mistake design intent for completed work
+- bad-network transport work must define explicit startup, bitrate, and late-join targets plus a corresponding impairment matrix before it is considered release-ready
 
 ## CI expectations
 
