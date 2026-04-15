@@ -1,20 +1,38 @@
 # dashcdg
 
-`dashcdg` is a portable karaoke broadcast/receiver codebase centered on:
+`dashcdg` is a karaoke transport and receiver proof codebase centered on:
 
-- deterministic CD+G decode and seek
+- deterministic CD+G decode, replay, and seek
 - a versioned UDP-friendly wire protocol
-- desktop proof applications for local playback plus multicast-or-broadcast network transmit/receive
-- a live on-wire `Opus + timed CDG` proof path with late-join bootstrap plus bounded live CDG state keyframes
+- desktop TX/RX proof apps for multicast and IPv4 broadcast transport
+- live on-wire `Opus + timed CDG` playout with late-join bootstrap, bounded FEC, and periodic CDG state keyframes
 
-## Current repository contents
+## What Exists Today
 
-- `core/`: portable CD+G decode and simple remote/local clock discipline
-- `proto/`: protocol v2 framing and packet serialization/parsing
-- `platform/desktop/`: desktop OpenGL renderer, PortAudio plumbing, MP3 file playback, and Opus helpers
-- `apps/desktop-player/`: local desktop player and entrypoint shim for TX/RX modes
-- `docs/`: protocol, validation, architecture, hardware, and release docs
-- `tests/`: portable CD+G, clock, and protocol tests
+The active desktop proof is a hybrid transport:
+
+- `ANNOUNCE`, `ASSET_CHUNK`, and `CLOCK_BEACON` keep late-join/bootstrap behavior working
+- `AUDIO_FRAME` carries live Opus audio
+- `CDG_BATCH` carries live timed CD+G packets
+- `CDG_SNAPSHOT` carries bounded framebuffer/palette state keyframes
+- `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` provide a software-timestamped round-trip clock estimate
+- `FEC_PARITY` provides bounded single-loss XOR recovery for short audio and CD+G groups
+
+That means the receiver can:
+
+- start from repeated asset replay like the original proof
+- switch to live audio/CD+G before the full asset is rebuilt
+- use snapshots for late join, pause-screen recovery, and mid-session visual re-anchoring
+- keep explicit HUD/headless observability for playout gates, clock quality, and repair state
+
+## Repository Map
+
+- `core/`: portable CD+G decode and reusable clock-discipline helpers
+- `proto/`: protocol v3 framing, serializers, and parsers
+- `platform/desktop/`: desktop renderer, PortAudio streaming layer, Opus helpers, and TX/RX app logic
+- `apps/desktop-player/`: local player plus entry shim for `tx` and `rx` modes
+- `docs/`: architecture, protocol, proof, hardware, and ops documentation
+- `tests/`: portable core, protocol, and helper tests
 
 ## Build
 
@@ -55,7 +73,7 @@ The desktop apps require:
 
 On the current Windows/MSYS2 flow, `mingw-w64-x86_64-opus` must be available so `desktop-tx`, `desktop-rx`, and `desktop-player` can link and ship `libopus-0.dll`.
 
-## Desktop app usage
+## Desktop App Usage
 
 Local player:
 
@@ -90,11 +108,12 @@ Network defaults:
 - TX and RX still accept explicit multicast endpoints
 - TX and RX now also accept IPv4 broadcast destinations such as `192.168.0.255` for `/24` LAN broadcast setups
 
-## Media resolution behavior
+## Media Resolution Behavior
 
 - With no path, `desktop-player` scans the local `cdg/` folder and plays tracks sequentially.
 - With `--shuffle`, `desktop-player` scans a folder and shuffles the playlist.
 - With no TX source path, `desktop-player tx` and `desktop-tx` scan the local `cdg/` folder.
+- TX directory playback is shuffled on startup and reshuffled again when the playlist wraps.
 - With a folder path, TX/player scan for `.cdg` files and auto-pair same-name `.mp3` files.
 - With a single `.cdg` file, the app still auto-detects a sibling `.mp3` when present.
 - With a single `.mp3` file, the app looks for a same-name sibling `.cdg`.
@@ -112,7 +131,7 @@ Network defaults:
 
 `desktop-tx` foreground command controls:
 
-- `p`: play/pause
+- `Space` or `p`: play/pause
 - `n` or `]`: next track
 - `b` or `[`: back through played-track history
 - `r`: restart current track
@@ -135,20 +154,37 @@ Network defaults:
 - GUI mode shows a HUD in the window
 - `S` in the RX window prints the current status line to stdout
 
-## Current networked proof behavior
+## Desktop Streaming Architecture
 
-The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
+```mermaid
+flowchart LR
+    src[CDG plus MP3 library] --> txprep[TX track load and pre-encode]
+    txprep --> ann[ANNOUNCE and CLOCK_BEACON]
+    txprep --> ach[AUDIO_FRAME]
+    txprep --> cb[CDG_BATCH]
+    txprep --> snap[CDG_SNAPSHOT]
+    ach --> fec[FEC_PARITY]
+    cb --> fec
+    ann --> rxstate[RX session state]
+    snap --> rxstate
+    fec --> rxjit[RX jitter and repair]
+    ach --> rxjit
+    cb --> rxjit
+    rxjit --> rxaud[Opus decode plus PortAudio queue]
+    rxjit --> rxcdg[Live CDG state]
+    rxaud --> render[Renderer follows playout clock]
+    rxcdg --> render
+```
 
-- `ANNOUNCE`, `ASSET_CHUNK`, and `CLOCK_BEACON` keep the original late-join bootstrap working
-- `AUDIO_FRAME` carries live Opus frames on the wire
-- `CDG_BATCH` carries timed groups of CD+G subchannel packets on the wire
-- `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` maintain a software-timestamped round-trip clock estimate
-- RX decodes network Opus into a queue-driven PortAudio stream when audio metadata is present
-- RX now uses bounded pending queues plus deadline-based skip logic for reordered or missing live audio/CD+G packets
-- TX now emits periodic bounded `CDG_SNAPSHOT` keyframes, and RX can apply them immediately so late-join video starts before the full `.cdg` asset has finished replaying
-- TX now emits bounded `FEC_PARITY` packets for audio and CD+G groups, and RX attempts single-missing-packet repair before treating a group as lost
-- TX/RX status lines now expose startup gates, clock-update quality, repair hotness, and FEC profile/overhead telemetry
-- desktop TX/RX now default to `239.255.77.77:24684`, while also allowing explicit multicast or IPv4 broadcast endpoints
+Key runtime rules:
+
+- TX currently preloads the full `.cdg` asset and pre-encodes the current track's audio before live send starts
+- TX defaults to a `1000 ms` warmup before a new session starts
+- TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
+- RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches
+- once audio playout is running, RX uses audio time as the render master
+- pause mode freezes the song timeline, suppresses normal media scheduling, and repeatedly emits a custom pause-screen snapshot state
+- snapshots are no longer just bootstrap helpers; RX can use them as active recovery anchors during a running session
 
 ## Impairment validation relay
 
@@ -165,30 +201,54 @@ python scripts/desktop_impairment.py \
 
 The relay joins one multicast group, applies deterministic packet loss, reordering, and burst-loss rules, then forwards to a second multicast group while printing packet counters. See `docs/test/desktop-impairment-validation.md` for the baseline, single-loss, reorder, burst-loss, and mixed-impairment command matrix.
 
-Current TX defaults:
+## Current TX/RX Defaults
 
 - audio sample rate: 48 kHz
-- channels: 2
+- channels: 1 on TX network send path
 - Opus frame size: 20 ms
-- Opus bitrate target: 128 kbps
+- Opus bitrate target: 80 kbps
 - announced playout delay: 500 ms
 - announced audio FEC group size: 5
 - announced CDG FEC group size: 9
 - CDG packets per live batch: up to 6
 - asset bootstrap chunk size: 1024 bytes
+- TX warmup before a new session: 1000 ms
+- pause-screen snapshot interval: 1000 ms
 
-## Important current limitations
+## Current Status
 
-- The desktop proof now has a repeatable impairment relay and validation workflow, but long-duration impaired multicast soak data is still incomplete.
-- Clock discipline now includes software-timestamped `PTP_DELAY_REQ` / `PTP_DELAY_RESP`, but it is still not a hardware-timestamped or sub-millisecond implementation.
-- Late join video now has periodic live state keyframes, but full asset replay is still required for deterministic seek/backfill and for long-running recovery after missed keyframes.
-- RX startup can still show a small number of early Opus decode failures or deadline skips during bring-up before the steady-state queue settles.
-- This is a proof tranche, not a finished venue-grade transport stack.
+Implemented and documented:
+
+- protocol v3 live-media packet families
+- queue-driven RX streaming audio path
+- timed live CD+G batches
+- bounded XOR FEC generation and single-loss recovery
+- periodic CDG snapshots for late join and recovery anchors
+- TX pause/play with a networked pause screen
+- default multicast plus explicit broadcast endpoint support
+- startup, repair, and clock telemetry in both TX and RX
+
+Still rough or incomplete:
+
+- TX track preparation is still synchronous, so large assets or MP3 decode/pre-encode work can still be visible on startup and track switches
+- clock discipline is still software timestamped rather than venue-grade hardware-timestamped PTP
+- long impaired-network soak data is still incomplete
+- current FEC only repairs one missing payload per protected group
+- some desktop proof scenarios still show early decode failures while queues settle
+
+## Important Current Limitations
+
+- This is a desktop proof transport, not a finished venue-grade production stack.
+- Long-duration impaired multicast soak data is still incomplete.
+- Full asset replay is still required for deterministic seek/backfill even though snapshots now accelerate late join and recovery.
+- TX still pre-encodes the current song rather than encoding incrementally during playback.
+- Embedded receiver work is still documentation-first; there is no buildable ESP-IDF receiver in the repo yet.
 
 ## Related documentation
 
-- `docs/specs/transport-protocol.md`: full protocol v2 field-level documentation
-- `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove
+- `docs/architecture/desktop-streaming.md`: end-to-end desktop TX/RX architecture and runtime diagrams
+- `docs/specs/transport-protocol.md`: full protocol v3 field-level documentation
+- `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove and how to read its status
 - `docs/test/desktop-impairment-validation.md`: repeatable impaired-network proof workflow and expected counters
 - `docs/architecture/portable-core.md`: portable vs desktop-specific boundaries
 - `docs/hardware/`: future ESP32 receiver and productization docs

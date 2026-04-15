@@ -11,6 +11,13 @@ Determine whether synchronized on-wire `Opus` decode and audio playout can coexi
 
 on the selected ESP32 hardware profile.
 
+Current desktop reference profile:
+
+- `48 kHz` sample rate
+- `20 ms` Opus frames
+- mono network send path
+- nominal `80 kbps` target bitrate
+
 ## Required measurements
 
 - sustained Opus decode throughput at the chosen frame size and bitrate

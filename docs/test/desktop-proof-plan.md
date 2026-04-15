@@ -4,8 +4,8 @@
 
 This tranche proves the architecture on computer hardware before MCU work:
 
-- `apps/desktop-tx/main.c`: multicast/broadcast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, and software-timestamped PTP-style sync traffic
-- `apps/desktop-rx/main.c`: multicast/broadcast receiver with live network audio decode, bootstrap asset reconstruction, and OpenGL rendering
+- `apps/desktop-tx/main.c`: multicast/broadcast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, snapshots, FEC parity, pause-screen state, and software-timestamped PTP-style sync traffic
+- `apps/desktop-rx/main.c`: multicast/broadcast receiver with live network audio decode, bootstrap asset reconstruction, snapshot apply, bounded jitter/FEC handling, and OpenGL rendering
 - `apps/desktop-player/main.c`: local non-network player for baseline regression checks
 
 ## Success criteria
@@ -14,9 +14,12 @@ This tranche proves the architecture on computer hardware before MCU work:
 - receiver reconstructs the full CD+G asset from repeated `ASSET_CHUNK` packets
 - receiver renders the rebuilt asset with deterministic seeking after late join
 - receiver can also advance a live CD+G state from `CDG_BATCH`
+- receiver can apply `CDG_SNAPSHOT` to start or recover live video before asset rebuild finishes
 - receiver starts network Opus audio near the announced playout boundary
-- receiver follows network clock traffic before the bootstrap asset is fully complete
+- receiver follows announce plus PTP clock traffic before the bootstrap asset is fully complete
 - receiver tolerates bounded reordering on live audio and CD+G before declaring packets late
+- receiver can attempt single-loss XOR repair within protected FEC groups
+- pause/resume keeps the network session healthy and displays a TX-generated pause screen
 - headless RX and TX status output make stalls and packet flow visible
 
 ## Observability requirements
@@ -28,6 +31,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 - RX audio queue depth and decode-failure visibility
 - RX jitter queue, skip, drop, and reorder visibility
 - RX repair counters for recovered vs failed FEC attempts
+- RX snapshot receive/apply visibility
 - explicit startup-gate and clock-quality visibility, including holdover and step peaks
 - deterministic test vectors for protocol parsing
 
@@ -41,11 +45,33 @@ The current automation step is the multicast relay in `scripts/desktop_impairmen
 - receiver late join after session start
 - clock offset and jitter
 - startup audio starvation and decoder bring-up behavior
+- pause-screen continuity and resume behavior
 
-## Current proof limitations
+## Current Status
+
+Implemented:
+
+- live Opus on the wire
+- live timed CD+G batches on the wire
+- network-audio-only RX path for desktop receive mode
+- bounded PTP round-trip timing with stale-exchange rejection
+- bounded XOR FEC generation and single-loss recovery
+- periodic CDG snapshots for fast late join and recovery anchors
+- TX pause/resume with a generated pause screen
+- default multicast endpoint plus explicit broadcast endpoint support
+- HUD/headless observability for gates, sync, reorder, repair, and snapshot state
+
+Still to prove more deeply:
+
+- repeated long impaired-network soak runs with captured logs
+- quantified recovery thresholds under real burst loss
+- operational limits for track-switch latency while TX still prebuilds/pre-encodes synchronously
+
+## Current Proof Limitations
 
 - no hardware-timestamp or sub-millisecond PTP discipline yet
-- no session catalog or operator control UI
+- no session catalog or richer operator control UI beyond the current keyboard controls
 - no dedicated network metrics UI beyond HUD/stdout status lines
 - long-duration impaired-network soak data for actual repair thresholds is still incomplete; use `docs/test/desktop-impairment-validation.md` for the current repeatable matrix
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles
+- TX still prepares tracks synchronously, so startup and track changes are improved but not architecturally instant yet

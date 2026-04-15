@@ -36,18 +36,24 @@ Current state:
 - serialize and parse announce, asset, clock, live media, and future-repair packet types
 - provide a fixed binary contract for desktop and future ESP-IDF transports
 
-Current protocol v2 coverage includes:
+Current protocol v3 coverage includes:
 
 - `ANNOUNCE`
 - `ASSET_CHUNK`
 - `CLOCK_BEACON`
 - `AUDIO_FRAME`
 - `CDG_BATCH`
+- `CDG_SNAPSHOT`
 - `PTP_SYNC`
 - `PTP_FOLLOW_UP`
 - `PTP_DELAY_REQ`
 - `PTP_DELAY_RESP`
 - active desktop use of `FEC_PARITY` for bounded single-loss repair groups
+
+Important boundary note:
+
+- wire framing and packet semantics are portable
+- current jitter-buffer policy, snapshot scheduling policy, pause-screen generation, and playlist/operator behavior still live in the desktop app layer rather than the portable core
 
 ## Core correctness strategy
 

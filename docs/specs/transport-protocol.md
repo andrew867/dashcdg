@@ -6,6 +6,7 @@
 - portable binary framing for desktop and future embedded receivers
 - live network audio plus live timed CD+G packets
 - late-join support without requiring retransmit
+- explicit pause-state signaling and fast video recovery anchors
 - explicit versioning so protocol evolution stays parseable
 
 ## Packet framing
@@ -63,6 +64,7 @@ Current desktop TX behavior:
 - always sent periodically
 - advertises live audio metadata when the current track has an `.mp3`
 - advertises `0` audio fields for CDG-only tracks
+- RX treats a fresh announce as a session re-anchor on track/session changes so playout does not wait for slow clock re-convergence alone
 
 ### `ASSET_CHUNK`
 
@@ -101,6 +103,7 @@ Current desktop behavior:
 
 - TX emits frequent beacons during playback
 - RX uses `sender_time_ms` plus the local offset estimator more heavily than the beacon `playback_ms` field
+- TX also emits paused-state beacons during pause mode so RX can keep a healthy session view without advancing media
 
 ### `AUDIO_FRAME`
 
@@ -120,10 +123,11 @@ Fields:
 
 Current desktop behavior:
 
-- TX pre-encodes the source `.mp3` into 48 kHz stereo Opus frames
+- TX pre-encodes the source `.mp3` into 48 kHz mono Opus frames
 - TX sends 20 ms audio frames
 - RX decodes frames into a queue-driven PortAudio stream
 - RX uses the announced playout delay to decide when to start the stream
+- desktop RX network mode uses network audio only; it no longer falls back to local-file MP3 playout
 
 ### `CDG_BATCH`
 
@@ -166,8 +170,10 @@ Fields:
 Current desktop behavior:
 
 - TX periodically serializes the current live `dashcdg_cdg_state` into bounded 1024-byte chunks
+- TX aligns each snapshot to the next live `CDG_BATCH` packet index boundary
 - RX reassembles the snapshot, restores the live framebuffer/palette state, and resumes from the aligned live `CDG_BATCH` packet index
 - the full `ASSET_CHUNK` replay still continues in parallel so deterministic seek/bootstrap completes in the background
+- RX can also apply snapshots mid-session while paused or recovering, not just before bootstrap completion
 
 ### `PTP_SYNC`
 
@@ -201,6 +207,7 @@ Current desktop behavior:
 
 - emitted by TX immediately after `PTP_SYNC`
 - observed by RX
+- RX discards stale sync exchanges that exceed the current bounded age window rather than poisoning the clock estimate after delayed track loads
 
 ### `PTP_DELAY_REQ`
 
@@ -236,6 +243,8 @@ Current implementation status:
 - parser/serializer exists
 - TX emits it in response to `PTP_DELAY_REQ`
 - RX consumes it and updates sender offset/path-delay estimates
+- TX now timestamps the response after acquiring its main mutex, reducing stale timing caused by track-load stalls
+- RX discards stale delayed responses that arrive outside the bounded exchange window
 
 ### `FEC_PARITY`
 
@@ -260,16 +269,18 @@ Current implementation status:
 - TX emits one XOR parity packet per completed audio/CD+G FEC group
 - RX stores short per-group history and can recover a single missing media payload when parity and the other group members arrive
 
-## Sender defaults in the current desktop proof
+## Sender Defaults In The Current Desktop Proof
 
 - audio sample rate: `48000`
-- channels: `2`
+- channels: `1`
 - Opus frame duration: `20 ms`
-- Opus bitrate target: `128 kbps`
+- Opus bitrate target: `80 kbps`
 - announced playout delay: `500 ms`
 - announced audio FEC group size: `5`
 - announced CDG FEC group size: `9`
 - CD+G cadence: `300 packets/second`
+- TX warmup before a new session: `1000 ms`
+- CDG snapshot interval: `1000 ms`
 
 Desktop endpoint defaults:
 
@@ -285,6 +296,8 @@ The current desktop receiver uses both bootstrap and live paths:
 3. `CLOCK_BEACON`, `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` maintain a bounded sender/local offset estimate and path-delay estimate
 4. `AUDIO_FRAME` feeds the Opus decoder and PortAudio queue
 5. `CDG_BATCH` advances the live CD+G state
+6. `CDG_SNAPSHOT` can seed or replace the current live visual state
+7. `FEC_PARITY` can recover a single missing media payload inside a protected group
 
 RX startup is now network-audio-only for desktop network mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late. Current desktop HUD/stdout observability also exposes startup gate state, clock step/peak/holdover data, and current FEC repair hotness.
 
@@ -295,9 +308,10 @@ The current proof supports late join by combining:
 1. repeated `ANNOUNCE`
 2. continuous asset replay through `ASSET_CHUNK`
 3. periodic `CLOCK_BEACON`
-4. ongoing live `AUDIO_FRAME` and `CDG_BATCH` transmission
+4. periodic `CDG_SNAPSHOT` state keyframes
+5. ongoing live `AUDIO_FRAME` and `CDG_BATCH` transmission
 
-In practice, RX can start live audio before the bootstrap asset is complete, but `ready` is only asserted once the full CD+G asset has been rebuilt.
+In practice, RX can start live audio before the bootstrap asset is complete, can show live video from a snapshot before deterministic asset rebuild is done, and only asserts full `ready` once the complete CD+G asset has been rebuilt.
 
 ## Known protocol-proof limitations
 
@@ -306,6 +320,7 @@ In practice, RX can start live audio before the bootstrap asset is complete, but
 - no playlist/session catalog packet family
 - no hardware-timestamp or sub-millisecond PTP discipline yet; current proof uses millisecond software timestamps
 - bounded XOR FEC only repairs a single missing media payload per group; it is not a long-window or burst-loss code
+- audio recovery still relies on playout delay and bounded FEC rather than a separate audio-state snapshot/keyframe model
 - no wire-level compatibility promise for protocol v1 peers
 
 These are intentional current omissions, not undocumented behavior.
