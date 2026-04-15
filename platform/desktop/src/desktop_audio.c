@@ -241,6 +241,7 @@ struct dashcdg_desktop_audio *dashcdg_desktop_audio_new(void) {
     audio->timestamp_ms = -1;
     audio->seek_to_sample = -1;
     audio->stream_base_timestamp_ms = -1;
+    audio->stream_decoder_open = 0;
     return audio;
 }
 
@@ -260,6 +261,7 @@ void dashcdg_desktop_audio_free(struct dashcdg_desktop_audio *audio) {
         dashcdg_pcm_buffer_free(audio->pcm);
     }
 
+    dashcdg_desktop_audio_close_mp3_stream(audio);
     free(audio->stream_pcm);
     pthread_mutex_destroy(&audio->stream_mutex);
 
@@ -273,6 +275,7 @@ int dashcdg_desktop_audio_load_file(struct dashcdg_desktop_audio *audio, const c
         return 0;
     }
 
+    dashcdg_desktop_audio_close_mp3_stream(audio);
     mp3dec_init(&audio->decoder);
     err = mp3dec_load(&audio->decoder, path, &audio->file_info, NULL, NULL);
     if (err < 0) {
@@ -288,6 +291,69 @@ int dashcdg_desktop_audio_load_file(struct dashcdg_desktop_audio *audio, const c
     audio->pcm = dashcdg_pcm_buffer_new((uint16_t *) audio->file_info.buffer, audio->file_info.samples);
     audio->mode = DASHCDG_AUDIO_MODE_FILE;
     return audio->pcm != NULL;
+}
+
+int dashcdg_desktop_audio_open_mp3_stream(struct dashcdg_desktop_audio *audio, const char *path) {
+    int err;
+
+    if (audio == NULL || path == NULL) {
+        return 0;
+    }
+
+    dashcdg_desktop_audio_close_mp3_stream(audio);
+    err = mp3dec_ex_open(&audio->stream_decoder, path, MP3D_DO_NOT_SCAN);
+    if (err < 0) {
+        fprintf(stderr, "failed to open streaming MP3 decoder: %d\n", err);
+        memset(&audio->stream_decoder, 0, sizeof(audio->stream_decoder));
+        return 0;
+    }
+
+    audio->stream_decoder_open = 1;
+    return 1;
+}
+
+void dashcdg_desktop_audio_close_mp3_stream(struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL || !audio->stream_decoder_open) {
+        return;
+    }
+
+    mp3dec_ex_close(&audio->stream_decoder);
+    memset(&audio->stream_decoder, 0, sizeof(audio->stream_decoder));
+    audio->stream_decoder_open = 0;
+}
+
+size_t dashcdg_desktop_audio_read_mp3_frames(
+        struct dashcdg_desktop_audio *audio,
+        int16_t *pcm,
+        size_t max_frames,
+        uint32_t *sample_rate,
+        uint16_t *channels
+) {
+    size_t samples_read;
+    int decoder_channels;
+
+    if (audio == NULL || pcm == NULL || max_frames == 0U || !audio->stream_decoder_open) {
+        return 0U;
+    }
+
+    decoder_channels = audio->stream_decoder.info.channels;
+    if (decoder_channels <= 0) {
+        return 0U;
+    }
+
+    if (sample_rate != NULL) {
+        *sample_rate = (uint32_t) audio->stream_decoder.info.hz;
+    }
+    if (channels != NULL) {
+        *channels = (uint16_t) decoder_channels;
+    }
+
+    samples_read = mp3dec_ex_read(
+            &audio->stream_decoder,
+            (mp3d_sample_t *) pcm,
+            max_frames * (size_t) decoder_channels
+    );
+    return samples_read / (size_t) decoder_channels;
 }
 
 int dashcdg_desktop_audio_get_pos_ms(struct dashcdg_desktop_audio *audio) {
