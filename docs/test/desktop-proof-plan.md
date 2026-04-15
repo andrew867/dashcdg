@@ -46,6 +46,18 @@ The current automation step is the multicast relay in `scripts/desktop_impairmen
 - clock offset and jitter
 - startup audio starvation and decoder bring-up behavior
 - pause-screen continuity and resume behavior
+- long-play queue pressure and subsystem heartbeat continuity
+- track-switch-under-load recovery without multi-second TX pre-encode stalls
+
+## Planned Refactor Validation
+
+The threaded incremental-runtime refactor adds these required proof cases:
+
+- long-play soak where packet ingress, audio progression, video progression, and render heartbeat all continue independently
+- repeated track switches while TX is actively streaming, proving that a new session does not require whole-track audio pre-encode before network progress resumes
+- impairment runs where RX continues ingesting traffic even while audio/video tasks are recovering from reorder, repair, or deadline skips
+- renderer stress runs proving the render loop can miss frames without stalling network or media tasks
+- pause/resume and late join runs while bootstrap replay is still incomplete
 
 ## Current Status
 
@@ -65,7 +77,7 @@ Still to prove more deeply:
 
 - repeated long impaired-network soak runs with captured logs
 - quantified recovery thresholds under real burst loss
-- operational limits for track-switch latency while TX still prebuilds/pre-encodes synchronously
+- operational limits for track-switch latency once incremental encode replaces synchronous whole-track prebuild
 
 ## Current Proof Limitations
 

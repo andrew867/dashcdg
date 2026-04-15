@@ -247,7 +247,9 @@ Still rough or incomplete:
 ## Related documentation
 
 - `docs/architecture/desktop-streaming.md`: end-to-end desktop TX/RX architecture and runtime diagrams
+- `docs/architecture/threaded-streaming-runtime.md`: planned task/queue ownership model for the threaded incremental refactor
 - `docs/specs/transport-protocol.md`: full protocol v3 field-level documentation
+- `docs/specs/receiver-progress-invariants.md`: receiver rules that prevent long-play ingress-without-playout stalls
 - `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove and how to read its status
 - `docs/test/desktop-impairment-validation.md`: repeatable impaired-network proof workflow and expected counters
 - `docs/architecture/portable-core.md`: portable vs desktop-specific boundaries

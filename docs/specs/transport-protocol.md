@@ -129,6 +129,12 @@ Current desktop behavior:
 - RX uses the announced playout delay to decide when to start the stream
 - desktop RX network mode uses network audio only; it no longer falls back to local-file MP3 playout
 
+Threaded-runtime target:
+
+- TX audio production moves to incremental decode/resample/encode rather than whole-track prebuild
+- `media_sequence`, `group_id`, and `group_index` remain strictly monotonic on the wire even when frames are produced just ahead of playout deadlines
+- bounded producer queues, not whole-track arrays, become the pacing contract between TX audio production and TX network send
+
 ### `CDG_BATCH`
 
 Purpose:
@@ -150,6 +156,11 @@ Current desktop behavior:
 - each batch carries up to 6 raw CD+G subchannel packets
 - TX timestamps batches by the source CD+G packet index converted into milliseconds
 - RX applies batches in order to a live `dashcdg_cdg_state`
+
+Threaded-runtime target:
+
+- live CDG batches are produced from a timeline-driven video task and handed to the network sender through a bounded queue or equivalent publish boundary
+- RX video progression and RX bootstrap progression become independent subsystems
 
 ### `CDG_SNAPSHOT`
 
@@ -174,6 +185,11 @@ Current desktop behavior:
 - RX reassembles the snapshot, restores the live framebuffer/palette state, and resumes from the aligned live `CDG_BATCH` packet index
 - the full `ASSET_CHUNK` replay still continues in parallel so deterministic seek/bootstrap completes in the background
 - RX can also apply snapshots mid-session while paused or recovering, not just before bootstrap completion
+
+Threaded-runtime target:
+
+- snapshots are a recovery and fast-start input to the RX video task
+- snapshot failure or rejection must not permanently block later live video progression
 
 ### `PTP_SYNC`
 
@@ -301,6 +317,13 @@ The current desktop receiver uses both bootstrap and live paths:
 
 RX startup is now network-audio-only for desktop network mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late. Current desktop HUD/stdout observability also exposes startup gate state, clock step/peak/holdover data, and current FEC repair hotness.
 
+Threaded-runtime target:
+
+1. socket receive parses packets and publishes typed packet events without waiting on render/UI work
+2. PTP observations feed a dedicated clock-discipline task
+3. bootstrap replay, audio progression, and live video progression advance independently
+4. render consumes immutable published frame snapshots rather than mutating receiver transport state directly
+
 ## Late-join behavior
 
 The current proof supports late join by combining:
@@ -322,5 +345,6 @@ In practice, RX can start live audio before the bootstrap asset is complete, can
 - bounded XOR FEC only repairs a single missing media payload per group; it is not a long-window or burst-loss code
 - audio recovery still relies on playout delay and bounded FEC rather than a separate audio-state snapshot/keyframe model
 - no wire-level compatibility promise for protocol v1 peers
+- the threaded-runtime queue ownership model is a desktop architecture refactor and does not change protocol v3 packet formats by itself
 
 These are intentional current omissions, not undocumented behavior.
