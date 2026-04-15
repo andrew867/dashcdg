@@ -80,6 +80,7 @@ struct dashcdg_tx_state {
     struct dashcdg_announce_payload announce;
     struct dashcdg_clock_beacon_payload beacon;
     struct dashcdg_cdg_reader reader;
+    struct dashcdg_cdg_state pause_state;
     struct dashcdg_gl_renderer renderer;
     struct dashcdg_tx_playlist playlist;
     pthread_t tx_thread;
@@ -126,6 +127,7 @@ struct dashcdg_tx_state {
     uint64_t ptp_delay_resp_packets_sent;
     uint32_t ptp_sync_id;
     uint64_t last_ptp_sync_ms;
+    uint64_t last_pause_state_update_ms;
     uint64_t last_cdg_snapshot_ms;
     uint32_t cdg_snapshot_id;
     uint64_t cdg_snapshot_packet_index;
@@ -142,6 +144,18 @@ struct dashcdg_tx_state {
 };
 
 static struct dashcdg_tx_state g_tx_state;
+
+static const struct {
+    char c;
+    uint8_t rows[7];
+} g_dashcdg_pause_font[] = {
+    { 'A', { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
+    { 'D', { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E } },
+    { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
+    { 'P', { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 } },
+    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
+    { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } }
+};
 
 static char *dashcdg_strdup(const char *value) {
     size_t length;
@@ -190,6 +204,163 @@ static size_t dashcdg_tx_serialize_cdg_snapshot_state(
     memcpy(buffer + offset, state->framebuffer, DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT);
     offset += DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT;
     return offset;
+}
+
+static void dashcdg_tx_pause_fill_rect(
+        struct dashcdg_cdg_state *state,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint8_t color
+) {
+    int x0 = x < DASHCDG_VISIBLE_X ? DASHCDG_VISIBLE_X : x;
+    int y0 = y < DASHCDG_VISIBLE_Y ? DASHCDG_VISIBLE_Y : y;
+    int x1 = x + width;
+    int y1 = y + height;
+
+    if (state == NULL || width <= 0 || height <= 0) {
+        return;
+    }
+    if (x1 > DASHCDG_VISIBLE_RIGHT) {
+        x1 = DASHCDG_VISIBLE_RIGHT;
+    }
+    if (y1 > DASHCDG_VISIBLE_BOTTOM) {
+        y1 = DASHCDG_VISIBLE_BOTTOM;
+    }
+
+    for (int row = y0; row < y1; ++row) {
+        for (int col = x0; col < x1; ++col) {
+            state->framebuffer[DASHCDG_ARRAY_INDEX(col, row)] = color & 0x0FU;
+        }
+    }
+}
+
+static const uint8_t *dashcdg_tx_pause_font_rows(char c) {
+    for (size_t i = 0; i < sizeof(g_dashcdg_pause_font) / sizeof(g_dashcdg_pause_font[0]); ++i) {
+        if (g_dashcdg_pause_font[i].c == c) {
+            return g_dashcdg_pause_font[i].rows;
+        }
+    }
+    return NULL;
+}
+
+static void dashcdg_tx_pause_draw_glyph(
+        struct dashcdg_cdg_state *state,
+        int x,
+        int y,
+        char c,
+        int scale,
+        uint8_t fg_color,
+        uint8_t bg_color
+) {
+    const uint8_t *rows = dashcdg_tx_pause_font_rows(c);
+
+    if (state == NULL || rows == NULL || scale <= 0) {
+        return;
+    }
+
+    for (int row = 0; row < 7; ++row) {
+        for (int col = 0; col < 5; ++col) {
+            uint8_t color = ((rows[row] >> (4 - col)) & 0x01U) ? fg_color : bg_color;
+
+            dashcdg_tx_pause_fill_rect(
+                    state,
+                    x + (col * scale),
+                    y + (row * scale),
+                    scale,
+                    scale,
+                    color
+            );
+        }
+    }
+}
+
+static void dashcdg_tx_render_pause_state_locked(uint64_t now_ms) {
+    static const char *title = "PAUSED";
+    uint64_t elapsed_ms;
+    int phase;
+    int title_x;
+    int title_y;
+
+    dashcdg_cdg_state_init(&g_tx_state.pause_state);
+    elapsed_ms = now_ms > g_tx_state.playback_anchor_local_ms ? now_ms - g_tx_state.playback_anchor_local_ms : 0U;
+    phase = (int) ((elapsed_ms / 250U) % 8U);
+
+    g_tx_state.pause_state.color_table[0] = 0x000000;
+    g_tx_state.pause_state.color_table[1] = 0x201040;
+    g_tx_state.pause_state.color_table[2] = 0x7A2CBF;
+    g_tx_state.pause_state.color_table[3] = 0xFF69B4;
+    g_tx_state.pause_state.color_table[4] = 0x38D9A9;
+    g_tx_state.pause_state.color_table[5] = 0xFFF3B0;
+    g_tx_state.pause_state.color_table[6] = 0x8BD3FF;
+    g_tx_state.pause_state.color_table[7] = 0xFFFFFF;
+    g_tx_state.pause_state.color_table[8] = 0x2E8BFF;
+    g_tx_state.pause_state.color_table[9] = 0x5CFF7A;
+    for (int i = 0; i < DASHCDG_COLORS; ++i) {
+        g_tx_state.pause_state.transparency[i] = (uint8_t) i;
+    }
+
+    dashcdg_tx_pause_fill_rect(
+            &g_tx_state.pause_state,
+            DASHCDG_VISIBLE_X,
+            DASHCDG_VISIBLE_Y,
+            DASHCDG_VISIBLE_WIDTH,
+            DASHCDG_VISIBLE_HEIGHT,
+            1
+    );
+
+    for (int stripe = 0; stripe < 6; ++stripe) {
+        uint8_t color = (uint8_t) ((stripe + phase) % 3 == 0 ? 3 : ((stripe + phase) % 3 == 1 ? 4 : 6));
+        dashcdg_tx_pause_fill_rect(
+                &g_tx_state.pause_state,
+                DASHCDG_VISIBLE_X,
+                DASHCDG_VISIBLE_Y + (stripe * 12),
+                DASHCDG_VISIBLE_WIDTH,
+                6,
+                color
+        );
+        dashcdg_tx_pause_fill_rect(
+                &g_tx_state.pause_state,
+                DASHCDG_VISIBLE_X,
+                DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12),
+                DASHCDG_VISIBLE_WIDTH,
+                6,
+                color
+        );
+    }
+
+    title_x = DASHCDG_VISIBLE_X + 76;
+    title_y = DASHCDG_VISIBLE_Y + 54;
+    for (int i = 0; title[i] != '\0'; ++i) {
+        dashcdg_tx_pause_draw_glyph(&g_tx_state.pause_state, title_x + (i * 24), title_y, title[i], 4, 7, 1);
+    }
+
+    dashcdg_tx_pause_fill_rect(
+            &g_tx_state.pause_state,
+            DASHCDG_VISIBLE_X + 34 + (phase * 24),
+            DASHCDG_VISIBLE_Y + 132,
+            28,
+            12,
+            (uint8_t) ((phase % 2) == 0 ? 5 : 4)
+    );
+    dashcdg_tx_pause_fill_rect(
+            &g_tx_state.pause_state,
+            DASHCDG_VISIBLE_X + 40,
+            DASHCDG_VISIBLE_Y + 160,
+            208,
+            8,
+            2
+    );
+    dashcdg_tx_pause_fill_rect(
+            &g_tx_state.pause_state,
+            DASHCDG_VISIBLE_X + 40 + (phase * 22),
+            DASHCDG_VISIBLE_Y + 156,
+            18,
+            16,
+            5
+    );
+    g_tx_state.last_pause_state_update_ms = now_ms;
 }
 
 static int dashcdg_char_equal_ignore_case(char left, char right) {
@@ -1380,9 +1551,13 @@ static int dashcdg_tx_prepare_cdg_snapshot_locked(uint64_t now_ms) {
         packet_index = packet_count;
     }
 
-    dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_index);
+    if (g_tx_state.paused) {
+        dashcdg_tx_render_pause_state_locked(now_ms);
+    } else {
+        dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_index);
+    }
     if (dashcdg_tx_serialize_cdg_snapshot_state(
-                &g_tx_state.reader.state,
+                g_tx_state.paused ? &g_tx_state.pause_state : &g_tx_state.reader.state,
                 g_tx_state.cdg_snapshot_state,
                 sizeof(g_tx_state.cdg_snapshot_state)
         ) != sizeof(g_tx_state.cdg_snapshot_state)) {
@@ -1418,7 +1593,7 @@ static void dashcdg_tx_send_cdg_snapshot_chunk_locked(uint64_t now_ms) {
     payload.chunk_length = (uint16_t) chunk_bytes;
     payload.snapshot_bytes = g_tx_state.cdg_snapshot_state + g_tx_state.cdg_snapshot_offset;
 
-    g_tx_state.header.flags = 0;
+    g_tx_state.header.flags = g_tx_state.paused ? DASHCDG_PACKET_FLAG_PAUSED : 0U;
     g_tx_state.header.sequence = g_tx_state.sequence++;
     g_tx_state.header.sender_time_ms = now_ms;
     packet_size = dashcdg_protocol_serialize_cdg_snapshot(packet, sizeof(packet), &g_tx_state.header, &payload);
@@ -1556,7 +1731,7 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
 static void dashcdg_tx_print_help(void) {
     fprintf(
             stdout,
-            "[tx] controls: p=play/pause, n or ]=next, b or [=back(history), r=restart, f=force-broadcast, s=status, v=toggle preview, h=help, q=quit\n"
+            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), r=restart, f=force-broadcast, s=status, v=toggle preview, h=help, q=quit\n"
     );
     fflush(stdout);
 }
@@ -1566,6 +1741,7 @@ static int dashcdg_tx_handle_command(int command) {
 
     pthread_mutex_lock(&g_tx_state.mutex);
     switch (tolower(command)) {
+        case ' ':
         case 'p':
             dashcdg_tx_set_paused_locked(!g_tx_state.paused, dashcdg_clock_now_ms());
             break;
@@ -1790,7 +1966,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
             g_tx_state.last_ptp_sync_ms = now_ms;
         }
 
-        while (now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+        while (!g_tx_state.paused &&
+                now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
                 g_tx_state.next_audio_frame_index < g_tx_state.audio_frame_count &&
                 g_tx_state.audio_frames[g_tx_state.next_audio_frame_index].playback_ms <=
                 dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
@@ -1823,7 +2000,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
             }
         }
 
-        while (now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+        while (!g_tx_state.paused &&
+                now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
                 g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
                 dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {

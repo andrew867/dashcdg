@@ -110,6 +110,8 @@ struct receiver_state {
     uint64_t fec_audio_recovered;
     uint64_t fec_cdg_recovered;
     uint64_t fec_recovery_failures;
+    uint16_t announced_audio_sample_rate;
+    uint8_t announced_audio_channels;
     uint16_t announced_playout_delay_ms;
     uint8_t announced_audio_frame_ms;
     uint8_t announced_audio_fec_group_size;
@@ -268,6 +270,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->fec_audio_recovered = 0;
     state->fec_cdg_recovered = 0;
     state->fec_recovery_failures = 0;
+    state->announced_audio_sample_rate = 0;
+    state->announced_audio_channels = 0;
     state->announced_playout_delay_ms = 0;
     state->announced_audio_frame_ms = 0;
     state->announced_audio_fec_group_size = 0;
@@ -513,6 +517,22 @@ static void dashcdg_rx_handle_snapshot_locked(struct receiver_state *state, cons
     }
 }
 
+static void dashcdg_rx_reset_audio_stream_locked(struct receiver_state *state) {
+    if (state == NULL || g_audio == NULL || state->announced_audio_sample_rate == 0 || state->announced_audio_channels == 0) {
+        return;
+    }
+
+    dashcdg_desktop_audio_stop_stream(g_audio);
+    dashcdg_desktop_audio_init_stream(
+            g_audio,
+            state->announced_audio_sample_rate,
+            state->announced_audio_channels,
+            state->announced_playout_delay_ms > 0 ? (uint32_t) state->announced_playout_delay_ms * 3U : 1500U
+    );
+    g_audio_stream_started = 0;
+    g_audio_start_inflight = 0;
+}
+
 static size_t dashcdg_rx_pending_audio_count(const struct receiver_state *state) {
     size_t count = 0;
 
@@ -655,6 +675,8 @@ static void dashcdg_rx_format_audio_gate_locked(
         snprintf(buffer, buffer_size, "net-audio-off");
     } else if (!state->have_clock) {
         snprintf(buffer, buffer_size, "wait-ptp");
+    } else if (state->playback_paused) {
+        snprintf(buffer, buffer_size, "paused");
     } else if (g_audio == NULL) {
         snprintf(buffer, buffer_size, "wait-audio-init");
     } else if (buffered_ms < state->announced_playout_delay_ms / 2U) {
@@ -683,7 +705,9 @@ static void dashcdg_rx_format_render_gate_locked(
         return;
     }
 
-    if (state->reader_ready) {
+    if (state->playback_paused && state->cdg_snapshots_applied > 0) {
+        snprintf(buffer, buffer_size, "pause-screen");
+    } else if (state->reader_ready) {
         snprintf(buffer, buffer_size, "asset-ready");
     } else if (state->asset_size == 0 || state->chunk_count == 0) {
         snprintf(buffer, buffer_size, "wait-announce");
@@ -1516,6 +1540,8 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     );
     strncpy(state->song_id, view->announce.song_id, sizeof(state->song_id) - 1U);
     state->session_start_ms = view->announce.session_start_ms;
+    state->announced_audio_sample_rate = view->announce.audio_sample_rate;
+    state->announced_audio_channels = view->announce.audio_channels;
     state->announced_playout_delay_ms = view->announce.playout_delay_ms;
     state->announced_audio_frame_ms = view->announce.audio_frame_ms;
     state->announced_audio_fec_group_size = view->announce.audio_fec_group_size;
@@ -1596,6 +1622,8 @@ static void handle_asset_chunk(struct receiver_state *state, const struct dashcd
 }
 
 static void handle_clock_beacon(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
+    int was_paused = state->playback_paused;
+
     dashcdg_media_clock_observe(
             &state->sender_clock,
             (int64_t) local_now_ms,
@@ -1607,6 +1635,9 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
     state->playback_base_ms = view->clock_beacon.playback_ms;
     state->playback_base_sender_ms = view->header.sender_time_ms;
     state->playback_paused = (view->header.flags & DASHCDG_PACKET_FLAG_PAUSED) != 0;
+    if (!was_paused && state->playback_paused) {
+        dashcdg_rx_reset_audio_stream_locked(state);
+    }
 }
 
 static void *network_thread(void *user_data) {
@@ -1834,6 +1865,7 @@ static int dashcdg_rx_claim_audio_start_locked(void) {
 }
 
 static void display(void) {
+    const struct dashcdg_cdg_state *render_state = NULL;
     uint64_t packet_ts = 0;
     uint64_t local_now_ms = dashcdg_clock_now_ms();
     uint64_t sender_now_ms = 0;
@@ -1869,7 +1901,7 @@ static void display(void) {
         playback_ms = DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
     }
 
-    if (g_receiver.reader_ready) {
+    if (g_receiver.reader_ready && !g_receiver.playback_paused) {
         packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
         dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
     }
@@ -1933,7 +1965,8 @@ static void display(void) {
             (unsigned long long) hud_stall_ms
     );
 
-    dashcdg_gl_renderer_render(&g_renderer, g_receiver.reader_ready ? &g_receiver.reader.state : &g_receiver.live_state);
+    render_state = (g_receiver.playback_paused || !g_receiver.reader_ready) ? &g_receiver.live_state : &g_receiver.reader.state;
+    dashcdg_gl_renderer_render(&g_renderer, render_state);
     pthread_mutex_unlock(&g_receiver.mutex);
 
     glUseProgram(0);
