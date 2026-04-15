@@ -4,8 +4,8 @@
 
 This tranche proves the architecture on computer hardware before MCU work:
 
-- `apps/desktop-tx/main.c`: multicast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, and software-timestamped PTP-style sync traffic
-- `apps/desktop-rx/main.c`: multicast receiver with live network audio decode, bootstrap asset reconstruction, and OpenGL rendering
+- `apps/desktop-tx/main.c`: multicast/broadcast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, and software-timestamped PTP-style sync traffic
+- `apps/desktop-rx/main.c`: multicast/broadcast receiver with live network audio decode, bootstrap asset reconstruction, and OpenGL rendering
 - `apps/desktop-player/main.c`: local non-network player for baseline regression checks
 
 ## Success criteria

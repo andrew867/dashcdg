@@ -2,7 +2,7 @@
 
 ## Goals
 
-- Wi-Fi-first, UDP multicast-friendly transport
+- Wi-Fi-first, UDP multicast/broadcast-friendly transport
 - portable binary framing for desktop and future embedded receivers
 - live network audio plus live timed CD+G packets
 - late-join support without requiring retransmit

@@ -66,21 +66,28 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Integrated network modes through the player entrypoint:
 
 ```sh
-build/bin/desktop-player tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
-build/bin/desktop-player rx <multicast-address> <port>
+build/bin/desktop-player tx [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]
+build/bin/desktop-player rx [endpoint-address] [port]
 ```
 
-Standalone multicast transmitter:
+Standalone network transmitter:
 
 ```sh
-build/bin/desktop-tx [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]
+build/bin/desktop-tx [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]
 ```
 
-Standalone multicast receiver:
+Standalone network receiver:
 
 ```sh
-build/bin/desktop-rx [--headless] <multicast-address> <port>
+build/bin/desktop-rx [--headless] [endpoint-address] [port]
 ```
+
+Network defaults:
+
+- default endpoint address: `239.255.77.77`
+- default UDP port: `24684`
+- TX and RX still accept explicit multicast endpoints
+- TX and RX now also accept IPv4 broadcast destinations such as `192.168.0.255` for `/24` LAN broadcast setups
 
 ## Media resolution behavior
 
@@ -135,6 +142,7 @@ The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
 - RX now uses bounded pending queues plus deadline-based skip logic for reordered or missing live audio/CD+G packets
 - TX now emits bounded `FEC_PARITY` packets for audio and CD+G groups, and RX attempts single-missing-packet repair before treating a group as lost
 - TX/RX status lines now expose startup gates, clock-update quality, repair hotness, and FEC profile/overhead telemetry
+- desktop TX/RX now default to `239.255.77.77:24684`, while also allowing explicit multicast or IPv4 broadcast endpoints
 
 ## Impairment validation relay
 

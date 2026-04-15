@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,9 +146,73 @@ static struct receiver_state g_receiver;
 static struct dashcdg_desktop_audio *g_audio;
 static struct dashcdg_gl_renderer g_renderer;
 static struct dashcdg_opus_decoder g_opus_decoder;
-static const char *g_multicast_address;
+static const char *g_endpoint_address;
+static struct in_addr g_endpoint_in_addr;
+static int g_endpoint_is_multicast;
+static int g_endpoint_is_broadcast;
 static int g_headless = 0;
 static int g_audio_stream_started = 0;
+
+static int dashcdg_rx_is_number(const char *value) {
+    size_t length;
+
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+
+    length = strlen(value);
+    for (size_t i = 0; i < length; ++i) {
+        if (!isdigit((unsigned char) value[i])) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int dashcdg_rx_parse_ipv4_address(const char *value, struct in_addr *out_addr) {
+    if (value == NULL || out_addr == NULL) {
+        return 0;
+    }
+
+    return inet_pton(AF_INET, value, out_addr) == 1;
+}
+
+static int dashcdg_rx_ipv4_is_multicast(const struct in_addr *address) {
+    uint32_t host_order;
+
+    if (address == NULL) {
+        return 0;
+    }
+
+    host_order = ntohl(address->s_addr);
+    return host_order >= 0xE0000000U && host_order <= 0xEFFFFFFFU;
+}
+
+static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
+    uint32_t host_order;
+
+    if (address == NULL) {
+        return 0;
+    }
+
+    if (dashcdg_rx_ipv4_is_multicast(address)) {
+        return 0;
+    }
+
+    host_order = ntohl(address->s_addr);
+    return host_order == 0xFFFFFFFFU || (host_order & 0xFFU) == 0xFFU;
+}
+
+static void dashcdg_rx_print_usage(const char *argv0) {
+    fprintf(stderr, "usage: %s [--headless] [endpoint-address] [port]\n", argv0);
+    fprintf(
+            stderr,
+            "defaults: endpoint-address=%s port=%d\n",
+            DASHCDG_DEFAULT_NETWORK_ADDRESS,
+            DASHCDG_DEFAULT_NETWORK_PORT
+    );
+}
 
 static void receiver_state_reset(struct receiver_state *state) {
     free(state->asset_bytes);
@@ -1397,9 +1462,8 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
 static void *network_thread(void *user_data) {
     int port = *(int *) user_data;
     dashcdg_socket_t sockfd;
-    struct ip_mreq membership;
     struct sockaddr_in local_addr;
-    struct sockaddr_in multicast_addr;
+    struct sockaddr_in endpoint_addr;
     struct sockaddr_in sender_addr;
     socklen_t sender_addr_len;
     uint8_t buffer[DASHCDG_MAX_PACKET_SIZE];
@@ -1413,6 +1477,11 @@ static void *network_thread(void *user_data) {
     {
         int reuse = 1;
         setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+        if (g_endpoint_is_broadcast) {
+            int enable_broadcast = 1;
+
+            setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, (const char *) &enable_broadcast, sizeof(enable_broadcast));
+        }
     }
 
     memset(&local_addr, 0, sizeof(local_addr));
@@ -1426,18 +1495,22 @@ static void *network_thread(void *user_data) {
         return NULL;
     }
 
-    membership.imr_multiaddr.s_addr = inet_addr(g_multicast_address);
-    membership.imr_interface.s_addr = htonl(INADDR_ANY);
-    if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *) &membership, sizeof(membership)) != 0) {
-        perror("IP_ADD_MEMBERSHIP");
-        dashcdg_socket_close(sockfd);
-        return NULL;
+    if (g_endpoint_is_multicast) {
+        struct ip_mreq membership;
+
+        membership.imr_multiaddr = g_endpoint_in_addr;
+        membership.imr_interface.s_addr = htonl(INADDR_ANY);
+        if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *) &membership, sizeof(membership)) != 0) {
+            perror("IP_ADD_MEMBERSHIP");
+            dashcdg_socket_close(sockfd);
+            return NULL;
+        }
     }
 
-    memset(&multicast_addr, 0, sizeof(multicast_addr));
-    multicast_addr.sin_family = AF_INET;
-    multicast_addr.sin_port = htons((uint16_t) port);
-    multicast_addr.sin_addr.s_addr = inet_addr(g_multicast_address);
+    memset(&endpoint_addr, 0, sizeof(endpoint_addr));
+    endpoint_addr.sin_family = AF_INET;
+    endpoint_addr.sin_port = htons((uint16_t) port);
+    endpoint_addr.sin_addr = g_endpoint_in_addr;
 
     for (;;) {
         sender_addr_len = (socklen_t) sizeof(sender_addr);
@@ -1505,7 +1578,7 @@ static void *network_thread(void *user_data) {
                     g_receiver.ptp_follow_up_packets++;
                     if (g_receiver.pending_sync_valid && view.ptp_follow_up.sync_id == g_receiver.pending_sync_id) {
                         g_receiver.pending_sync_origin_remote_ms = view.ptp_follow_up.origin_time_ms;
-                        send_ptp_delay_request(&g_receiver, sockfd, &multicast_addr, local_now_ms);
+                        send_ptp_delay_request(&g_receiver, sockfd, &endpoint_addr, local_now_ms);
                     } else {
                         dashcdg_media_clock_observe(&g_receiver.sender_clock, (int64_t) local_now_ms, (int64_t) view.ptp_follow_up.origin_time_ms, 5);
                         dashcdg_rx_note_clock_update_locked(&g_receiver, local_now_ms, 0);
@@ -1722,7 +1795,13 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_t rx_thread;
     const char *positionals[2] = { NULL, NULL };
     int positional_index = 0;
-    int port;
+    int positionals_consumed = 0;
+    int port = DASHCDG_DEFAULT_NETWORK_PORT;
+
+    g_endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
+    memset(&g_endpoint_in_addr, 0, sizeof(g_endpoint_in_addr));
+    g_endpoint_is_multicast = 0;
+    g_endpoint_is_broadcast = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--headless") == 0) {
@@ -1731,25 +1810,40 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         }
 
         if (positional_index >= 2) {
-            fprintf(stderr, "usage: %s [--headless] <multicast-address> <port>\n", argv[0]);
+            dashcdg_rx_print_usage(argv[0]);
             return 1;
         }
 
         positionals[positional_index++] = argv[i];
     }
 
-    if (positional_index != 2) {
-        fprintf(stderr, "usage: %s [--headless] <multicast-address> <port>\n", argv[0]);
+    if (positional_index > 0 && !dashcdg_rx_is_number(positionals[0])) {
+        g_endpoint_address = positionals[0];
+        positionals_consumed = 1;
+    }
+
+    if (positionals_consumed < positional_index && dashcdg_rx_is_number(positionals[positionals_consumed])) {
+        port = atoi(positionals[positionals_consumed]);
+        positionals_consumed++;
+    }
+
+    if (positionals_consumed != positional_index || port <= 0) {
+        dashcdg_rx_print_usage(argv[0]);
         return 1;
     }
 
-    g_multicast_address = positionals[0];
-    port = atoi(positionals[1]);
+    if (!dashcdg_rx_parse_ipv4_address(g_endpoint_address, &g_endpoint_in_addr)) {
+        fprintf(stderr, "invalid endpoint address: %s\n", g_endpoint_address);
+        return 1;
+    }
+
+    g_endpoint_is_multicast = dashcdg_rx_ipv4_is_multicast(&g_endpoint_in_addr);
+    g_endpoint_is_broadcast = dashcdg_rx_ipv4_is_broadcast(&g_endpoint_in_addr);
 
     fprintf(
             stdout,
             "[rx] listening on %s:%d%s\n",
-            g_multicast_address,
+            g_endpoint_address,
             port,
             g_headless ? " (headless stdout stats mode)" : " (HUD on window; press S for stats line to stdout)"
     );

@@ -521,6 +521,54 @@ static int dashcdg_tx_is_number(const char *value) {
     return 1;
 }
 
+static int dashcdg_tx_parse_ipv4_address(const char *value, struct in_addr *out_addr) {
+    if (value == NULL || out_addr == NULL) {
+        return 0;
+    }
+
+    return inet_pton(AF_INET, value, out_addr) == 1;
+}
+
+static int dashcdg_tx_ipv4_is_multicast(const struct in_addr *address) {
+    uint32_t host_order;
+
+    if (address == NULL) {
+        return 0;
+    }
+
+    host_order = ntohl(address->s_addr);
+    return host_order >= 0xE0000000U && host_order <= 0xEFFFFFFFU;
+}
+
+static int dashcdg_tx_ipv4_is_broadcast(const struct in_addr *address) {
+    uint32_t host_order;
+
+    if (address == NULL) {
+        return 0;
+    }
+
+    if (dashcdg_tx_ipv4_is_multicast(address)) {
+        return 0;
+    }
+
+    host_order = ntohl(address->s_addr);
+    return host_order == 0xFFFFFFFFU || (host_order & 0xFFU) == 0xFFU;
+}
+
+static void dashcdg_tx_print_usage(const char *argv0) {
+    fprintf(
+            stderr,
+            "usage: %s [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]\n",
+            argv0
+    );
+    fprintf(
+            stderr,
+            "defaults: endpoint-address=%s port=%d\n",
+            DASHCDG_DEFAULT_NETWORK_ADDRESS,
+            DASHCDG_DEFAULT_NETWORK_PORT
+    );
+}
+
 static const struct dashcdg_tx_track *dashcdg_tx_current_track(void) {
     if (g_tx_state.playlist.count == 0U || g_tx_state.playlist.current_index >= g_tx_state.playlist.count) {
         return NULL;
@@ -1724,15 +1772,20 @@ static void dashcdg_tx_cleanup(void) {
 }
 
 int dashcdg_desktop_tx_main(int argc, char **argv) {
-    const char *multicast_address = NULL;
+    const char *endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
     const char *song_id = NULL;
     const char *source_path = NULL;
     const char *warmup_value = NULL;
-    int port = 0;
+    int port = DASHCDG_DEFAULT_NETWORK_PORT;
     int positional_index = 0;
     int ttl = 1;
     unsigned char loopback = 1;
     const char *positionals[5] = { NULL, NULL, NULL, NULL, NULL };
+    struct in_addr destination_addr;
+    int positionals_consumed = 0;
+    int remaining_positionals;
+    int is_multicast;
+    int is_broadcast;
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
@@ -1749,7 +1802,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
 
         if (positional_index >= 5) {
-            fprintf(stderr, "usage: %s [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]\n", argv[0]);
+            dashcdg_tx_print_usage(argv[0]);
             dashcdg_tx_cleanup();
             return 1;
         }
@@ -1757,42 +1810,67 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         positionals[positional_index++] = argv[i];
     }
 
-    if (positional_index < 3) {
-        fprintf(stderr, "usage: %s [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]\n", argv[0]);
+    memset(&destination_addr, 0, sizeof(destination_addr));
+
+    if (positional_index > 0 && dashcdg_tx_parse_ipv4_address(positionals[0], &destination_addr)) {
+        endpoint_address = positionals[0];
+        positionals_consumed = 1;
+    }
+
+    if (positionals_consumed < positional_index && dashcdg_tx_is_number(positionals[positionals_consumed])) {
+        port = atoi(positionals[positionals_consumed]);
+        positionals_consumed++;
+    }
+
+    remaining_positionals = positional_index - positionals_consumed;
+    if (remaining_positionals <= 0 || remaining_positionals > 3) {
+        dashcdg_tx_print_usage(argv[0]);
         dashcdg_tx_cleanup();
         return 1;
     }
 
-    multicast_address = positionals[0];
-    port = atoi(positionals[1]);
-    if (positional_index == 3) {
-        source_path = positionals[2];
-    } else if (positional_index == 4) {
-        if (dashcdg_tx_is_number(positionals[3])) {
-            source_path = positionals[2];
-            warmup_value = positionals[3];
+    if (!dashcdg_tx_parse_ipv4_address(endpoint_address, &destination_addr)) {
+        fprintf(stderr, "invalid endpoint address: %s\n", endpoint_address);
+        dashcdg_tx_cleanup();
+        return 1;
+    }
+
+    if (remaining_positionals == 1) {
+        source_path = positionals[positionals_consumed];
+    } else if (remaining_positionals == 2) {
+        if (dashcdg_tx_is_number(positionals[positionals_consumed + 1])) {
+            source_path = positionals[positionals_consumed];
+            warmup_value = positionals[positionals_consumed + 1];
         } else {
-            song_id = positionals[2];
-            source_path = positionals[3];
+            song_id = positionals[positionals_consumed];
+            source_path = positionals[positionals_consumed + 1];
         }
     } else {
-        song_id = positionals[2];
-        source_path = positionals[3];
-        warmup_value = positionals[4];
+        song_id = positionals[positionals_consumed];
+        source_path = positionals[positionals_consumed + 1];
+        warmup_value = positionals[positionals_consumed + 2];
     }
 
     if (warmup_value != NULL) {
+        if (!dashcdg_tx_is_number(warmup_value)) {
+            dashcdg_tx_print_usage(argv[0]);
+            dashcdg_tx_cleanup();
+            return 1;
+        }
         g_tx_state.warmup_ms = (uint64_t) strtoull(warmup_value, NULL, 10);
     }
     if (song_id != NULL) {
         strncpy(g_tx_state.base_song_id, song_id, sizeof(g_tx_state.base_song_id) - 1U);
     }
 
-    if (multicast_address == NULL || source_path == NULL || port <= 0) {
-        fprintf(stderr, "usage: %s [--display] <multicast-address> <port> [song-id] <file|folder> [warmup-ms]\n", argv[0]);
+    if (source_path == NULL || port <= 0) {
+        dashcdg_tx_print_usage(argv[0]);
         dashcdg_tx_cleanup();
         return 1;
     }
+
+    is_multicast = dashcdg_tx_ipv4_is_multicast(&destination_addr);
+    is_broadcast = dashcdg_tx_ipv4_is_broadcast(&destination_addr);
 
     if (dashcdg_path_is_directory(source_path)) {
         if (!dashcdg_tx_playlist_from_directory(&g_tx_state.playlist, source_path)) {
@@ -1819,25 +1897,31 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         return 1;
     }
 
-    if (setsockopt(g_tx_state.sockfd, IPPROTO_IP, IP_MULTICAST_TTL, (const char *) &ttl, sizeof(ttl)) != 0) {
-        perror("setsockopt");
-        dashcdg_tx_cleanup();
-        return 1;
-    }
-    if (setsockopt(g_tx_state.sockfd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char *) &loopback, sizeof(loopback)) != 0) {
-        perror("setsockopt");
-        dashcdg_tx_cleanup();
-        return 1;
+    if (is_multicast) {
+        if (setsockopt(g_tx_state.sockfd, IPPROTO_IP, IP_MULTICAST_TTL, (const char *) &ttl, sizeof(ttl)) != 0) {
+            perror("setsockopt");
+            dashcdg_tx_cleanup();
+            return 1;
+        }
+        if (setsockopt(g_tx_state.sockfd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char *) &loopback, sizeof(loopback)) != 0) {
+            perror("setsockopt");
+            dashcdg_tx_cleanup();
+            return 1;
+        }
+    } else if (is_broadcast) {
+        int enable_broadcast = 1;
+
+        if (setsockopt(g_tx_state.sockfd, SOL_SOCKET, SO_BROADCAST, (const char *) &enable_broadcast, sizeof(enable_broadcast)) != 0) {
+            perror("setsockopt");
+            dashcdg_tx_cleanup();
+            return 1;
+        }
     }
 
     memset(&g_tx_state.destination, 0, sizeof(g_tx_state.destination));
     g_tx_state.destination.sin_family = AF_INET;
     g_tx_state.destination.sin_port = htons((uint16_t) port);
-    if (inet_pton(AF_INET, multicast_address, &g_tx_state.destination.sin_addr) != 1) {
-        fprintf(stderr, "invalid multicast address: %s\n", multicast_address);
-        dashcdg_tx_cleanup();
-        return 1;
-    }
+    g_tx_state.destination.sin_addr = destination_addr;
 
     g_tx_state.ptp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_tx_state.ptp_sockfd == DASHCDG_INVALID_SOCKET) {
@@ -1849,9 +1933,19 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     {
         int reuse = 1;
         struct sockaddr_in local_addr;
-        struct ip_mreq membership;
 
         setsockopt(g_tx_state.ptp_sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+        if (is_broadcast) {
+            int enable_broadcast = 1;
+
+            setsockopt(
+                    g_tx_state.ptp_sockfd,
+                    SOL_SOCKET,
+                    SO_BROADCAST,
+                    (const char *) &enable_broadcast,
+                    sizeof(enable_broadcast)
+            );
+        }
         memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
         local_addr.sin_port = htons((uint16_t) port);
@@ -1862,18 +1956,22 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             return 1;
         }
 
-        membership.imr_multiaddr = g_tx_state.destination.sin_addr;
-        membership.imr_interface.s_addr = htonl(INADDR_ANY);
-        if (setsockopt(
-                g_tx_state.ptp_sockfd,
-                IPPROTO_IP,
-                IP_ADD_MEMBERSHIP,
-                (const char *) &membership,
-                sizeof(membership)
-        ) != 0) {
-            perror("IP_ADD_MEMBERSHIP");
-            dashcdg_tx_cleanup();
-            return 1;
+        if (is_multicast) {
+            struct ip_mreq membership;
+
+            membership.imr_multiaddr = g_tx_state.destination.sin_addr;
+            membership.imr_interface.s_addr = htonl(INADDR_ANY);
+            if (setsockopt(
+                    g_tx_state.ptp_sockfd,
+                    IPPROTO_IP,
+                    IP_ADD_MEMBERSHIP,
+                    (const char *) &membership,
+                    sizeof(membership)
+            ) != 0) {
+                perror("IP_ADD_MEMBERSHIP");
+                dashcdg_tx_cleanup();
+                return 1;
+            }
         }
     }
 
@@ -1883,7 +1981,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         return 1;
     }
 
-    fprintf(stdout, "[tx] broadcasting to %s:%d\n", multicast_address, port);
+    fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
     fflush(stdout);
 
     pthread_create(&g_tx_state.tx_thread, NULL, dashcdg_tx_thread_main, NULL);
