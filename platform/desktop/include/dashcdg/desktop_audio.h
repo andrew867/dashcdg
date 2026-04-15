@@ -47,6 +47,7 @@ struct dashcdg_desktop_audio {
     size_t stream_queued_frames;
     int16_t *stream_pcm;
     int stream_decoder_open;
+    int stream_muted;
     pthread_mutex_t stream_mutex;
 };
 
@@ -82,5 +83,7 @@ size_t dashcdg_desktop_audio_queue_frames(
         int64_t first_frame_timestamp_ms
 );
 uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *audio);
+void dashcdg_desktop_audio_set_muted(struct dashcdg_desktop_audio *audio, int muted);
+int dashcdg_desktop_audio_is_muted(const struct dashcdg_desktop_audio *audio);
 
 #endif

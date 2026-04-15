@@ -41,6 +41,7 @@
 #define DASHCDG_TX_AUDIO_QUEUE_CAPACITY 128U
 #define DASHCDG_TX_AUDIO_CHUNK_FRAMES 4096U
 #define DASHCDG_TX_PCM_FIFO_FRAMES (DASHCDG_AUDIO_FRAME_SAMPLES * 32U)
+#define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
 
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
@@ -152,6 +153,7 @@ struct dashcdg_tx_state {
     int pending_audio_frame_valid;
     int audio_producer_finished;
     int preview_enabled;
+    int preview_hud_visible;
     int display_requested;
     int paused;
     int shutdown_requested;
@@ -2026,7 +2028,7 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
 static void dashcdg_tx_print_help(void) {
     fprintf(
             stdout,
-            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), r=restart, f=force-broadcast, s=status, v=toggle preview, h=help, q=quit\n"
+            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), r=restart, f=force-broadcast, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
     );
     fflush(stdout);
 }
@@ -2062,6 +2064,14 @@ static int dashcdg_tx_handle_command(int command) {
             fprintf(stdout, "[tx] force rebroadcast requested\n");
             break;
         case 's':
+            break;
+        case 'i':
+            if (g_tx_state.display_requested) {
+                g_tx_state.preview_hud_visible = !g_tx_state.preview_hud_visible;
+                fprintf(stdout, "[tx] HUD %s\n", g_tx_state.preview_hud_visible ? "enabled" : "hidden");
+            } else {
+                fprintf(stdout, "[tx] HUD toggle requires --display\n");
+            }
             break;
         case 'v':
             if (g_tx_state.display_requested) {
@@ -2443,13 +2453,9 @@ static void *dashcdg_tx_thread_main(void *unused) {
 static void dashcdg_tx_preview_display(void) {
     uint64_t playback_ms;
     uint64_t packet_ts;
-    uint32_t fec_overhead_pct;
-    int64_t audio_lead_ms;
-    int64_t cdg_lead_ms;
     char hud_line_a[256];
     char hud_line_b[256];
-    const struct dashcdg_tx_track *track = NULL;
-    uint32_t available_prefix_bytes = 0;
+    int show_hud = 0;
 
     pthread_mutex_lock(&g_tx_state.mutex);
     if (!g_tx_state.preview_enabled) {
@@ -2457,84 +2463,92 @@ static void dashcdg_tx_preview_display(void) {
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         glutSwapBuffers();
-        glutPostRedisplay();
         return;
     }
 
     playback_ms = dashcdg_tx_current_playback_ms_locked(dashcdg_clock_now_ms());
-    fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
-    audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
-    cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(playback_ms);
     packet_ts = dashcdg_ms_to_packet_count(playback_ms);
     dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_ts);
     dashcdg_gl_renderer_render(&g_tx_state.renderer, &g_tx_state.reader.state);
+    show_hud = g_tx_state.preview_hud_visible;
+    if (show_hud) {
+        uint32_t fec_overhead_pct;
+        int64_t audio_lead_ms;
+        int64_t cdg_lead_ms;
+        const struct dashcdg_tx_track *track = NULL;
+        uint32_t available_prefix_bytes = 0;
 
-    track = dashcdg_tx_current_track();
-    if (g_tx_state.asset_size > 0U && g_tx_state.contiguous_prefix_chunks >= g_tx_state.chunk_count) {
-        available_prefix_bytes = (uint32_t) g_tx_state.asset_size;
-    } else {
-        available_prefix_bytes = (uint32_t) (g_tx_state.contiguous_prefix_chunks * DASHCDG_MAX_ASSET_CHUNK);
+        fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
+        audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
+        cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(playback_ms);
+        track = dashcdg_tx_current_track();
+        if (g_tx_state.asset_size > 0U && g_tx_state.contiguous_prefix_chunks >= g_tx_state.chunk_count) {
+            available_prefix_bytes = (uint32_t) g_tx_state.asset_size;
+        } else {
+            available_prefix_bytes = (uint32_t) (g_tx_state.contiguous_prefix_chunks * DASHCDG_MAX_ASSET_CHUNK);
+        }
+
+        snprintf(
+                hud_line_a,
+                sizeof(hud_line_a),
+                "TX dg:%llu fail:%llu live:%llu aud:%llu snap:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
+                (unsigned long long) g_tx_state.datagrams_sent,
+                (unsigned long long) g_tx_state.send_failures,
+                (unsigned long long) g_tx_state.cdg_batch_packets_sent,
+                (unsigned long long) g_tx_state.audio_packets_sent,
+                (unsigned long long) g_tx_state.cdg_snapshot_packets_sent,
+                (unsigned long long) g_tx_state.fec_audio_packets_sent,
+                (unsigned long long) g_tx_state.fec_cdg_packets_sent,
+                (unsigned int) fec_overhead_pct,
+                (unsigned int) available_prefix_bytes,
+                (unsigned int) g_tx_state.beacon.total_asset_bytes
+        );
+        snprintf(
+                hud_line_b,
+                sizeof(hud_line_b),
+                "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s",
+                (unsigned long long) g_tx_state.asset_loops_completed,
+                g_tx_state.next_asset_offset,
+                g_tx_state.cdg_snapshot_offset,
+                (long long) audio_lead_ms,
+                (long long) cdg_lead_ms,
+                (unsigned int) g_tx_state.announce.audio_fec_group_size,
+                (unsigned int) g_tx_state.announce.cdg_fec_group_size,
+                track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
+        );
     }
-
-    snprintf(
-            hud_line_a,
-            sizeof(hud_line_a),
-            "TX dg:%llu fail:%llu live:%llu aud:%llu snap:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
-            (unsigned long long) g_tx_state.datagrams_sent,
-            (unsigned long long) g_tx_state.send_failures,
-            (unsigned long long) g_tx_state.cdg_batch_packets_sent,
-            (unsigned long long) g_tx_state.audio_packets_sent,
-            (unsigned long long) g_tx_state.cdg_snapshot_packets_sent,
-            (unsigned long long) g_tx_state.fec_audio_packets_sent,
-            (unsigned long long) g_tx_state.fec_cdg_packets_sent,
-            (unsigned int) fec_overhead_pct,
-            (unsigned int) available_prefix_bytes,
-            (unsigned int) g_tx_state.beacon.total_asset_bytes
-    );
-    snprintf(
-            hud_line_b,
-            sizeof(hud_line_b),
-            "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s",
-            (unsigned long long) g_tx_state.asset_loops_completed,
-            g_tx_state.next_asset_offset,
-            g_tx_state.cdg_snapshot_offset,
-            (long long) audio_lead_ms,
-            (long long) cdg_lead_ms,
-            (unsigned int) g_tx_state.announce.audio_fec_group_size,
-            (unsigned int) g_tx_state.announce.cdg_fec_group_size,
-            track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
-    );
     pthread_mutex_unlock(&g_tx_state.mutex);
 
-    glUseProgram(0);
-    glDisable(GL_TEXTURE_2D);
+    if (show_hud) {
+        glUseProgram(0);
+        glDisable(GL_TEXTURE_2D);
 
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT), 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT), 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
 
-    glColor3f(0.9f, 0.9f, 0.2f);
-    glRasterPos2i(8, 18);
-    for (const char *c = hud_line_a; *c != '\0'; ++c) {
-        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, (int) (unsigned char) *c);
+        glColor3f(0.9f, 0.9f, 0.2f);
+        glRasterPos2i(8, 18);
+        for (const char *c = hud_line_a; *c != '\0'; ++c) {
+            glutBitmapCharacter(GLUT_BITMAP_8_BY_13, (int) (unsigned char) *c);
+        }
+        glRasterPos2i(8, 34);
+        for (const char *c = hud_line_b; *c != '\0'; ++c) {
+            glutBitmapCharacter(GLUT_BITMAP_8_BY_13, (int) (unsigned char) *c);
+        }
+
+        glMatrixMode(GL_MODELVIEW);
+        glPopMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
     }
-    glRasterPos2i(8, 34);
-    for (const char *c = hud_line_b; *c != '\0'; ++c) {
-        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, (int) (unsigned char) *c);
-    }
-
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
 
     glutSwapBuffers();
-    glutPostRedisplay();
 }
 
 static void dashcdg_tx_preview_resize(int width, int height) {
@@ -2545,6 +2559,13 @@ static void dashcdg_tx_preview_keyboard(unsigned char key, int x, int y) {
     (void) x;
     (void) y;
     dashcdg_tx_handle_command((int) key);
+}
+
+static void dashcdg_tx_preview_timer(int value) {
+    (void) value;
+
+    glutPostRedisplay();
+    glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_tx_preview_timer, 0);
 }
 
 static void dashcdg_tx_preview_special(int key, int x, int y) {
@@ -2586,6 +2607,7 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
     glutReshapeFunc(dashcdg_tx_preview_resize);
     glutKeyboardFunc(dashcdg_tx_preview_keyboard);
     glutSpecialFunc(dashcdg_tx_preview_special);
+    glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_tx_preview_timer, 0);
     glutMainLoop();
     return NULL;
 }
@@ -2643,6 +2665,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
+    g_tx_state.preview_hud_visible = 0;
     g_tx_state.warmup_ms = 1000;
     srand((unsigned int) (time(NULL) ^ (time_t) dashcdg_clock_now_ms() ^ (time_t) (uintptr_t) &g_tx_state));
     pthread_mutex_init(&g_tx_state.mutex, NULL);
@@ -2855,6 +2878,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
+    if (g_tx_state.display_requested) {
+        fprintf(stdout, "[tx] preview enabled; HUD hidden by default, press I to toggle it\n");
+    }
     if (is_multicast && multicast_interface_count > 0U) {
         char preferred_interface[192];
 
