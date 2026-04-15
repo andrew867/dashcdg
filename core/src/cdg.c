@@ -19,33 +19,32 @@ static int dashcdg_color_to_rgb(uint16_t color) {
 static void dashcdg_scroll_canvas(struct dashcdg_cdg_state *state, int dx, int dy, uint8_t fill_color, int wrap) {
     uint8_t original[DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT];
 
+    if (state == NULL) {
+        return;
+    }
+
     memcpy(original, state->framebuffer, sizeof(original));
+    memset(state->framebuffer, fill_color & 0x0FU, sizeof(state->framebuffer));
 
     for (int y = 0; y < DASHCDG_SCREEN_HEIGHT; ++y) {
+        int dest_y = y + dy;
         for (int x = 0; x < DASHCDG_SCREEN_WIDTH; ++x) {
-            int src_x = x - dx;
-            int src_y = y - dy;
+            int dest_x = x + dx;
 
             if (wrap) {
-                while (src_x < 0) {
-                    src_x += DASHCDG_SCREEN_WIDTH;
+                while (dest_x < 0) {
+                    dest_x += DASHCDG_SCREEN_WIDTH;
                 }
-                while (src_y < 0) {
-                    src_y += DASHCDG_SCREEN_HEIGHT;
+                while (dest_y < 0) {
+                    dest_y += DASHCDG_SCREEN_HEIGHT;
                 }
-
-                src_x %= DASHCDG_SCREEN_WIDTH;
-                src_y %= DASHCDG_SCREEN_HEIGHT;
-                state->framebuffer[DASHCDG_ARRAY_INDEX(x, y)] = original[DASHCDG_ARRAY_INDEX(src_x, src_y)];
+                dest_x %= DASHCDG_SCREEN_WIDTH;
+                dest_y %= DASHCDG_SCREEN_HEIGHT;
+            } else if (dest_x < 0 || dest_x >= DASHCDG_SCREEN_WIDTH || dest_y < 0 || dest_y >= DASHCDG_SCREEN_HEIGHT) {
                 continue;
             }
 
-            if (src_x < 0 || src_x >= DASHCDG_SCREEN_WIDTH || src_y < 0 || src_y >= DASHCDG_SCREEN_HEIGHT) {
-                state->framebuffer[DASHCDG_ARRAY_INDEX(x, y)] = fill_color;
-                continue;
-            }
-
-            state->framebuffer[DASHCDG_ARRAY_INDEX(x, y)] = original[DASHCDG_ARRAY_INDEX(src_x, src_y)];
+            state->framebuffer[DASHCDG_ARRAY_INDEX(dest_x, dest_y)] = original[DASHCDG_ARRAY_INDEX(x, y)];
         }
     }
 }
@@ -224,7 +223,13 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
             int dy = 0;
 
             state->display_h_offset = h_scroll & 0x07U;
+            if (state->display_h_offset >= DASHCDG_TILE_WIDTH) {
+                state->display_h_offset = DASHCDG_TILE_WIDTH - 1U;
+            }
             state->display_v_offset = v_scroll & 0x0FU;
+            if (state->display_v_offset >= DASHCDG_TILE_HEIGHT) {
+                state->display_v_offset = DASHCDG_TILE_HEIGHT - 1U;
+            }
 
             if (h_command == 1) {
                 dx = DASHCDG_TILE_WIDTH;

@@ -33,10 +33,25 @@
 #define DASHCDG_MAX_DRAIN_STEPS_PER_CALL 256U
 #define DASHCDG_MAX_PTP_EXCHANGE_AGE_MS 500U
 #define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
+#define DASHCDG_STREAM_LOSS_CONNECTING_MS 30000U
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
         DASHCDG_MAX_CDG_SNAPSHOT_CHUNK)
+
+static const struct {
+    char c;
+    uint8_t rows[7];
+} g_dashcdg_connect_font[] = {
+        { 'C', { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E } },
+        { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
+        { 'G', { 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E } },
+        { 'I', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F } },
+        { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
+        { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
+        { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
+        { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } }
+};
 
 struct dashcdg_pending_audio_frame {
     int occupied;
@@ -182,6 +197,187 @@ static int g_hud_visible = 0;
 static int g_audio_muted = 0;
 static pthread_mutex_t g_render_mutex;
 static struct dashcdg_rx_render_snapshot g_render_snapshot;
+
+static void dashcdg_rx_fill_rect(
+        struct dashcdg_cdg_state *state,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint8_t color
+) {
+    int x0 = x < DASHCDG_VISIBLE_X ? DASHCDG_VISIBLE_X : x;
+    int y0 = y < DASHCDG_VISIBLE_Y ? DASHCDG_VISIBLE_Y : y;
+    int x1 = x + width;
+    int y1 = y + height;
+
+    if (state == NULL || width <= 0 || height <= 0) {
+        return;
+    }
+    if (x1 > DASHCDG_VISIBLE_RIGHT) {
+        x1 = DASHCDG_VISIBLE_RIGHT;
+    }
+    if (y1 > DASHCDG_VISIBLE_BOTTOM) {
+        y1 = DASHCDG_VISIBLE_BOTTOM;
+    }
+
+    for (int row = y0; row < y1; ++row) {
+        for (int col = x0; col < x1; ++col) {
+            state->framebuffer[DASHCDG_ARRAY_INDEX(col, row)] = color & 0x0FU;
+        }
+    }
+}
+
+static const uint8_t *dashcdg_rx_connect_font_rows(char c) {
+    for (size_t i = 0; i < sizeof(g_dashcdg_connect_font) / sizeof(g_dashcdg_connect_font[0]); ++i) {
+        if (g_dashcdg_connect_font[i].c == c) {
+            return g_dashcdg_connect_font[i].rows;
+        }
+    }
+    return NULL;
+}
+
+static void dashcdg_rx_draw_glyph(
+        struct dashcdg_cdg_state *state,
+        int x,
+        int y,
+        char c,
+        int scale,
+        uint8_t fg_color,
+        uint8_t bg_color
+) {
+    const uint8_t *rows = dashcdg_rx_connect_font_rows(c);
+
+    if (state == NULL || rows == NULL || scale <= 0) {
+        return;
+    }
+
+    for (int row = 0; row < 7; ++row) {
+        for (int col = 0; col < 5; ++col) {
+            uint8_t color = ((rows[row] >> (4 - col)) & 0x01U) ? fg_color : bg_color;
+
+            dashcdg_rx_fill_rect(
+                    state,
+                    x + (col * scale),
+                    y + (row * scale),
+                    scale,
+                    scale,
+                    color
+            );
+        }
+    }
+}
+
+static void dashcdg_rx_draw_text(
+        struct dashcdg_cdg_state *state,
+        int x,
+        int y,
+        const char *text,
+        int scale,
+        uint8_t fg_color,
+        uint8_t bg_color
+) {
+    if (state == NULL || text == NULL || scale <= 0) {
+        return;
+    }
+
+    for (int i = 0; text[i] != '\0'; ++i) {
+        dashcdg_rx_draw_glyph(state, x + (i * scale * 6), y, text[i], scale, fg_color, bg_color);
+    }
+}
+
+static void dashcdg_rx_render_connecting_state(
+        struct dashcdg_cdg_state *state,
+        uint64_t now_ms,
+        int reconnecting
+) {
+    const char *title = reconnecting ? "RECONNECTING" : "CONNECTING";
+    int pulse = (int) ((now_ms / 250U) % 4U);
+    int stripe_phase = (int) ((now_ms / 400U) % 6U);
+    int title_width = (int) strlen(title) * 24;
+    int title_x = DASHCDG_VISIBLE_X + ((DASHCDG_VISIBLE_WIDTH - title_width) / 2);
+    int title_y = DASHCDG_VISIBLE_Y + 54;
+
+    if (state == NULL) {
+        return;
+    }
+
+    dashcdg_cdg_state_init(state);
+    state->color_table[0] = 0x05070F;
+    state->color_table[1] = 0x101A34;
+    state->color_table[2] = 0x204070;
+    state->color_table[3] = 0x4F8BFF;
+    state->color_table[4] = 0x63E6BE;
+    state->color_table[5] = 0xFFE066;
+    state->color_table[6] = 0xFF8FA3;
+    state->color_table[7] = 0xFFFFFF;
+    memset(state->transparency, 0, sizeof(state->transparency));
+
+    dashcdg_rx_fill_rect(
+            state,
+            DASHCDG_VISIBLE_X,
+            DASHCDG_VISIBLE_Y,
+            DASHCDG_VISIBLE_WIDTH,
+            DASHCDG_VISIBLE_HEIGHT,
+            1
+    );
+
+    for (int stripe = 0; stripe < 6; ++stripe) {
+        uint8_t color = (uint8_t) (((stripe + stripe_phase) % 3) == 0 ? 2 : (((stripe + stripe_phase) % 3) == 1 ? 3 : 4));
+
+        dashcdg_rx_fill_rect(
+                state,
+                DASHCDG_VISIBLE_X,
+                DASHCDG_VISIBLE_Y + (stripe * 12),
+                DASHCDG_VISIBLE_WIDTH,
+                5,
+                color
+        );
+        dashcdg_rx_fill_rect(
+                state,
+                DASHCDG_VISIBLE_X,
+                DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12),
+                DASHCDG_VISIBLE_WIDTH,
+                5,
+                color
+        );
+    }
+
+    dashcdg_rx_draw_text(state, title_x, title_y, title, 4, 7, 1);
+
+    dashcdg_rx_fill_rect(
+            state,
+            DASHCDG_VISIBLE_X + 34,
+            DASHCDG_VISIBLE_Y + 132,
+            212,
+            12,
+            2
+    );
+    dashcdg_rx_fill_rect(
+            state,
+            DASHCDG_VISIBLE_X + 40 + (pulse * 48),
+            DASHCDG_VISIBLE_Y + 128,
+            28,
+            20,
+            reconnecting ? 6 : 5
+    );
+    dashcdg_rx_fill_rect(
+            state,
+            DASHCDG_VISIBLE_X + 54,
+            DASHCDG_VISIBLE_Y + 166,
+            184,
+            8,
+            3
+    );
+    dashcdg_rx_fill_rect(
+            state,
+            DASHCDG_VISIBLE_X + 54 + (pulse * 44),
+            DASHCDG_VISIBLE_Y + 160,
+            22,
+            20,
+            7
+    );
+}
 
 static int dashcdg_rx_is_number(const char *value) {
     size_t length;
@@ -2104,7 +2300,10 @@ static int dashcdg_rx_claim_audio_start_locked(void) {
 
 static void display(void) {
     struct dashcdg_rx_render_snapshot render_snapshot;
+    struct dashcdg_cdg_state connecting_state;
     int have_render_snapshot = 0;
+    int show_connecting = 0;
+    int reconnecting = 0;
     uint64_t local_now_ms = dashcdg_clock_now_ms();
     char hud_line_a[256];
     char hud_line_b[256];
@@ -2117,7 +2316,19 @@ static void display(void) {
     }
     pthread_mutex_unlock(&g_render_mutex);
 
-    if (have_render_snapshot) {
+    pthread_mutex_lock(&g_receiver.mutex);
+    if (g_receiver.last_datagram_local_ms == 0U) {
+        show_connecting = 1;
+    } else if (local_now_ms - g_receiver.last_datagram_local_ms >= DASHCDG_STREAM_LOSS_CONNECTING_MS) {
+        show_connecting = 1;
+        reconnecting = 1;
+    }
+    pthread_mutex_unlock(&g_receiver.mutex);
+
+    if (show_connecting) {
+        dashcdg_rx_render_connecting_state(&connecting_state, local_now_ms, reconnecting);
+        dashcdg_gl_renderer_render(&g_renderer, &connecting_state);
+    } else if (have_render_snapshot) {
         dashcdg_gl_renderer_render(&g_renderer, &render_snapshot.state);
     } else {
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);

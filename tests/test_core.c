@@ -83,6 +83,32 @@ static void test_scroll_preset_and_transparency(void) {
     assert(state.transparency[15] == 15);
 }
 
+static void test_scroll_copy_direction_and_offset_clamp(void) {
+    struct dashcdg_cdg_state state;
+    struct dashcdg_subchannel_packet pkt = make_packet(DASHCDG_INSN_MEMORY_PRESET);
+
+    dashcdg_cdg_state_init(&state);
+    ((struct dashcdg_insn_memory_preset *) pkt.data)->color = 0;
+    assert(dashcdg_cdg_state_process_packet(&state, &pkt) == 1);
+
+    state.framebuffer[DASHCDG_ARRAY_INDEX(20, 30)] = 9;
+
+    pkt = make_packet(DASHCDG_INSN_SCROLL_COPY);
+    ((struct dashcdg_insn_scroll *) pkt.data)->h_scroll = 0x10;
+    ((struct dashcdg_insn_scroll *) pkt.data)->v_scroll = 0x10;
+    assert(dashcdg_cdg_state_process_packet(&state, &pkt) == 1);
+    assert(state.framebuffer[DASHCDG_ARRAY_INDEX(26, 42)] == 9);
+    assert(state.display_h_offset == 0);
+    assert(state.display_v_offset == 0);
+
+    pkt = make_packet(DASHCDG_INSN_SCROLL_COPY);
+    ((struct dashcdg_insn_scroll *) pkt.data)->h_scroll = 0x07;
+    ((struct dashcdg_insn_scroll *) pkt.data)->v_scroll = 0x0f;
+    assert(dashcdg_cdg_state_process_packet(&state, &pkt) == 1);
+    assert(state.display_h_offset == 5);
+    assert(state.display_v_offset == 11);
+}
+
 static void test_reader_seek_and_keyframes(void) {
     struct dashcdg_cdg_reader reader;
     struct dashcdg_subchannel_packet stream[4];
@@ -297,6 +323,7 @@ int main(void) {
     test_memory_and_border();
     test_tile_and_scroll_copy();
     test_scroll_preset_and_transparency();
+    test_scroll_copy_direction_and_offset_clamp();
     test_reader_seek_and_keyframes();
     test_protocol_roundtrip();
     test_media_clock();

@@ -25,10 +25,10 @@ static const char *DASHCDG_FRAGMENT_SHADER =
         "uniform int cdgOffsetY;\n"
         "in vec2 vertexCoord;\n"
         "void main() {\n"
-        "    int x = (int(vertexCoord.x) + cdgViewportX + cdgOffsetX) % 300;\n"
-        "    int y = (int(vertexCoord.y) + cdgViewportY + cdgOffsetY) % 216;\n"
-        "    if (x < 0) { x += 300; }\n"
-        "    if (y < 0) { y += 216; }\n"
+        "    int x = int(vertexCoord.x) + cdgViewportX + cdgOffsetX;\n"
+        "    int y = int(vertexCoord.y) + cdgViewportY + cdgOffsetY;\n"
+        "    x = clamp(x, 0, 299);\n"
+        "    y = clamp(y, 0, 215);\n"
         "    int colorIndex = int(texelFetch(cdgFramebuffer, ivec2(x, y), 0).r * 255.0 + 0.5);\n"
         "    int rgb = cdgColorMap[colorIndex];\n"
         "    float alpha = 1.0 - (float(cdgTransparencyMap[colorIndex]) / 63.0);\n"
@@ -167,8 +167,14 @@ void dashcdg_gl_renderer_render(struct dashcdg_gl_renderer *renderer, const stru
     glUniform1i(renderer->framebuffer_location, 0);
     glUniform1iv(renderer->color_table_location, DASHCDG_COLORS, state->color_table);
     glUniform1iv(renderer->transparency_location, DASHCDG_COLORS, transparency);
-    glUniform1i(renderer->offset_x_location, state->display_h_offset);
-    glUniform1i(renderer->offset_y_location, state->display_v_offset);
+    glUniform1i(
+            renderer->offset_x_location,
+            state->display_h_offset >= DASHCDG_TILE_WIDTH ? DASHCDG_TILE_WIDTH - 1 : state->display_h_offset
+    );
+    glUniform1i(
+            renderer->offset_y_location,
+            state->display_v_offset >= DASHCDG_TILE_HEIGHT ? DASHCDG_TILE_HEIGHT - 1 : state->display_v_offset
+    );
 
     glBegin(GL_QUADS);
     glVertex2f(0.0f, 0.0f);
