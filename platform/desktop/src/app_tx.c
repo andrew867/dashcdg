@@ -825,10 +825,41 @@ static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
     g_tx_state.last_beacon_ms = 0;
 }
 
+static uint32_t dashcdg_tx_fec_overhead_pct_locked(void) {
+    uint64_t media_packets = g_tx_state.audio_packets_sent + g_tx_state.cdg_batch_packets_sent;
+    uint64_t fec_packets = g_tx_state.fec_audio_packets_sent + g_tx_state.fec_cdg_packets_sent;
+
+    if (media_packets == 0) {
+        return 0;
+    }
+
+    return (uint32_t) ((fec_packets * 100U) / media_packets);
+}
+
+static int64_t dashcdg_tx_next_audio_lead_ms_locked(uint64_t playback_ms) {
+    if (g_tx_state.next_audio_frame_index >= g_tx_state.audio_frame_count) {
+        return -1;
+    }
+
+    return (int64_t) g_tx_state.audio_frames[g_tx_state.next_audio_frame_index].playback_ms - (int64_t) playback_ms;
+}
+
+static int64_t dashcdg_tx_next_cdg_lead_ms_locked(uint64_t playback_ms) {
+    if (g_tx_state.next_cdg_batch_index >= g_tx_state.cdg_batch_count) {
+        return -1;
+    }
+
+    return (int64_t) g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms - (int64_t) playback_ms;
+}
+
 static void dashcdg_tx_print_status_locked(void) {
     const struct dashcdg_tx_track *track = dashcdg_tx_current_track();
     uint64_t now_ms = dashcdg_clock_now_ms();
     uint64_t playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    uint64_t until_start_ms = now_ms < g_tx_state.session_start_ms ? g_tx_state.session_start_ms - now_ms : 0U;
+    uint32_t fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
+    int64_t audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
+    int64_t cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(playback_ms);
     const char *mode = "CDG-only";
     uint32_t available_prefix_bytes = 0;
     size_t prefix_chunks = g_tx_state.contiguous_prefix_chunks;
@@ -862,7 +893,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu fec=%llu/%llu ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | head_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | lead aud=%lldms live=%lldms start_in=%llums head_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -873,6 +904,9 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
             (unsigned long long) g_tx_state.fec_audio_packets_sent,
             (unsigned long long) g_tx_state.fec_cdg_packets_sent,
+            (unsigned int) fec_overhead_pct,
+            (unsigned int) g_tx_state.announce.audio_fec_group_size,
+            (unsigned int) g_tx_state.announce.cdg_fec_group_size,
             (unsigned long long) g_tx_state.ptp_sync_packets_sent,
             (unsigned long long) g_tx_state.ptp_follow_up_packets_sent,
             (unsigned long long) g_tx_state.ptp_delay_resp_packets_sent,
@@ -882,6 +916,9 @@ static void dashcdg_tx_print_status_locked(void) {
             g_tx_state.chunk_count,
             g_tx_state.distinct_chunks_sent,
             (unsigned long long) g_tx_state.asset_loops_completed,
+            (long long) audio_lead_ms,
+            (long long) cdg_lead_ms,
+            (unsigned long long) until_start_ms,
             g_tx_state.next_asset_offset
     );
     fflush(stdout);
@@ -1563,6 +1600,9 @@ static void *dashcdg_tx_thread_main(void *unused) {
 static void dashcdg_tx_preview_display(void) {
     uint64_t playback_ms;
     uint64_t packet_ts;
+    uint32_t fec_overhead_pct;
+    int64_t audio_lead_ms;
+    int64_t cdg_lead_ms;
     char hud_line_a[256];
     char hud_line_b[256];
     const struct dashcdg_tx_track *track = NULL;
@@ -1579,6 +1619,9 @@ static void dashcdg_tx_preview_display(void) {
     }
 
     playback_ms = dashcdg_tx_current_playback_ms_locked(dashcdg_clock_now_ms());
+    fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
+    audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
+    cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(playback_ms);
     packet_ts = dashcdg_ms_to_packet_count(playback_ms);
     dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_ts);
     dashcdg_gl_renderer_render(&g_tx_state.renderer, &g_tx_state.reader.state);
@@ -1593,22 +1636,27 @@ static void dashcdg_tx_preview_display(void) {
     snprintf(
             hud_line_a,
             sizeof(hud_line_a),
-            "TX dg:%llu fail:%llu live:%llu aud:%llu fec:%llu/%llu prefix:%u/%u",
+            "TX dg:%llu fail:%llu live:%llu aud:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
             (unsigned long long) g_tx_state.audio_packets_sent,
             (unsigned long long) g_tx_state.fec_audio_packets_sent,
             (unsigned long long) g_tx_state.fec_cdg_packets_sent,
+            (unsigned int) fec_overhead_pct,
             (unsigned int) available_prefix_bytes,
             (unsigned int) g_tx_state.beacon.total_asset_bytes
     );
     snprintf(
             hud_line_b,
             sizeof(hud_line_b),
-            "loops:%llu off:%zu %s",
+            "loops:%llu off:%zu lead:%lld/%lldms prof:%u/%u %s",
             (unsigned long long) g_tx_state.asset_loops_completed,
             g_tx_state.next_asset_offset,
+            (long long) audio_lead_ms,
+            (long long) cdg_lead_ms,
+            (unsigned int) g_tx_state.announce.audio_fec_group_size,
+            (unsigned int) g_tx_state.announce.cdg_fec_group_size,
             track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
     );
     pthread_mutex_unlock(&g_tx_state.mutex);

@@ -134,6 +134,7 @@ The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
 - RX decodes network Opus into a queue-driven PortAudio stream when audio metadata is present
 - RX now uses bounded pending queues plus deadline-based skip logic for reordered or missing live audio/CD+G packets
 - TX now emits bounded `FEC_PARITY` packets for audio and CD+G groups, and RX attempts single-missing-packet repair before treating a group as lost
+- TX/RX status lines now expose startup gates, clock-update quality, repair hotness, and FEC profile/overhead telemetry
 
 Current TX defaults:
 

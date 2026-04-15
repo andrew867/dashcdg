@@ -258,7 +258,7 @@ The current desktop receiver uses both bootstrap and live paths:
 4. `AUDIO_FRAME` feeds the Opus decoder and PortAudio queue
 5. `CDG_BATCH` advances the live CD+G state
 
-RX startup is now network-audio-only for multicast mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late.
+RX startup is now network-audio-only for multicast mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late. Current desktop HUD/stdout observability also exposes startup gate state, clock step/peak/holdover data, and current FEC repair hotness.
 
 ## Late-join behavior
 

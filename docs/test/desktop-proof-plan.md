@@ -28,6 +28,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 - RX audio queue depth and decode-failure visibility
 - RX jitter queue, skip, drop, and reorder visibility
 - RX repair counters for recovered vs failed FEC attempts
+- explicit startup-gate and clock-quality visibility, including holdover and step peaks
 - deterministic test vectors for protocol parsing
 
 ## Impairment tests
