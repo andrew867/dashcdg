@@ -37,7 +37,7 @@ PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
 CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
+DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
@@ -99,6 +99,9 @@ $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_opus_codec.o: platform/desktop/src/opus_codec.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_sbc_like_codec.o: platform/desktop/src/sbc_like_codec.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_cdg_source.o: platform/desktop/src/cdg_source.c

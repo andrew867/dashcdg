@@ -137,6 +137,12 @@ First-tranche operator policy:
 - allow an explicit forced `resilience` mode in TX
 - make the active mode visible in both TX and RX status output
 
+Current TX status:
+
+- TX now accepts `--audio-profile=quality|resilience` on the opt-in bad-network
+  v4 path
+- TX status/event output reports the active `profile` and `codec`
+
 ## Proof Requirements
 
 `quality` mode must prove:

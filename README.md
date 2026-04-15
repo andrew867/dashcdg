@@ -189,6 +189,8 @@ Key runtime rules:
   can stay file-backed, while preview mode still uses an in-memory fallback
 - TX now has an opt-in `--badnet-v4` sender path with bounded startup pacing,
   loading-screen packets, compact anchor chunks, and structured startup events
+- TX bad-network v4 currently supports `--audio-profile=quality|resilience`
+  with visible profile/codec reporting in its status and event logs
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
 - RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches
