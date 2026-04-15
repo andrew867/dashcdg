@@ -77,10 +77,12 @@ When TX starts or changes tracks, it:
 
 Important current behavior:
 
-- TX still performs CD+G asset load and batch preparation synchronously on the
+- TX still performs CD+G batch schedule preparation synchronously on the
   track-change hot path.
 - TX audio production is no longer whole-track pre-encode; a dedicated producer
   thread fills a bounded `audio_ready_queue` during live send.
+- default TX wire send can now use a file-backed random-access CDG source;
+  preview mode still uses a whole-memory fallback reader
 - Console output now prints a preparation line immediately, but some media
   preparation cost is still on the hot path.
 - Directory playback defaults to the local `cdg/` folder when no TX source path is provided.
@@ -103,8 +105,9 @@ Current threading split inside the desktop proof:
 
 - TX audio production happens on `dashcdg_tx_audio_thread_main()`
 - TX packet pacing and control traffic still run in the main TX scheduler loop
-- CD+G batch creation is still done up front and currently duplicates payload
-  storage, which is the next slimdown target
+- CD+G batch creation is still done up front as schedule metadata
+- the canonical CDG source may now be file-backed for send paths while preview
+  remains memory-backed
 
 ### Pause Mode
 
@@ -213,8 +216,8 @@ Desktop-specific today:
 
 - TX track preparation is still synchronous for CD+G asset and batch setup even
   though audio encode is now incremental.
-- TX still preloads the full `.cdg` asset even though the duplicated live
-  `CDG_BATCH` payload copy has now been removed.
+- TX no longer requires a full `.cdg` preload for default wire send, but the
+  preview path still keeps a whole-memory fallback.
 - The clock loop is software timestamped and millisecond scale, not venue-grade hardware timestamping.
 - FEC is intentionally bounded and only repairs one missing payload per group.
 - Long impaired-network soak validation is still incomplete.

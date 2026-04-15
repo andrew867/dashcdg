@@ -102,6 +102,7 @@ Still to prove more deeply:
 - no dedicated network metrics UI beyond HUD/stdout status lines
 - long-duration impaired-network soak data for actual repair thresholds is still incomplete; use `docs/test/desktop-impairment-validation.md` for the current repeatable matrix
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles
-- TX still preloads the `.cdg` asset; Stage A removed duplicated timed CD+G
-  payload storage, but the portability/slimdown runtime is not yet complete
+- TX no longer requires a whole-memory `.cdg` preload for default wire send, but
+  preview mode still uses a memory-backed fallback and the portability/slimdown
+  runtime is not yet complete
 - the current proof is not the bad-network-optimized transport; that redesign is now tracked separately and is expected to introduce different packet, pacing, and startup rules

@@ -91,13 +91,15 @@ Current desktop behavior:
 - TX repeatedly loops the entire CD+G file in 1024-byte slices
 - RX accepts out-of-order and duplicate chunks
 - RX declares `ready` once it has the full asset and can seek deterministically
-- current TX sources those slices from a fully loaded `asset_bytes` buffer
+- current TX sources those slices from a random-access CDG source
+- headless/default TX may use a file-backed source; preview mode still has a
+  memory-backed fallback
 
 Slimdown target:
 
 - `ASSET_CHUNK` stays byte-addressed on the wire
-- TX should eventually be able to source chunks from a random-access CD+G source
-  rather than only from one permanent in-memory blob
+- TX should eventually stop needing the preview-only whole-memory fallback for
+  deterministic local preview/seek behavior
 
 ### `CLOCK_BEACON`
 
@@ -173,8 +175,12 @@ Current desktop behavior:
 - each batch carries up to 6 raw CD+G subchannel packets
 - TX timestamps batches by the source CD+G packet index converted into milliseconds
 - RX applies batches in order to a live `dashcdg_cdg_state`
-- current TX prebuilds all batches for a track and duplicates packet payloads in
-  `cdg_batches`
+- current TX prebuilds all batches for a track in `cdg_batches`
+
+Stage A implementation note:
+
+- `cdg_batches` now stores metadata only; payload bytes are read from the
+  canonical CDG source at send/FEC time
 
 Threaded-runtime target:
 
@@ -183,9 +189,10 @@ Threaded-runtime target:
 
 Slimdown target:
 
-- TX should stop storing copied packet payloads per batch
 - batch scheduling metadata can stay precomputed, but payload bytes should be
-  read from the canonical CD+G source at send time
+  read from the canonical CDG source at send time
+- later source work should make file-backed and memory-backed paths equally
+  deterministic for all TX use cases, including preview
 
 ### `CDG_SNAPSHOT`
 
@@ -371,8 +378,9 @@ In practice, RX can start live audio before the bootstrap asset is complete, can
 - audio recovery still relies on playout delay and bounded FEC rather than a separate audio-state snapshot/keyframe model
 - no wire-level compatibility promise for protocol v1 peers
 - the threaded-runtime queue ownership model is a desktop architecture refactor and does not change protocol v3 packet formats by itself
-- TX still preloads the `.cdg` asset; Stage A removed duplicated `CDG_BATCH`
-  payload storage, but the later source-abstraction stages remain tracked in
+- TX no longer requires a whole-memory `.cdg` preload for default wire send;
+  Stage A and the initial source abstraction are in place, but preview-mode
+  memory fallback and later source-layer polish remain tracked in
   `docs/specs/tx-cdg-source-model.md`
 - the bad-network redesign work now intentionally targets a separate transport tranche rather than stretching v3 indefinitely
 

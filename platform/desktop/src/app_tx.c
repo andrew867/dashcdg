@@ -14,6 +14,7 @@
 
 #include "dashcdg/app_modes.h"
 #include "dashcdg/cdg.h"
+#include "dashcdg/cdg_source.h"
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
 #include "dashcdg/fec.h"
@@ -84,6 +85,7 @@ struct dashcdg_tx_state {
     struct dashcdg_announce_payload announce;
     struct dashcdg_clock_beacon_payload beacon;
     struct dashcdg_cdg_reader reader;
+    struct dashcdg_cdg_source cdg_source;
     struct dashcdg_cdg_state pause_state;
     struct dashcdg_gl_renderer renderer;
     struct dashcdg_tx_playlist playlist;
@@ -1080,7 +1082,7 @@ static int dashcdg_tx_build_cdg_batches_locked(void) {
     size_t packet_count;
     size_t batch_count;
 
-    if (g_tx_state.asset_bytes == NULL || g_tx_state.asset_size == 0U) {
+    if (dashcdg_cdg_source_size(&g_tx_state.cdg_source) == 0U || g_tx_state.asset_size == 0U) {
         return 1;
     }
 
@@ -1123,14 +1125,20 @@ static uint16_t dashcdg_tx_cdg_batch_payload_length(const struct dashcdg_tx_cdg_
     return (uint16_t) length;
 }
 
-static const uint8_t *dashcdg_tx_cdg_batch_payload_bytes(const struct dashcdg_tx_cdg_batch *batch, uint16_t *length_out) {
+static const uint8_t *dashcdg_tx_cdg_batch_payload_bytes(
+        const struct dashcdg_tx_cdg_batch *batch,
+        uint8_t *scratch,
+        size_t scratch_size,
+        uint16_t *length_out
+) {
     size_t byte_offset;
     uint16_t length;
+    const uint8_t *memory_view;
 
     if (length_out != NULL) {
         *length_out = 0U;
     }
-    if (batch == NULL || g_tx_state.asset_bytes == NULL || g_tx_state.asset_size == 0U) {
+    if (batch == NULL || dashcdg_cdg_source_size(&g_tx_state.cdg_source) == 0U || g_tx_state.asset_size == 0U) {
         return NULL;
     }
 
@@ -1141,10 +1149,21 @@ static const uint8_t *dashcdg_tx_cdg_batch_payload_bytes(const struct dashcdg_tx
         return NULL;
     }
 
+    memory_view = dashcdg_cdg_source_memory_view(&g_tx_state.cdg_source, byte_offset, length);
+    if (memory_view != NULL) {
+        if (length_out != NULL) {
+            *length_out = length;
+        }
+        return memory_view;
+    }
+    if (scratch == NULL || scratch_size < length ||
+            !dashcdg_cdg_source_read_bytes(&g_tx_state.cdg_source, byte_offset, scratch, length)) {
+        return NULL;
+    }
     if (length_out != NULL) {
         *length_out = length;
     }
-    return g_tx_state.asset_bytes + byte_offset;
+    return scratch;
 }
 
 static uint64_t dashcdg_tx_current_playback_ms_locked(uint64_t now_ms) {
@@ -1242,10 +1261,14 @@ static void dashcdg_tx_print_status_locked(void) {
     uint32_t available_prefix_bytes = 0;
     size_t prefix_chunks = g_tx_state.contiguous_prefix_chunks;
     size_t cdg_schedule_bytes = g_tx_state.cdg_batch_count * sizeof(*g_tx_state.cdg_batches);
+    const char *cdg_source_mode = "none";
     struct dashcdg_runtime_queue_stats audio_queue_stats;
 
     memset(&audio_queue_stats, 0, sizeof(audio_queue_stats));
     dashcdg_runtime_queue_snapshot(&g_tx_state.audio_ready_queue, &audio_queue_stats);
+    if (dashcdg_cdg_source_size(&g_tx_state.cdg_source) > 0U) {
+        cdg_source_mode = dashcdg_cdg_source_is_memory_backed(&g_tx_state.cdg_source) ? "mem" : "file";
+    }
 
     if (g_tx_state.asset_size > 0U && prefix_chunks > 0U) {
         if (prefix_chunks >= g_tx_state.chunk_count) {
@@ -1276,7 +1299,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu sched=%zuB | audq=%zu hi=%zu ovf=%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB | audq=%zu hi=%zu ovf=%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -1300,6 +1323,7 @@ static void dashcdg_tx_print_status_locked(void) {
             g_tx_state.chunk_count,
             g_tx_state.distinct_chunks_sent,
             (unsigned long long) g_tx_state.asset_loops_completed,
+            cdg_source_mode,
             cdg_schedule_bytes,
             audio_queue_stats.depth,
             audio_queue_stats.high_watermark,
@@ -1317,6 +1341,7 @@ static void dashcdg_tx_print_status_locked(void) {
 
 static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     struct dashcdg_tx_track *track;
+    struct dashcdg_cdg_source next_source;
     uint8_t *asset_bytes = NULL;
     size_t asset_size = 0;
     uint64_t packet_count;
@@ -1327,6 +1352,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     if (index >= g_tx_state.playlist.count) {
         return 0;
     }
+    dashcdg_cdg_source_init(&next_source);
 
     track = &g_tx_state.playlist.tracks[index];
     fprintf(
@@ -1336,12 +1362,11 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
             apply_warmup ? " (queued with warmup)" : ""
     );
     fflush(stdout);
-    if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
-        fprintf(stderr, "failed to read CDG asset: %s\n", track->cdg_path);
-        return 0;
-    }
-
     if (g_tx_state.display_requested) {
+        if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
+            fprintf(stderr, "failed to read CDG asset: %s\n", track->cdg_path);
+            return 0;
+        }
         dashcdg_cdg_reader_free(&g_tx_state.reader);
         dashcdg_cdg_reader_init(&g_tx_state.reader);
         if (!dashcdg_cdg_reader_load_memory(&g_tx_state.reader, asset_bytes, asset_size) ||
@@ -1350,10 +1375,22 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
             free(asset_bytes);
             return 0;
         }
+        if (!dashcdg_cdg_source_open_memory(&next_source, asset_bytes, asset_size, 1)) {
+            fprintf(stderr, "failed to prepare in-memory CDG source: %s\n", track->cdg_path);
+            free(asset_bytes);
+            return 0;
+        }
+    } else {
+        if (!dashcdg_cdg_source_open_file(&next_source, track->cdg_path)) {
+            fprintf(stderr, "failed to open file-backed CDG source: %s\n", track->cdg_path);
+            return 0;
+        }
+        asset_size = dashcdg_cdg_source_size(&next_source);
     }
 
-    free(g_tx_state.asset_bytes);
-    g_tx_state.asset_bytes = asset_bytes;
+    dashcdg_cdg_source_free(&g_tx_state.cdg_source);
+    g_tx_state.cdg_source = next_source;
+    g_tx_state.asset_bytes = (uint8_t *) dashcdg_cdg_source_memory_view(&g_tx_state.cdg_source, 0U, asset_size);
     g_tx_state.asset_size = asset_size;
     dashcdg_tx_free_live_media_locked();
     free(g_tx_state.chunk_seen);
@@ -1363,7 +1400,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
         g_tx_state.chunk_seen = (uint8_t *) calloc(g_tx_state.chunk_count, 1);
         if (g_tx_state.chunk_seen == NULL) {
             fprintf(stderr, "failed to allocate TX chunk coverage bitmap\n");
-            free(asset_bytes);
+            dashcdg_cdg_source_free(&g_tx_state.cdg_source);
             g_tx_state.asset_bytes = NULL;
             g_tx_state.asset_size = 0;
             g_tx_state.chunk_count = 0;
@@ -1606,7 +1643,7 @@ static int dashcdg_tx_prepare_cdg_snapshot_locked(uint64_t now_ms) {
     uint64_t packet_count;
     uint64_t packet_index;
 
-    if (g_tx_state.asset_bytes == NULL || g_tx_state.asset_size == 0U) {
+    if (dashcdg_cdg_source_size(&g_tx_state.cdg_source) == 0U || g_tx_state.asset_size == 0U) {
         return 0;
     }
 
@@ -1711,6 +1748,7 @@ static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t gro
 static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group_id) {
     const uint8_t *payloads[DASHCDG_CDG_GROUP_SIZE];
     uint16_t lengths[DASHCDG_CDG_GROUP_SIZE];
+    uint8_t payload_storage[DASHCDG_CDG_GROUP_SIZE][DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
     size_t group_start_index = (size_t) group_id * DASHCDG_CDG_GROUP_SIZE;
     size_t remaining_batches;
     uint8_t group_size;
@@ -1727,7 +1765,12 @@ static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group
 
     for (uint8_t i = 0; i < group_size; ++i) {
         const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[group_start_index + i];
-        const uint8_t *batch_bytes = dashcdg_tx_cdg_batch_payload_bytes(batch, &lengths[i]);
+        const uint8_t *batch_bytes = dashcdg_tx_cdg_batch_payload_bytes(
+                batch,
+                payload_storage[i],
+                sizeof(payload_storage[i]),
+                &lengths[i]
+        );
 
         if (batch_bytes == NULL || lengths[i] == 0U) {
             return;
@@ -2385,8 +2428,14 @@ static void *dashcdg_tx_thread_main(void *unused) {
             int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                     g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
             struct dashcdg_cdg_batch_payload payload;
+            uint8_t batch_storage[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
             uint16_t batch_length = 0U;
-            const uint8_t *batch_bytes = dashcdg_tx_cdg_batch_payload_bytes(batch, &batch_length);
+            const uint8_t *batch_bytes = dashcdg_tx_cdg_batch_payload_bytes(
+                    batch,
+                    batch_storage,
+                    sizeof(batch_storage),
+                    &batch_length
+            );
             size_t packet_size;
 
             if (batch_bytes == NULL || batch_length == 0U) {
@@ -2428,6 +2477,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
 
         if (g_tx_state.asset_size > 0) {
             struct dashcdg_asset_chunk_payload chunk;
+            uint8_t chunk_storage[DASHCDG_MAX_ASSET_CHUNK];
+            const uint8_t *chunk_bytes;
             size_t chunk_size = g_tx_state.asset_size - g_tx_state.next_asset_offset;
             size_t packet_size;
             size_t chunk_index;
@@ -2439,7 +2490,15 @@ static void *dashcdg_tx_thread_main(void *unused) {
             chunk.asset_offset = (uint32_t) g_tx_state.next_asset_offset;
             chunk.chunk_length = (uint16_t) chunk_size;
             chunk.reserved = 0;
-            chunk.chunk_bytes = g_tx_state.asset_bytes + g_tx_state.next_asset_offset;
+            chunk_bytes = dashcdg_cdg_source_memory_view(&g_tx_state.cdg_source, g_tx_state.next_asset_offset, chunk_size);
+            if (chunk_bytes == NULL) {
+                if (!dashcdg_cdg_source_read_bytes(&g_tx_state.cdg_source, g_tx_state.next_asset_offset, chunk_storage, chunk_size)) {
+                    g_tx_state.send_failures++;
+                    break;
+                }
+                chunk_bytes = chunk_storage;
+            }
+            chunk.chunk_bytes = chunk_bytes;
 
             g_tx_state.header.flags = 0;
             g_tx_state.header.sequence = g_tx_state.sequence++;
@@ -2654,7 +2713,7 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
 
 static void dashcdg_tx_cleanup(void) {
     dashcdg_runtime_queue_shutdown(&g_tx_state.audio_ready_queue);
-    free(g_tx_state.asset_bytes);
+    dashcdg_cdg_source_free(&g_tx_state.cdg_source);
     g_tx_state.asset_bytes = NULL;
     dashcdg_tx_free_live_media_locked();
     free(g_tx_state.track_history);
@@ -2710,6 +2769,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     srand((unsigned int) (time(NULL) ^ (time_t) dashcdg_clock_now_ms() ^ (time_t) (uintptr_t) &g_tx_state));
     pthread_mutex_init(&g_tx_state.mutex, NULL);
     dashcdg_cdg_reader_init(&g_tx_state.reader);
+    dashcdg_cdg_source_init(&g_tx_state.cdg_source);
     if (!dashcdg_runtime_queue_init(
                 &g_tx_state.audio_ready_queue,
                 sizeof(struct dashcdg_tx_audio_frame),

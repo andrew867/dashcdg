@@ -83,6 +83,8 @@ Checks:
 - snapshot generation still succeeds
 - forced rebroadcast still replays the full asset
 - pause/resume and restart still work
+- verify headless/default TX reports `src=file` while preview mode can still use
+  the documented memory-backed fallback
 
 Expected result:
 

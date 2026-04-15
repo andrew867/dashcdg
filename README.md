@@ -183,7 +183,10 @@ flowchart LR
 
 Key runtime rules:
 
-- TX preloads the `.cdg` asset but now produces Opus frames incrementally on a dedicated audio thread during live send
+- TX now produces Opus frames incrementally on a dedicated audio thread during
+  live send
+- TX now uses a random-access CDG source for wire send paths; headless/default TX
+  can stay file-backed, while preview mode still uses an in-memory fallback
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
 - RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches
@@ -248,17 +251,18 @@ Still rough or incomplete:
 - long impaired-network soak data is still incomplete
 - current FEC only repairs one missing payload per protected group
 - some desktop proof scenarios can still show a small burst of early decode failures while queues settle after startup
-- TX still preloads the full `.cdg` asset in memory; Stage A removed duplicated
-  `CDG_BATCH` payload copies, but file-backed/random-access sourcing is still
-  future work
+- TX preview mode still falls back to a whole-memory `.cdg` load for the local
+  OpenGL preview path even though default TX wire send is now random-access
+  backed
 
 ## Important Current Limitations
 
 - This is a desktop proof transport, not a finished venue-grade production stack.
 - Long-duration impaired multicast soak data is still incomplete.
 - Full asset replay is still required for deterministic seek/backfill even though snapshots now accelerate late join and recovery.
-- TX still preloads the `.cdg` asset; the duplicated timed-batch payload copy has
-  been removed, but the later source-abstraction stages are still pending.
+- TX no longer requires a full-memory `.cdg` preload for default wire send, but
+  preview mode still uses a whole-memory fallback and later source-layer polish
+  remains pending.
 - Embedded receiver work is still documentation-first; there is no buildable ESP-IDF receiver in the repo yet.
 
 ## Related documentation

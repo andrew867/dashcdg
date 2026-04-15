@@ -9,8 +9,8 @@ contract in place.
 It exists because two facts are simultaneously true today:
 
 - TX already streams live `AUDIO_FRAME` and live `CDG_BATCH` packets in parallel
-- TX still pays too much memory for CD+G because it keeps the full raw asset in
-  memory even after Stage A removes duplicated batch payload copies
+- TX still has follow-on slimdown work even after Stage A because preview mode
+  can keep a whole-memory fallback and the source layer still needs more polish
 
 The goal of this tranche is to make the current state explicit, then define the
 refactor stages that reduce TX memory without regressing late join, snapshots,
@@ -32,23 +32,28 @@ That means the wire is already a live mixed-media transport, not a
 
 ## Current TX Memory Model
 
-Today the desktop TX keeps multiple CD+G representations resident for one track:
+Today the desktop TX uses one canonical CD+G source plus a small set of related
+helpers:
 
-1. `asset_bytes`
-   - full `.cdg` file contents
-   - used for `ASSET_CHUNK` replay
-2. `cdg_batches`
+1. `cdg_source`
+   - canonical source for `ASSET_CHUNK`, `CDG_BATCH`, and CDG FEC payload reads
+   - may be file-backed for default/headless TX
+   - may be memory-backed when preview mode needs a whole-memory fallback
+2. `asset_bytes`
+   - optional alias to the memory-backed source when preview mode is active
+   - no longer required for default wire send
+3. `cdg_batches`
    - every timed `CDG_BATCH` prebuilt up front
    - now stores only schedule metadata, not copied packet bytes
-3. preview/runtime helpers
+4. preview/runtime helpers
    - `dashcdg_cdg_reader` and keyframe data when TX preview is enabled
    - `chunk_seen` coverage bitmap
    - one serialized `cdg_snapshot_state` buffer for live snapshot emission
 
-The remaining inefficiency is that TX still requires the whole asset in
-`asset_bytes`. Stage A removed the duplicated `cdg_batches` payload copy, but
-Stage B is still needed so TX can stop treating one permanent in-memory blob as
-the only legal source.
+The remaining inefficiency is now mostly in the preview fallback path rather
+than in the default wire-send path. Stage A removed the duplicated
+`cdg_batches` payload copy, and Stage B introduced a canonical random-access
+source, but preview mode can still require whole-memory backing.
 
 ## Current Guarantees To Preserve
 
@@ -142,6 +147,13 @@ Expected outcome:
 - `asset_bytes` stops being the only legal backing store
 - TX can keep deterministic replay semantics without demanding one permanent
   full-file blob
+
+Implementation status:
+
+- initial source layer implemented in the desktop proof
+- default TX send paths can now read from a file-backed random-access source
+- preview mode still keeps an in-memory fallback path because the current
+  preview reader wants a whole-memory asset for deterministic local seeking
 
 ### Stage C: evaluate true streaming bootstrap
 
