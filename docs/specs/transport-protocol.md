@@ -371,8 +371,8 @@ In practice, RX can start live audio before the bootstrap asset is complete, can
 - audio recovery still relies on playout delay and bounded FEC rather than a separate audio-state snapshot/keyframe model
 - no wire-level compatibility promise for protocol v1 peers
 - the threaded-runtime queue ownership model is a desktop architecture refactor and does not change protocol v3 packet formats by itself
-- TX still preloads the `.cdg` asset and also prebuilds duplicated `CDG_BATCH`
-  payload storage; the staged removal plan is tracked in
+- TX still preloads the `.cdg` asset; Stage A removed duplicated `CDG_BATCH`
+  payload storage, but the later source-abstraction stages remain tracked in
   `docs/specs/tx-cdg-source-model.md`
 - the bad-network redesign work now intentionally targets a separate transport tranche rather than stretching v3 indefinitely
 

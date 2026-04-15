@@ -248,16 +248,17 @@ Still rough or incomplete:
 - long impaired-network soak data is still incomplete
 - current FEC only repairs one missing payload per protected group
 - some desktop proof scenarios can still show a small burst of early decode failures while queues settle after startup
-- TX still duplicates CD+G payload storage by keeping both the raw asset and
-  prebuilt `CDG_BATCH` payload copies
+- TX still preloads the full `.cdg` asset in memory; Stage A removed duplicated
+  `CDG_BATCH` payload copies, but file-backed/random-access sourcing is still
+  future work
 
 ## Important Current Limitations
 
 - This is a desktop proof transport, not a finished venue-grade production stack.
 - Long-duration impaired multicast soak data is still incomplete.
 - Full asset replay is still required for deterministic seek/backfill even though snapshots now accelerate late join and recovery.
-- TX still preloads the `.cdg` asset and also prebuilds duplicated timed-batch
-  payload storage; the staged removal plan is documented separately.
+- TX still preloads the `.cdg` asset; the duplicated timed-batch payload copy has
+  been removed, but the later source-abstraction stages are still pending.
 - Embedded receiver work is still documentation-first; there is no buildable ESP-IDF receiver in the repo yet.
 
 ## Related documentation

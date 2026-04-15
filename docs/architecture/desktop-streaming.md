@@ -213,8 +213,8 @@ Desktop-specific today:
 
 - TX track preparation is still synchronous for CD+G asset and batch setup even
   though audio encode is now incremental.
-- TX still preloads the full `.cdg` asset and duplicates live CD+G payload
-  storage in prebuilt batches.
+- TX still preloads the full `.cdg` asset even though the duplicated live
+  `CDG_BATCH` payload copy has now been removed.
 - The clock loop is software timestamped and millisecond scale, not venue-grade hardware timestamping.
 - FEC is intentionally bounded and only repairs one missing payload per group.
 - Long impaired-network soak validation is still incomplete.

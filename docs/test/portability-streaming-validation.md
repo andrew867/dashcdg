@@ -62,6 +62,8 @@ Checks:
 - capture TX memory after track load and during steady send
 - confirm live `CDG_BATCH` send still tracks the same timeline
 - confirm `ASSET_CHUNK` replay still completes
+- confirm TX status reports only schedule metadata size for `cdg_batches`, not a
+  second copied payload footprint
 
 Expected result:
 

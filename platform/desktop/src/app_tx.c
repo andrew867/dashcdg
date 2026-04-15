@@ -60,7 +60,6 @@ struct dashcdg_tx_cdg_batch {
     uint8_t packet_count;
     uint64_t playback_ms;
     uint64_t packet_start_index;
-    uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
 };
 
 struct dashcdg_tx_track {
@@ -1095,27 +1094,57 @@ static int dashcdg_tx_build_cdg_batches_locked(void) {
     for (size_t i = 0; i < batch_count; ++i) {
         size_t start_packet = i * DASHCDG_CDG_BATCH_PACKETS;
         size_t remaining_packets = packet_count - start_packet;
-        size_t packet_bytes;
 
         if (remaining_packets > DASHCDG_CDG_BATCH_PACKETS) {
             remaining_packets = DASHCDG_CDG_BATCH_PACKETS;
         }
-        packet_bytes = remaining_packets * DASHCDG_SUBCHANNEL_PACKET_BYTES;
         g_tx_state.cdg_batches[i].media_sequence = ++g_tx_state.cdg_media_sequence;
         g_tx_state.cdg_batches[i].group_id = (uint32_t) (i / DASHCDG_CDG_GROUP_SIZE);
         g_tx_state.cdg_batches[i].group_index = (uint8_t) (i % DASHCDG_CDG_GROUP_SIZE);
         g_tx_state.cdg_batches[i].packet_count = (uint8_t) remaining_packets;
         g_tx_state.cdg_batches[i].packet_start_index = start_packet;
         g_tx_state.cdg_batches[i].playback_ms = dashcdg_packet_count_to_ms(start_packet);
-        memcpy(
-                g_tx_state.cdg_batches[i].packet_bytes,
-                g_tx_state.asset_bytes + (start_packet * DASHCDG_SUBCHANNEL_PACKET_BYTES),
-                packet_bytes
-        );
     }
 
     g_tx_state.cdg_batch_count = batch_count;
     return 1;
+}
+
+static uint16_t dashcdg_tx_cdg_batch_payload_length(const struct dashcdg_tx_cdg_batch *batch) {
+    size_t length;
+
+    if (batch == NULL) {
+        return 0U;
+    }
+    length = (size_t) batch->packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    if (length > UINT16_MAX) {
+        return 0U;
+    }
+    return (uint16_t) length;
+}
+
+static const uint8_t *dashcdg_tx_cdg_batch_payload_bytes(const struct dashcdg_tx_cdg_batch *batch, uint16_t *length_out) {
+    size_t byte_offset;
+    uint16_t length;
+
+    if (length_out != NULL) {
+        *length_out = 0U;
+    }
+    if (batch == NULL || g_tx_state.asset_bytes == NULL || g_tx_state.asset_size == 0U) {
+        return NULL;
+    }
+
+    length = dashcdg_tx_cdg_batch_payload_length(batch);
+    byte_offset = (size_t) batch->packet_start_index * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    if (length == 0U || byte_offset > g_tx_state.asset_size ||
+            byte_offset + length > g_tx_state.asset_size) {
+        return NULL;
+    }
+
+    if (length_out != NULL) {
+        *length_out = length;
+    }
+    return g_tx_state.asset_bytes + byte_offset;
 }
 
 static uint64_t dashcdg_tx_current_playback_ms_locked(uint64_t now_ms) {
@@ -1212,6 +1241,7 @@ static void dashcdg_tx_print_status_locked(void) {
     const char *mode = "CDG-only";
     uint32_t available_prefix_bytes = 0;
     size_t prefix_chunks = g_tx_state.contiguous_prefix_chunks;
+    size_t cdg_schedule_bytes = g_tx_state.cdg_batch_count * sizeof(*g_tx_state.cdg_batches);
     struct dashcdg_runtime_queue_stats audio_queue_stats;
 
     memset(&audio_queue_stats, 0, sizeof(audio_queue_stats));
@@ -1246,7 +1276,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | audq=%zu hi=%zu ovf=%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu sched=%zuB | audq=%zu hi=%zu ovf=%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -1270,6 +1300,7 @@ static void dashcdg_tx_print_status_locked(void) {
             g_tx_state.chunk_count,
             g_tx_state.distinct_chunks_sent,
             (unsigned long long) g_tx_state.asset_loops_completed,
+            cdg_schedule_bytes,
             audio_queue_stats.depth,
             audio_queue_stats.high_watermark,
             (unsigned long long) g_tx_state.audio_queue_overflows,
@@ -1696,9 +1727,12 @@ static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group
 
     for (uint8_t i = 0; i < group_size; ++i) {
         const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[group_start_index + i];
+        const uint8_t *batch_bytes = dashcdg_tx_cdg_batch_payload_bytes(batch, &lengths[i]);
 
-        payloads[i] = batch->packet_bytes;
-        lengths[i] = (uint16_t) ((size_t) batch->packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES);
+        if (batch_bytes == NULL || lengths[i] == 0U) {
+            return;
+        }
+        payloads[i] = batch_bytes;
     }
 
     dashcdg_tx_send_fec_parity_locked(now_ms, DASHCDG_STREAM_TYPE_CDG, group_id, group_size, payloads, lengths);
@@ -2351,15 +2385,21 @@ static void *dashcdg_tx_thread_main(void *unused) {
             int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                     g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
             struct dashcdg_cdg_batch_payload payload;
+            uint16_t batch_length = 0U;
+            const uint8_t *batch_bytes = dashcdg_tx_cdg_batch_payload_bytes(batch, &batch_length);
             size_t packet_size;
 
+            if (batch_bytes == NULL || batch_length == 0U) {
+                g_tx_state.send_failures++;
+                break;
+            }
             memset(&payload, 0, sizeof(payload));
             payload.media_sequence = batch->media_sequence;
             payload.group_id = batch->group_id;
             payload.group_index = batch->group_index;
             payload.packet_count = batch->packet_count;
             payload.packet_start_index = batch->packet_start_index;
-            payload.packet_bytes = batch->packet_bytes;
+            payload.packet_bytes = batch_bytes;
             g_tx_state.header.flags = 0;
             g_tx_state.header.sequence = g_tx_state.sequence++;
             g_tx_state.header.sender_time_ms = now_ms;

@@ -9,8 +9,8 @@ contract in place.
 It exists because two facts are simultaneously true today:
 
 - TX already streams live `AUDIO_FRAME` and live `CDG_BATCH` packets in parallel
-- TX still pays too much memory for CD+G because it keeps both the raw asset and
-  a second copied batch-oriented representation
+- TX still pays too much memory for CD+G because it keeps the full raw asset in
+  memory even after Stage A removes duplicated batch payload copies
 
 The goal of this tranche is to make the current state explicit, then define the
 refactor stages that reduce TX memory without regressing late join, snapshots,
@@ -39,14 +39,16 @@ Today the desktop TX keeps multiple CD+G representations resident for one track:
    - used for `ASSET_CHUNK` replay
 2. `cdg_batches`
    - every timed `CDG_BATCH` prebuilt up front
-   - duplicates the CD+G packet bytes into batch storage
+   - now stores only schedule metadata, not copied packet bytes
 3. preview/runtime helpers
    - `dashcdg_cdg_reader` and keyframe data when TX preview is enabled
    - `chunk_seen` coverage bitmap
    - one serialized `cdg_snapshot_state` buffer for live snapshot emission
 
-The important inefficiency is `cdg_batches`: it exists for schedule convenience,
-but it copies the same packet bytes that already exist in `asset_bytes`.
+The remaining inefficiency is that TX still requires the whole asset in
+`asset_bytes`. Stage A removed the duplicated `cdg_batches` payload copy, but
+Stage B is still needed so TX can stop treating one permanent in-memory blob as
+the only legal source.
 
 ## Current Guarantees To Preserve
 
@@ -72,7 +74,8 @@ Current behavior remains valid proof of:
 - late-join asset replay
 - snapshot-based visual re-anchoring
 
-But it is not yet the slimmed TX memory model.
+Stage A is now implemented in the desktop proof, but the full slimmed TX memory
+model still requires the Stage B source abstraction.
 
 ### 2. Target modern desktop runtime
 
@@ -105,6 +108,12 @@ Expected outcome:
 
 - no second full copy of CD+G packet payloads
 - existing `ASSET_CHUNK`, snapshot, and live batch semantics stay intact
+
+Implementation status:
+
+- completed for the current desktop proof
+- TX now keeps metadata-only batch scheduling and reads batch/FEC payload bytes
+  directly from the canonical asset backing store
 
 ### Stage B: introduce a random-access CDG source layer
 
