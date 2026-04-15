@@ -23,7 +23,8 @@ That architecture is now preserved in a more explicit form:
 - The receiver stack currently supports two practical timing sources:
   - `network audio playout clock`: when `AUDIO_FRAME` decoding and streaming playback are active.
   - `network-disciplined sender clock`: during startup, before playout begins, or while the receiver is still filling its live jitter queues.
-- RX multicast mode now uses network audio only; local-file audio remains a local-player concern rather than a network-receiver fallback.
+- RX network mode now uses network audio only; local-file audio remains a local-player concern rather than a network-receiver fallback.
+- The current desktop transport can run against either multicast endpoints or explicit IPv4 broadcast endpoints, but both modes share the same on-wire audio/CD+G/PTP behavior.
 
 ## Portability contract
 

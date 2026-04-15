@@ -24,7 +24,8 @@ That portable set now reflects the desktop proof's protocol v2 direction:
 - bootstrap asset packets for late join
 - live `Opus` audio packet framing
 - live timed `CDG_BATCH` framing
-- basic sender clock tracking via sync/follow-up packets
+- software-timestamped `PTP_SYNC` / `PTP_FOLLOW_UP` / `PTP_DELAY_REQ` / `PTP_DELAY_RESP` clock discipline
+- bounded `FEC_PARITY` framing for single-loss repair groups in the current desktop proof
 
 ### ESP-IDF-specific layers to implement next
 
@@ -51,7 +52,7 @@ That choice should be made from measured SPI throughput, not guesswork.
 ## Product assumptions
 
 - display-first receiver is still acceptable before onboard audio is proven on target hardware
-- the same protocol session should eventually be consumable by desktop and ESP32 receivers
-- the embedded receiver should preserve late join through bootstrap asset replay even before bounded FEC is implemented
+- the same protocol session should eventually be consumable by desktop and ESP32 receivers, regardless of whether the desktop sender is using multicast or IPv4 broadcast
+- the embedded receiver should preserve late join through bootstrap asset replay even before embedded bounded FEC support is implemented
 - firmware must tolerate packet loss and late join without user intervention
 - OTA and factory reset are part of the platform contract, not optional extras

@@ -248,6 +248,11 @@ Current implementation status:
 - announced CDG FEC group size: `9`
 - CD+G cadence: `300 packets/second`
 
+Desktop endpoint defaults:
+
+- TX and RX default to `239.255.77.77:24684`
+- desktop tools also accept explicit IPv4 broadcast endpoints such as `192.168.0.255`
+
 ## Receiver behavior
 
 The current desktop receiver uses both bootstrap and live paths:
@@ -258,7 +263,7 @@ The current desktop receiver uses both bootstrap and live paths:
 4. `AUDIO_FRAME` feeds the Opus decoder and PortAudio queue
 5. `CDG_BATCH` advances the live CD+G state
 
-RX startup is now network-audio-only for multicast mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late. Current desktop HUD/stdout observability also exposes startup gate state, clock step/peak/holdover data, and current FEC repair hotness.
+RX startup is now network-audio-only for desktop network mode. When `ANNOUNCE` advertises audio metadata, RX initializes the Opus/PortAudio path and keeps a bounded pending queue for reordered `AUDIO_FRAME` and `CDG_BATCH` packets before declaring them late. Current desktop HUD/stdout observability also exposes startup gate state, clock step/peak/holdover data, and current FEC repair hotness.
 
 ## Late-join behavior
 

@@ -9,7 +9,7 @@
 ## Tranche 2-3
 
 - protocol serialization and parsing covered by tests
-- desktop TX/RX proof runnable from the repo
+- desktop TX/RX proof runnable from the repo over default multicast and explicit broadcast endpoints
 - live `AUDIO_FRAME` and `CDG_BATCH` transport observable in TX/RX status output
 - bounded `FEC_PARITY` generation and recovery observable in TX/RX status output
 - documented impairment matrix for loss, jitter, burst loss, and late join

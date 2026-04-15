@@ -4,7 +4,7 @@
 
 - deterministic CD+G decode and seek
 - a versioned UDP-friendly wire protocol
-- desktop proof applications for local playback, multicast transmit, and multicast receive
+- desktop proof applications for local playback plus multicast-or-broadcast network transmit/receive
 - a live on-wire `Opus + timed CDG` proof path with late-join bootstrap
 
 ## Current repository contents

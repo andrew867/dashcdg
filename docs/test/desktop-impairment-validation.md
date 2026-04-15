@@ -4,6 +4,8 @@
 
 This document defines a repeatable desktop proof workflow for loss, reorder, and burst-loss validation using the multicast impairment relay in `scripts/desktop_impairment.py`.
 
+For simple direct TX/RX bring-up, the desktop apps now default to `239.255.77.77:24684` and can also run against explicit IPv4 broadcast endpoints. This document intentionally uses separate multicast input/output groups so the relay can isolate clean input traffic from impaired output traffic.
+
 ## Topology
 
 Use two multicast groups:
@@ -11,6 +13,8 @@ Use two multicast groups:
 1. TX sends clean media to the relay input group.
 2. The relay joins that input group, applies impairments, and forwards to a second output group.
 3. RX listens only on the relay output group.
+
+The relay itself is multicast-specific today; broadcast support applies to direct desktop TX/RX runs, not to the impairment relay CLI.
 
 Example groups:
 

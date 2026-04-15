@@ -58,7 +58,7 @@ Current protocol v2 coverage includes:
 
 ## Future extraction steps
 
-The next logical refactor after this commit is:
+The next logical refactor after the current desktop proof tranche is:
 
 1. move desktop TX/RX socket handling into a reusable transport adapter
 2. split a pure playout/jitter-buffer abstraction from the desktop PortAudio implementation

@@ -4,7 +4,7 @@
 
 - first board bring-up
 - Wi-Fi and display signal integrity
-- multicast receive and late-join bootstrap sanity
+- multicast/broadcast receive and late-join bootstrap sanity
 - battery charging and protection validation
 - boot, recovery, and firmware flashing workflows
 
@@ -12,6 +12,7 @@
 
 - long-duration packet-loss soak
 - synchronized live audio/CD+G soak against the desktop proof transport
+- mixed network-topology validation against both multicast and broadcast desktop sender setups
 - battery charge/discharge endurance
 - brownout and reset recovery
 - ESD and connector abuse checks
