@@ -4,6 +4,7 @@
 
 #include "dashcdg/cdg.h"
 #include "dashcdg/common.h"
+#include "dashcdg/fec.h"
 #include "dashcdg/media_clock.h"
 #include "dashcdg/protocol.h"
 
@@ -125,10 +126,12 @@ static void test_protocol_roundtrip(void) {
     struct dashcdg_asset_chunk_payload chunk;
     struct dashcdg_clock_beacon_payload beacon;
     struct dashcdg_audio_frame_payload audio_frame;
+    struct dashcdg_fec_parity_payload fec_parity;
     struct dashcdg_ptp_delay_req_payload delay_req;
     struct dashcdg_ptp_delay_resp_payload delay_resp;
     uint8_t chunk_bytes[] = { 1, 2, 3, 4 };
     uint8_t audio_bytes[] = { 9, 8, 7, 6 };
+    uint8_t fec_bytes[] = { 0x10, 0x20, 0x30, 0x40 };
     size_t size;
 
     memset(&header, 0, sizeof(header));
@@ -143,7 +146,7 @@ static void test_protocol_roundtrip(void) {
     announce.audio_sample_rate = 48000;
     announce.audio_channels = 2;
     announce.audio_frame_ms = 20;
-    announce.audio_bitrate_kbps = 96;
+    announce.audio_bitrate_kbps = 128;
     announce.playout_delay_ms = 500;
     announce.audio_fec_group_size = 5;
     announce.cdg_fec_group_size = 9;
@@ -209,6 +212,22 @@ static void test_protocol_roundtrip(void) {
     assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
     assert(view.ptp_delay_resp.request_id == 77);
     assert(view.ptp_delay_resp.request_rx_time_ms == 9876);
+
+    memset(&fec_parity, 0, sizeof(fec_parity));
+    fec_parity.stream_type = DASHCDG_STREAM_TYPE_AUDIO;
+    fec_parity.group_size = 5;
+    fec_parity.payload_bytes = sizeof(fec_bytes);
+    fec_parity.group_id = 1;
+    fec_parity.payload_length_xor = sizeof(fec_bytes);
+    fec_parity.payload_xor = fec_bytes;
+    size = dashcdg_protocol_serialize_fec_parity(buffer, sizeof(buffer), &header, &fec_parity);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO);
+    assert(view.fec_parity.group_size == 5);
+    assert(view.fec_parity.group_id == 1);
+    assert(view.fec_parity.payload_length_xor == sizeof(fec_bytes));
+    assert(memcmp(view.fec_parity.payload_xor, fec_bytes, sizeof(fec_bytes)) == 0);
 }
 
 static void test_media_clock(void) {
@@ -231,6 +250,30 @@ static void test_media_clock(void) {
     assert(clock_state.path_delay_ms == 12);
 }
 
+static void test_fec_recovery(void) {
+    struct dashcdg_fec_parity_state parity;
+    const uint8_t *known_payloads[2];
+    uint16_t known_lengths[2];
+    uint8_t recovered[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+    uint16_t recovered_length = 0;
+    const uint8_t payload_a[] = { 0x10, 0x20, 0x30, 0x40 };
+    const uint8_t payload_b[] = { 0x55, 0x66, 0x77 };
+    const uint8_t payload_c[] = { 0x99, 0xaa, 0xbb, 0xcc, 0xdd };
+
+    dashcdg_fec_parity_init(&parity);
+    assert(dashcdg_fec_parity_accumulate(&parity, payload_a, sizeof(payload_a)) == 1);
+    assert(dashcdg_fec_parity_accumulate(&parity, payload_b, sizeof(payload_b)) == 1);
+    assert(dashcdg_fec_parity_accumulate(&parity, payload_c, sizeof(payload_c)) == 1);
+
+    known_payloads[0] = payload_a;
+    known_lengths[0] = sizeof(payload_a);
+    known_payloads[1] = payload_c;
+    known_lengths[1] = sizeof(payload_c);
+    assert(dashcdg_fec_parity_recover(&parity, known_payloads, known_lengths, 2, recovered, &recovered_length) == 1);
+    assert(recovered_length == sizeof(payload_b));
+    assert(memcmp(recovered, payload_b, sizeof(payload_b)) == 0);
+}
+
 int main(void) {
     test_memory_and_border();
     test_tile_and_scroll_copy();
@@ -238,6 +281,7 @@ int main(void) {
     test_reader_seek_and_keyframes();
     test_protocol_roundtrip();
     test_media_clock();
+    test_fec_recovery();
 
     puts("all tests passed");
     return 0;

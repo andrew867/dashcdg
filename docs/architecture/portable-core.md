@@ -47,7 +47,7 @@ Current protocol v2 coverage includes:
 - `PTP_FOLLOW_UP`
 - `PTP_DELAY_REQ`
 - `PTP_DELAY_RESP`
-- declared but not yet active desktop use of `FEC_PARITY`
+- active desktop use of `FEC_PARITY` for bounded single-loss repair groups
 
 ## Core correctness strategy
 

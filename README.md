@@ -133,6 +133,7 @@ The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
 - `PTP_SYNC`, `PTP_FOLLOW_UP`, `PTP_DELAY_REQ`, and `PTP_DELAY_RESP` maintain a software-timestamped round-trip clock estimate
 - RX decodes network Opus into a queue-driven PortAudio stream when audio metadata is present
 - RX now uses bounded pending queues plus deadline-based skip logic for reordered or missing live audio/CD+G packets
+- TX now emits bounded `FEC_PARITY` packets for audio and CD+G groups, and RX attempts single-missing-packet repair before treating a group as lost
 
 Current TX defaults:
 
@@ -148,9 +149,9 @@ Current TX defaults:
 
 ## Important current limitations
 
-- The protocol declares `FEC_PARITY`, but the desktop proof does not yet use it end-to-end.
+- The desktop proof now emits and consumes bounded XOR-style `FEC_PARITY`, but live impairment testing for repair thresholds is still incomplete.
 - Clock discipline now includes software-timestamped `PTP_DELAY_REQ` / `PTP_DELAY_RESP`, but it is still not a hardware-timestamped or sub-millisecond implementation.
-- Late join is still guaranteed by repeated asset replay, not bounded FEC recovery.
+- Late join is still guaranteed primarily by repeated asset replay, not by long-window FEC or retransmit.
 - RX startup can still show a small number of early Opus decode failures or deadline skips during bring-up before the steady-state queue settles.
 - This is a proof tranche, not a finished venue-grade transport stack.
 

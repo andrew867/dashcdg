@@ -11,6 +11,7 @@
 - protocol serialization and parsing covered by tests
 - desktop TX/RX proof runnable from the repo
 - live `AUDIO_FRAME` and `CDG_BATCH` transport observable in TX/RX status output
+- bounded `FEC_PARITY` generation and recovery observable in TX/RX status output
 - documented impairment matrix for loss, jitter, and late join
 - packet captures can be analyzed via sequence and sender timestamps
 

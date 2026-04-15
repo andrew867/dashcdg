@@ -33,9 +33,9 @@ WINDOWS_RUNTIME_DLLS :=
 endif
 
 CORE_SOURCES := core/src/cdg.c core/src/media_clock.c
-PROTO_SOURCES := proto/src/protocol.c
+PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
 CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o
-PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o
+PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
 DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
 
@@ -84,6 +84,9 @@ $(OBJ_DIR)/core_media_clock.o: core/src/media_clock.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/proto_protocol.o: proto/src/protocol.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/proto_fec.o: proto/src/fec.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_file_io.o: platform/desktop/src/file_io.c

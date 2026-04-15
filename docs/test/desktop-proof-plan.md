@@ -27,6 +27,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 - explicit live media counters for audio, timed CD+G, and sync traffic
 - RX audio queue depth and decode-failure visibility
 - RX jitter queue, skip, drop, and reorder visibility
+- RX repair counters for recovered vs failed FEC attempts
 - deterministic test vectors for protocol parsing
 
 ## Impairment tests
@@ -42,8 +43,8 @@ The next automation step should inject and measure:
 
 ## Current proof limitations
 
-- no active `FEC_PARITY` generation or recovery
 - no hardware-timestamp or sub-millisecond PTP discipline yet
 - no session catalog or operator control UI
 - no dedicated network metrics UI beyond HUD/stdout status lines
+- live impairment validation for actual repair thresholds is still incomplete
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles

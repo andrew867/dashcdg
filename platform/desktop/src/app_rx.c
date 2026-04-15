@@ -12,6 +12,7 @@
 #include "dashcdg/cdg.h"
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
+#include "dashcdg/fec.h"
 #include "dashcdg/gl_renderer.h"
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
@@ -25,6 +26,8 @@
 #define DASHCDG_CDG_JITTER_BUFFER_PACKETS 64U
 #define DASHCDG_AUDIO_LATE_GRACE_MS 80U
 #define DASHCDG_CDG_LATE_GRACE_MS 80U
+#define DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE 16U
+#define DASHCDG_TRACKED_FEC_GROUPS 32U
 
 struct dashcdg_pending_audio_frame {
     int occupied;
@@ -40,6 +43,17 @@ struct dashcdg_pending_cdg_batch {
     uint8_t packet_count;
     uint64_t packet_start_index;
     uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+};
+
+struct dashcdg_rx_fec_group {
+    int occupied;
+    uint32_t group_id;
+    uint8_t expected_group_size;
+    int parity_present;
+    struct dashcdg_fec_parity_state parity;
+    uint8_t member_present[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
+    uint16_t member_lengths[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
+    uint8_t member_payloads[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE][DASHCDG_MAX_FEC_PAYLOAD_BYTES];
 };
 
 struct receiver_state {
@@ -82,8 +96,16 @@ struct receiver_state {
     uint64_t live_reordered_batches;
     uint64_t live_missing_skips;
     uint64_t live_pending_drops;
+    uint64_t fec_packets;
+    uint64_t fec_audio_packets;
+    uint64_t fec_cdg_packets;
+    uint64_t fec_audio_recovered;
+    uint64_t fec_cdg_recovered;
+    uint64_t fec_recovery_failures;
     uint16_t announced_playout_delay_ms;
     uint8_t announced_audio_frame_ms;
+    uint8_t announced_audio_fec_group_size;
+    uint8_t announced_cdg_fec_group_size;
     uint64_t next_audio_playback_ms;
     uint32_t next_audio_media_sequence;
     uint64_t next_live_packet_index;
@@ -107,6 +129,8 @@ struct receiver_state {
     int pending_delay_request_valid;
     struct dashcdg_pending_audio_frame pending_audio[DASHCDG_AUDIO_JITTER_BUFFER_PACKETS];
     struct dashcdg_pending_cdg_batch pending_cdg[DASHCDG_CDG_JITTER_BUFFER_PACKETS];
+    struct dashcdg_rx_fec_group audio_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
+    struct dashcdg_rx_fec_group cdg_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
 };
 
 static struct receiver_state g_receiver;
@@ -148,8 +172,16 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->live_reordered_batches = 0;
     state->live_missing_skips = 0;
     state->live_pending_drops = 0;
+    state->fec_packets = 0;
+    state->fec_audio_packets = 0;
+    state->fec_cdg_packets = 0;
+    state->fec_audio_recovered = 0;
+    state->fec_cdg_recovered = 0;
+    state->fec_recovery_failures = 0;
     state->announced_playout_delay_ms = 0;
     state->announced_audio_frame_ms = 0;
+    state->announced_audio_fec_group_size = 0;
+    state->announced_cdg_fec_group_size = 0;
     state->next_audio_playback_ms = 0;
     state->next_audio_media_sequence = 0;
     state->next_live_packet_index = 0;
@@ -172,6 +204,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->pending_delay_request_valid = 0;
     memset(state->pending_audio, 0, sizeof(state->pending_audio));
     memset(state->pending_cdg, 0, sizeof(state->pending_cdg));
+    memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+    memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -330,27 +364,141 @@ static struct dashcdg_pending_cdg_batch *dashcdg_rx_find_cdg_batch_locked(
     return NULL;
 }
 
-static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+static void dashcdg_rx_clear_fec_group(struct dashcdg_rx_fec_group *group) {
+    if (group == NULL) {
+        return;
+    }
+
+    memset(group, 0, sizeof(*group));
+}
+
+static struct dashcdg_rx_fec_group *dashcdg_rx_get_fec_group_locked(
+        struct dashcdg_rx_fec_group groups[],
+        uint32_t group_id
+) {
+    struct dashcdg_rx_fec_group *free_group = NULL;
+    struct dashcdg_rx_fec_group *oldest_group = NULL;
+
+    for (size_t i = 0; i < DASHCDG_TRACKED_FEC_GROUPS; ++i) {
+        if (groups[i].occupied) {
+            if (groups[i].group_id == group_id) {
+                return &groups[i];
+            }
+            if (oldest_group == NULL || groups[i].group_id < oldest_group->group_id) {
+                oldest_group = &groups[i];
+            }
+        } else if (free_group == NULL) {
+            free_group = &groups[i];
+        }
+    }
+
+    if (free_group != NULL) {
+        dashcdg_rx_clear_fec_group(free_group);
+        free_group->occupied = 1;
+        free_group->group_id = group_id;
+        return free_group;
+    }
+
+    if (oldest_group != NULL) {
+        dashcdg_rx_clear_fec_group(oldest_group);
+        oldest_group->occupied = 1;
+        oldest_group->group_id = group_id;
+        return oldest_group;
+    }
+
+    return NULL;
+}
+
+static void dashcdg_rx_purge_audio_fec_locked(struct receiver_state *state) {
+    uint8_t group_span;
+
+    if (state == NULL || !state->next_audio_initialized) {
+        return;
+    }
+
+    group_span = state->announced_audio_fec_group_size;
+    if (group_span == 0) {
+        return;
+    }
+
+    for (size_t i = 0; i < DASHCDG_TRACKED_FEC_GROUPS; ++i) {
+        struct dashcdg_rx_fec_group *group = &state->audio_fec_groups[i];
+        uint32_t first_sequence;
+        uint32_t end_sequence;
+
+        if (!group->occupied || group->expected_group_size == 0) {
+            continue;
+        }
+
+        first_sequence = group->group_id * (uint32_t) group_span + 1U;
+        end_sequence = first_sequence + group->expected_group_size;
+        if (state->next_audio_media_sequence >= end_sequence) {
+            dashcdg_rx_clear_fec_group(group);
+        }
+    }
+}
+
+static void dashcdg_rx_purge_cdg_fec_locked(struct receiver_state *state) {
+    uint8_t group_span;
+
+    if (state == NULL || !state->next_live_packet_initialized) {
+        return;
+    }
+
+    group_span = state->announced_cdg_fec_group_size;
+    if (group_span == 0) {
+        return;
+    }
+
+    for (size_t i = 0; i < DASHCDG_TRACKED_FEC_GROUPS; ++i) {
+        struct dashcdg_rx_fec_group *group = &state->cdg_fec_groups[i];
+        uint64_t first_batch_index;
+        uint64_t end_packet_index;
+
+        if (!group->occupied || group->expected_group_size == 0) {
+            continue;
+        }
+
+        first_batch_index = (uint64_t) group->group_id * (uint64_t) group_span;
+        end_packet_index = (first_batch_index + (uint64_t) group->expected_group_size) * DASHCDG_MAX_CDG_BATCH_PACKETS;
+        if (state->next_live_packet_index >= end_packet_index) {
+            dashcdg_rx_clear_fec_group(group);
+        }
+    }
+}
+
+static int dashcdg_rx_insert_audio_pending_locked(
+        struct receiver_state *state,
+        uint32_t media_sequence,
+        uint64_t playback_ms,
+        uint8_t frame_ms,
+        const uint8_t *payload,
+        uint16_t payload_length,
+        int count_reorder
+) {
     struct dashcdg_pending_audio_frame *slot = NULL;
 
-    if (state == NULL || view == NULL || view->audio_frame.encoded_bytes == NULL ||
-            view->audio_frame.encoded_length == 0 || view->audio_frame.encoded_length > DASHCDG_MAX_AUDIO_FRAME_BYTES) {
+    if (state == NULL || payload == NULL || payload_length == 0 || payload_length > DASHCDG_MAX_AUDIO_FRAME_BYTES) {
         return 0;
     }
 
     if (!state->next_audio_initialized) {
-        state->next_audio_media_sequence = view->audio_frame.media_sequence;
-        state->next_audio_playback_ms = view->audio_frame.playback_ms;
+        state->next_audio_media_sequence = media_sequence;
+        state->next_audio_playback_ms = playback_ms;
         state->next_audio_initialized = 1;
-    } else if (view->audio_frame.media_sequence < state->next_audio_media_sequence) {
-        state->audio_pending_drops++;
+    } else if (media_sequence < state->next_audio_media_sequence) {
+        if (count_reorder) {
+            state->audio_pending_drops++;
+        }
         return 0;
-    } else if (view->audio_frame.media_sequence > state->next_audio_media_sequence) {
+    } else if (count_reorder && media_sequence > state->next_audio_media_sequence) {
         state->audio_reordered_packets++;
     }
 
-    if (dashcdg_rx_find_audio_frame_locked(state, view->audio_frame.media_sequence) != NULL) {
-        state->audio_pending_drops++;
+    if (dashcdg_rx_find_audio_frame_locked(state, media_sequence) != NULL) {
+        if (count_reorder) {
+            state->audio_pending_drops++;
+        }
         return 0;
     }
 
@@ -361,46 +509,53 @@ static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, con
         }
     }
     if (slot == NULL) {
-        state->audio_pending_drops++;
+        if (count_reorder) {
+            state->audio_pending_drops++;
+        }
         return 0;
     }
 
     memset(slot, 0, sizeof(*slot));
     slot->occupied = 1;
-    slot->media_sequence = view->audio_frame.media_sequence;
-    slot->frame_ms = view->audio_frame.frame_ms;
-    slot->encoded_length = view->audio_frame.encoded_length;
-    slot->playback_ms = view->audio_frame.playback_ms;
-    memcpy(slot->encoded_bytes, view->audio_frame.encoded_bytes, view->audio_frame.encoded_length);
+    slot->media_sequence = media_sequence;
+    slot->frame_ms = frame_ms;
+    slot->encoded_length = payload_length;
+    slot->playback_ms = playback_ms;
+    memcpy(slot->encoded_bytes, payload, payload_length);
     return 1;
 }
 
-static int dashcdg_rx_store_cdg_batch_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+static int dashcdg_rx_insert_cdg_pending_locked(
+        struct receiver_state *state,
+        uint64_t packet_start_index,
+        uint8_t packet_count,
+        const uint8_t *payload,
+        int count_reorder
+) {
     struct dashcdg_pending_cdg_batch *slot = NULL;
-    size_t packet_bytes;
+    size_t packet_bytes = (size_t) packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
 
-    if (state == NULL || view == NULL || view->cdg_batch.packet_bytes == NULL || view->cdg_batch.packet_count == 0) {
-        return 0;
-    }
-
-    packet_bytes = (size_t) view->cdg_batch.packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
-    if (view->cdg_batch.packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
+    if (state == NULL || payload == NULL || packet_count == 0 || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
         return 0;
     }
 
     if (!state->next_live_packet_initialized) {
-        state->next_live_packet_index = view->cdg_batch.packet_start_index;
-        state->next_live_playback_ms = dashcdg_packet_count_to_ms(view->cdg_batch.packet_start_index);
+        state->next_live_packet_index = packet_start_index;
+        state->next_live_playback_ms = dashcdg_packet_count_to_ms(packet_start_index);
         state->next_live_packet_initialized = 1;
-    } else if (view->cdg_batch.packet_start_index < state->next_live_packet_index) {
-        state->live_pending_drops++;
+    } else if (packet_start_index < state->next_live_packet_index) {
+        if (count_reorder) {
+            state->live_pending_drops++;
+        }
         return 0;
-    } else if (view->cdg_batch.packet_start_index > state->next_live_packet_index) {
+    } else if (count_reorder && packet_start_index > state->next_live_packet_index) {
         state->live_reordered_batches++;
     }
 
-    if (dashcdg_rx_find_cdg_batch_locked(state, view->cdg_batch.packet_start_index) != NULL) {
-        state->live_pending_drops++;
+    if (dashcdg_rx_find_cdg_batch_locked(state, packet_start_index) != NULL) {
+        if (count_reorder) {
+            state->live_pending_drops++;
+        }
         return 0;
     }
 
@@ -411,15 +566,276 @@ static int dashcdg_rx_store_cdg_batch_locked(struct receiver_state *state, const
         }
     }
     if (slot == NULL) {
-        state->live_pending_drops++;
+        if (count_reorder) {
+            state->live_pending_drops++;
+        }
         return 0;
     }
 
     memset(slot, 0, sizeof(*slot));
     slot->occupied = 1;
-    slot->packet_count = view->cdg_batch.packet_count;
-    slot->packet_start_index = view->cdg_batch.packet_start_index;
-    memcpy(slot->packet_bytes, view->cdg_batch.packet_bytes, packet_bytes);
+    slot->packet_count = packet_count;
+    slot->packet_start_index = packet_start_index;
+    memcpy(slot->packet_bytes, payload, packet_bytes);
+    return 1;
+}
+
+static void dashcdg_rx_try_recover_audio_group_locked(
+        struct receiver_state *state,
+        struct dashcdg_rx_fec_group *group
+) {
+    const uint8_t *known_payloads[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
+    uint16_t known_lengths[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
+    uint8_t recovered_payload[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+    uint16_t recovered_length = 0;
+    size_t known_count = 0;
+    int missing_index = -1;
+    uint32_t media_sequence;
+    uint64_t playback_ms;
+
+    if (state == NULL || group == NULL || !group->occupied || !group->parity_present || group->expected_group_size <= 1) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < group->expected_group_size; ++i) {
+        if (group->member_present[i]) {
+            known_payloads[known_count] = group->member_payloads[i];
+            known_lengths[known_count] = group->member_lengths[i];
+            known_count++;
+        } else if (missing_index < 0) {
+            missing_index = (int) i;
+        } else {
+            return;
+        }
+    }
+
+    if (missing_index < 0 || known_count + 1U != group->expected_group_size || state->announced_audio_fec_group_size == 0) {
+        return;
+    }
+
+    if (!dashcdg_fec_parity_recover(&group->parity, known_payloads, known_lengths, known_count, recovered_payload, &recovered_length)) {
+        state->fec_recovery_failures++;
+        group->parity_present = 0;
+        return;
+    }
+
+    media_sequence = group->group_id * (uint32_t) state->announced_audio_fec_group_size + (uint32_t) missing_index + 1U;
+    playback_ms = (uint64_t) (media_sequence - 1U) * (uint64_t) state->announced_audio_frame_ms;
+    if (dashcdg_rx_insert_audio_pending_locked(
+                state,
+                media_sequence,
+                playback_ms,
+                state->announced_audio_frame_ms,
+                recovered_payload,
+                recovered_length,
+                0
+        )) {
+        group->member_present[missing_index] = 1;
+        group->member_lengths[missing_index] = recovered_length;
+        memcpy(group->member_payloads[missing_index], recovered_payload, recovered_length);
+        state->fec_audio_recovered++;
+    }
+}
+
+static void dashcdg_rx_try_recover_cdg_group_locked(
+        struct receiver_state *state,
+        struct dashcdg_rx_fec_group *group
+) {
+    const uint8_t *known_payloads[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
+    uint16_t known_lengths[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
+    uint8_t recovered_payload[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+    uint16_t recovered_length = 0;
+    size_t known_count = 0;
+    int missing_index = -1;
+    uint64_t batch_index;
+    uint64_t packet_start_index;
+    uint8_t packet_count;
+
+    if (state == NULL || group == NULL || !group->occupied || !group->parity_present || group->expected_group_size <= 1) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < group->expected_group_size; ++i) {
+        if (group->member_present[i]) {
+            known_payloads[known_count] = group->member_payloads[i];
+            known_lengths[known_count] = group->member_lengths[i];
+            known_count++;
+        } else if (missing_index < 0) {
+            missing_index = (int) i;
+        } else {
+            return;
+        }
+    }
+
+    if (missing_index < 0 || known_count + 1U != group->expected_group_size || state->announced_cdg_fec_group_size == 0) {
+        return;
+    }
+
+    if (!dashcdg_fec_parity_recover(&group->parity, known_payloads, known_lengths, known_count, recovered_payload, &recovered_length)) {
+        state->fec_recovery_failures++;
+        group->parity_present = 0;
+        return;
+    }
+    if (recovered_length == 0 || recovered_length % DASHCDG_SUBCHANNEL_PACKET_BYTES != 0) {
+        state->fec_recovery_failures++;
+        group->parity_present = 0;
+        return;
+    }
+
+    packet_count = (uint8_t) (recovered_length / DASHCDG_SUBCHANNEL_PACKET_BYTES);
+    if (packet_count == 0 || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
+        state->fec_recovery_failures++;
+        group->parity_present = 0;
+        return;
+    }
+
+    batch_index = (uint64_t) group->group_id * (uint64_t) state->announced_cdg_fec_group_size + (uint64_t) missing_index;
+    packet_start_index = batch_index * DASHCDG_MAX_CDG_BATCH_PACKETS;
+    if (dashcdg_rx_insert_cdg_pending_locked(state, packet_start_index, packet_count, recovered_payload, 0)) {
+        group->member_present[missing_index] = 1;
+        group->member_lengths[missing_index] = recovered_length;
+        memcpy(group->member_payloads[missing_index], recovered_payload, recovered_length);
+        state->fec_cdg_recovered++;
+    }
+}
+
+static void dashcdg_rx_observe_audio_for_fec_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    struct dashcdg_rx_fec_group *group;
+    uint8_t expected_group_size;
+
+    if (state == NULL || view == NULL || state->announced_audio_fec_group_size <= 1 ||
+            state->announced_audio_fec_group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
+            view->audio_frame.group_index >= state->announced_audio_fec_group_size ||
+            view->audio_frame.encoded_length == 0) {
+        return;
+    }
+
+    group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, view->audio_frame.group_id);
+    if (group == NULL) {
+        return;
+    }
+
+    expected_group_size = state->announced_audio_fec_group_size;
+    if (group->expected_group_size == 0 || group->expected_group_size > expected_group_size) {
+        group->expected_group_size = expected_group_size;
+    }
+    if (!group->member_present[view->audio_frame.group_index]) {
+        group->member_present[view->audio_frame.group_index] = 1;
+        group->member_lengths[view->audio_frame.group_index] = view->audio_frame.encoded_length;
+        memcpy(
+                group->member_payloads[view->audio_frame.group_index],
+                view->audio_frame.encoded_bytes,
+                view->audio_frame.encoded_length
+        );
+    }
+
+    dashcdg_rx_try_recover_audio_group_locked(state, group);
+}
+
+static void dashcdg_rx_observe_cdg_for_fec_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    struct dashcdg_rx_fec_group *group;
+    uint8_t expected_group_size;
+    uint16_t payload_length;
+
+    if (state == NULL || view == NULL || state->announced_cdg_fec_group_size <= 1 ||
+            state->announced_cdg_fec_group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
+            view->cdg_batch.group_index >= state->announced_cdg_fec_group_size ||
+            view->cdg_batch.packet_count == 0) {
+        return;
+    }
+
+    group = dashcdg_rx_get_fec_group_locked(state->cdg_fec_groups, view->cdg_batch.group_id);
+    if (group == NULL) {
+        return;
+    }
+
+    expected_group_size = state->announced_cdg_fec_group_size;
+    if (group->expected_group_size == 0 || group->expected_group_size > expected_group_size) {
+        group->expected_group_size = expected_group_size;
+    }
+    if (!group->member_present[view->cdg_batch.group_index]) {
+        payload_length = (uint16_t) ((size_t) view->cdg_batch.packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES);
+        group->member_present[view->cdg_batch.group_index] = 1;
+        group->member_lengths[view->cdg_batch.group_index] = payload_length;
+        memcpy(
+                group->member_payloads[view->cdg_batch.group_index],
+                view->cdg_batch.packet_bytes,
+                payload_length
+        );
+    }
+
+    dashcdg_rx_try_recover_cdg_group_locked(state, group);
+}
+
+static void dashcdg_rx_observe_fec_parity_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    struct dashcdg_rx_fec_group *group = NULL;
+
+    if (state == NULL || view == NULL || view->fec_parity.group_size <= 1 ||
+            view->fec_parity.group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
+            view->fec_parity.payload_bytes == 0 || view->fec_parity.payload_xor == NULL) {
+        return;
+    }
+
+    if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+        group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, view->fec_parity.group_id);
+    } else if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_CDG) {
+        group = dashcdg_rx_get_fec_group_locked(state->cdg_fec_groups, view->fec_parity.group_id);
+    }
+    if (group == NULL) {
+        return;
+    }
+
+    group->expected_group_size = view->fec_parity.group_size;
+    group->parity_present = 1;
+    dashcdg_fec_parity_init(&group->parity);
+    group->parity.payload_bytes = view->fec_parity.payload_bytes;
+    group->parity.payload_length_xor = view->fec_parity.payload_length_xor;
+    memcpy(group->parity.payload_xor, view->fec_parity.payload_xor, view->fec_parity.payload_bytes);
+
+    if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+        dashcdg_rx_try_recover_audio_group_locked(state, group);
+    } else if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_CDG) {
+        dashcdg_rx_try_recover_cdg_group_locked(state, group);
+    }
+}
+
+static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL || view->audio_frame.encoded_bytes == NULL) {
+        return 0;
+    }
+
+    if (!dashcdg_rx_insert_audio_pending_locked(
+                state,
+                view->audio_frame.media_sequence,
+                view->audio_frame.playback_ms,
+                view->audio_frame.frame_ms,
+                view->audio_frame.encoded_bytes,
+                view->audio_frame.encoded_length,
+                1
+        )) {
+        return 0;
+    }
+
+    dashcdg_rx_observe_audio_for_fec_locked(state, view);
+    return 1;
+}
+
+static int dashcdg_rx_store_cdg_batch_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL || view->cdg_batch.packet_bytes == NULL) {
+        return 0;
+    }
+
+    if (!dashcdg_rx_insert_cdg_pending_locked(
+                state,
+                view->cdg_batch.packet_start_index,
+                view->cdg_batch.packet_count,
+                view->cdg_batch.packet_bytes,
+                1
+        )) {
+        return 0;
+    }
+
+    dashcdg_rx_observe_cdg_for_fec_locked(state, view);
     return 1;
 }
 
@@ -537,6 +953,9 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
         }
         break;
     }
+
+    dashcdg_rx_purge_audio_fec_locked(state);
+    dashcdg_rx_purge_cdg_fec_locked(state);
 }
 
 static void dashcdg_rx_print_status_locked(void) {
@@ -558,7 +977,7 @@ static void dashcdg_rx_print_status_locked(void) {
 
     fprintf(
             stdout,
-            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu ptp=%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | audio buffered=%ums decode_fail=%llu started=%d | sync off=%lldms path=%lldms | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
+            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu fec=%llu/%llu/%llu ptp=%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | repair aud=%llu live=%llu fail=%llu | audio buffered=%ums decode_fail=%llu started=%d | sync off=%lldms path=%lldms | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d\n",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.bytes_received,
             (unsigned long long) g_receiver.parse_failures,
@@ -567,6 +986,9 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.clock_beacon_packets,
             (unsigned long long) g_receiver.audio_packets,
             (unsigned long long) g_receiver.cdg_batch_packets,
+            (unsigned long long) g_receiver.fec_packets,
+            (unsigned long long) g_receiver.fec_audio_packets,
+            (unsigned long long) g_receiver.fec_cdg_packets,
             (unsigned long long) g_receiver.ptp_sync_packets,
             (unsigned long long) g_receiver.ptp_follow_up_packets,
             (unsigned long long) g_receiver.ptp_delay_req_packets,
@@ -588,6 +1010,9 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.live_missing_skips,
             (unsigned long long) g_receiver.live_pending_drops,
             (unsigned long long) g_receiver.live_reordered_batches,
+            (unsigned long long) g_receiver.fec_audio_recovered,
+            (unsigned long long) g_receiver.fec_cdg_recovered,
+            (unsigned long long) g_receiver.fec_recovery_failures,
             (unsigned int) audio_buffered_ms,
             (unsigned long long) g_receiver.audio_decode_failures,
             g_audio_stream_started,
@@ -674,6 +1099,8 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     state->session_start_ms = view->announce.session_start_ms;
     state->announced_playout_delay_ms = view->announce.playout_delay_ms;
     state->announced_audio_frame_ms = view->announce.audio_frame_ms;
+    state->announced_audio_fec_group_size = view->announce.audio_fec_group_size;
+    state->announced_cdg_fec_group_size = view->announce.cdg_fec_group_size;
     state->network_audio_enabled = has_network_audio;
 
     if ((song_changed || session_changed || asset_changed) && has_network_audio) {
@@ -855,6 +1282,15 @@ static void *network_thread(void *user_data) {
                     g_receiver.cdg_batch_packets++;
                     handle_live_cdg_batch(&g_receiver, &view);
                     break;
+                case DASHCDG_PACKET_FEC_PARITY:
+                    g_receiver.fec_packets++;
+                    if (view.fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+                        g_receiver.fec_audio_packets++;
+                    } else if (view.fec_parity.stream_type == DASHCDG_STREAM_TYPE_CDG) {
+                        g_receiver.fec_cdg_packets++;
+                    }
+                    dashcdg_rx_observe_fec_parity_locked(&g_receiver, &view);
+                    break;
                 case DASHCDG_PACKET_PTP_SYNC:
                     g_receiver.ptp_sync_packets++;
                     g_receiver.pending_sync_id = view.ptp_sync.sync_id;
@@ -977,7 +1413,7 @@ static void display(void) {
     snprintf(
             hud_line_a,
             sizeof(hud_line_a),
-            "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu ptp:%llu/%llu",
+            "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu fec:%llu/%llu ptp:%llu/%llu",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.parse_failures,
             (unsigned long long) g_receiver.announce_packets,
@@ -985,21 +1421,22 @@ static void display(void) {
             (unsigned long long) g_receiver.clock_beacon_packets,
             (unsigned long long) g_receiver.audio_packets,
             (unsigned long long) g_receiver.cdg_batch_packets,
+            (unsigned long long) g_receiver.fec_audio_packets,
+            (unsigned long long) g_receiver.fec_cdg_packets,
             (unsigned long long) g_receiver.ptp_delay_req_packets,
             (unsigned long long) g_receiver.ptp_delay_resp_packets
     );
     snprintf(
             hud_line_b,
             sizeof(hud_line_b),
-            "prefix:%u/%u pend:%zu/%zu skip:%llu/%llu drop:%llu/%llu | off:%lld path:%lld dg:%llums stall:%llums rdy:%d clk:%d aud:net",
+            "prefix:%u/%u pend:%zu/%zu rep:%llu/%llu fail:%llu | off:%lld path:%lld dg:%llums stall:%llums rdy:%d clk:%d aud:net",
             (unsigned int) hud_prefix_bytes,
             (unsigned int) g_receiver.asset_size,
             pending_audio,
             pending_cdg,
-            (unsigned long long) g_receiver.audio_missing_skips,
-            (unsigned long long) g_receiver.live_missing_skips,
-            (unsigned long long) g_receiver.audio_pending_drops,
-            (unsigned long long) g_receiver.live_pending_drops,
+            (unsigned long long) g_receiver.fec_audio_recovered,
+            (unsigned long long) g_receiver.fec_cdg_recovered,
+            (unsigned long long) g_receiver.fec_recovery_failures,
             (long long) g_receiver.sender_offset_ms,
             (long long) g_receiver.sender_path_delay_ms,
             (unsigned long long) hud_since_last_dg_ms,

@@ -218,7 +218,7 @@ Current implementation status:
 
 Purpose:
 
-- reserved for future bounded parity repair
+- bounded parity repair for short audio and CD+G media groups
 
 Fields:
 
@@ -234,7 +234,8 @@ Fields:
 Current implementation status:
 
 - parser/serializer exists
-- no parity packets are currently generated or recovered by the desktop apps
+- TX emits one XOR parity packet per completed audio/CD+G FEC group
+- RX stores short per-group history and can recover a single missing media payload when parity and the other group members arrive
 
 ## Sender defaults in the current desktop proof
 
@@ -276,7 +277,7 @@ In practice, RX can start live audio before the bootstrap asset is complete, but
 - no retransmit, NACK, or repair-request path
 - no playlist/session catalog packet family
 - no hardware-timestamp or sub-millisecond PTP discipline yet; current proof uses millisecond software timestamps
-- no active `FEC_PARITY` generation or recovery yet
+- bounded XOR FEC only repairs a single missing media payload per group; it is not a long-window or burst-loss code
 - no wire-level compatibility promise for protocol v1 peers
 
 These are intentional current omissions, not undocumented behavior.

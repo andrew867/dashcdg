@@ -15,6 +15,7 @@
 #include "dashcdg/cdg.h"
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
+#include "dashcdg/fec.h"
 #include "dashcdg/file_io.h"
 #include "dashcdg/gl_renderer.h"
 #include "dashcdg/media_clock.h"
@@ -112,6 +113,8 @@ struct dashcdg_tx_state {
     uint32_t cdg_media_sequence;
     uint64_t audio_packets_sent;
     uint64_t cdg_batch_packets_sent;
+    uint64_t fec_audio_packets_sent;
+    uint64_t fec_cdg_packets_sent;
     uint64_t ptp_sync_packets_sent;
     uint64_t ptp_follow_up_packets_sent;
     uint64_t ptp_delay_resp_packets_sent;
@@ -859,7 +862,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | head_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu fec=%llu/%llu ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu | head_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -868,6 +871,8 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) g_tx_state.asset_chunk_packets_sent,
             (unsigned long long) g_tx_state.audio_packets_sent,
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
+            (unsigned long long) g_tx_state.fec_audio_packets_sent,
+            (unsigned long long) g_tx_state.fec_cdg_packets_sent,
             (unsigned long long) g_tx_state.ptp_sync_packets_sent,
             (unsigned long long) g_tx_state.ptp_follow_up_packets_sent,
             (unsigned long long) g_tx_state.ptp_delay_resp_packets_sent,
@@ -940,6 +945,8 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.asset_chunk_packets_sent = 0;
     g_tx_state.audio_packets_sent = 0;
     g_tx_state.cdg_batch_packets_sent = 0;
+    g_tx_state.fec_audio_packets_sent = 0;
+    g_tx_state.fec_cdg_packets_sent = 0;
     g_tx_state.ptp_sync_packets_sent = 0;
     g_tx_state.ptp_follow_up_packets_sent = 0;
     g_tx_state.ptp_delay_resp_packets_sent = 0;
@@ -1038,6 +1045,114 @@ static int dashcdg_tx_send_packet(const uint8_t *packet, size_t packet_size) {
     );
 
     return sent == (int) packet_size;
+}
+
+static int dashcdg_tx_send_fec_parity_locked(
+        uint64_t now_ms,
+        uint8_t stream_type,
+        uint32_t group_id,
+        uint8_t group_size,
+        const uint8_t *const payloads[],
+        const uint16_t lengths[]
+) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    struct dashcdg_fec_parity_state parity;
+    struct dashcdg_fec_parity_payload payload;
+    size_t packet_size;
+
+    if (group_size <= 1 || payloads == NULL || lengths == NULL) {
+        return 0;
+    }
+
+    dashcdg_fec_parity_init(&parity);
+    for (uint8_t i = 0; i < group_size; ++i) {
+        if (!dashcdg_fec_parity_accumulate(&parity, payloads[i], lengths[i])) {
+            return 0;
+        }
+    }
+
+    memset(&payload, 0, sizeof(payload));
+    payload.stream_type = stream_type;
+    payload.group_size = group_size;
+    payload.payload_bytes = parity.payload_bytes;
+    payload.group_id = group_id;
+    payload.payload_length_xor = parity.payload_length_xor;
+    payload.payload_xor = parity.payload_xor;
+
+    g_tx_state.header.flags = 0;
+    g_tx_state.header.sequence = g_tx_state.sequence++;
+    g_tx_state.header.sender_time_ms = now_ms;
+    packet_size = dashcdg_protocol_serialize_fec_parity(packet, sizeof(packet), &g_tx_state.header, &payload);
+    if (packet_size == 0) {
+        return 0;
+    }
+    if (!dashcdg_tx_send_packet(packet, packet_size)) {
+        g_tx_state.send_failures++;
+        return 0;
+    }
+
+    g_tx_state.datagrams_sent++;
+    g_tx_state.bytes_sent += packet_size;
+    if (stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+        g_tx_state.fec_audio_packets_sent++;
+    } else if (stream_type == DASHCDG_STREAM_TYPE_CDG) {
+        g_tx_state.fec_cdg_packets_sent++;
+    }
+    return 1;
+}
+
+static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t group_id) {
+    const uint8_t *payloads[DASHCDG_AUDIO_GROUP_SIZE];
+    uint16_t lengths[DASHCDG_AUDIO_GROUP_SIZE];
+    size_t group_start_index = (size_t) group_id * DASHCDG_AUDIO_GROUP_SIZE;
+    size_t remaining_frames;
+    uint8_t group_size;
+
+    if (group_start_index >= g_tx_state.audio_frame_count) {
+        return;
+    }
+
+    remaining_frames = g_tx_state.audio_frame_count - group_start_index;
+    group_size = (uint8_t) (remaining_frames > DASHCDG_AUDIO_GROUP_SIZE ? DASHCDG_AUDIO_GROUP_SIZE : remaining_frames);
+    if (group_size <= 1) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < group_size; ++i) {
+        const struct dashcdg_tx_audio_frame *frame = &g_tx_state.audio_frames[group_start_index + i];
+
+        payloads[i] = frame->encoded_bytes;
+        lengths[i] = frame->encoded_length;
+    }
+
+    dashcdg_tx_send_fec_parity_locked(now_ms, DASHCDG_STREAM_TYPE_AUDIO, group_id, group_size, payloads, lengths);
+}
+
+static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group_id) {
+    const uint8_t *payloads[DASHCDG_CDG_GROUP_SIZE];
+    uint16_t lengths[DASHCDG_CDG_GROUP_SIZE];
+    size_t group_start_index = (size_t) group_id * DASHCDG_CDG_GROUP_SIZE;
+    size_t remaining_batches;
+    uint8_t group_size;
+
+    if (group_start_index >= g_tx_state.cdg_batch_count) {
+        return;
+    }
+
+    remaining_batches = g_tx_state.cdg_batch_count - group_start_index;
+    group_size = (uint8_t) (remaining_batches > DASHCDG_CDG_GROUP_SIZE ? DASHCDG_CDG_GROUP_SIZE : remaining_batches);
+    if (group_size <= 1) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < group_size; ++i) {
+        const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[group_start_index + i];
+
+        payloads[i] = batch->packet_bytes;
+        lengths[i] = (uint16_t) ((size_t) batch->packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES);
+    }
+
+    dashcdg_tx_send_fec_parity_locked(now_ms, DASHCDG_STREAM_TYPE_CDG, group_id, group_size, payloads, lengths);
 }
 
 static void *dashcdg_tx_ptp_thread_main(void *unused) {
@@ -1321,6 +1436,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 g_tx_state.audio_frames[g_tx_state.next_audio_frame_index].playback_ms <=
                 dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
             const struct dashcdg_tx_audio_frame *frame = &g_tx_state.audio_frames[g_tx_state.next_audio_frame_index];
+            int send_group_fec = g_tx_state.next_audio_frame_index + 1U >= g_tx_state.audio_frame_count ||
+                    g_tx_state.audio_frames[g_tx_state.next_audio_frame_index + 1U].group_id != frame->group_id;
             struct dashcdg_audio_frame_payload payload;
             size_t packet_size;
 
@@ -1342,6 +1459,9 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 g_tx_state.audio_packets_sent++;
             }
             g_tx_state.next_audio_frame_index++;
+            if (send_group_fec) {
+                dashcdg_tx_send_audio_group_fec_locked(now_ms, frame->group_id);
+            }
         }
 
         while (now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
@@ -1349,6 +1469,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
                 dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
             const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
+            int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
+                    g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
             struct dashcdg_cdg_batch_payload payload;
             size_t packet_size;
 
@@ -1369,6 +1491,9 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 g_tx_state.cdg_batch_packets_sent++;
             }
             g_tx_state.next_cdg_batch_index++;
+            if (send_group_fec) {
+                dashcdg_tx_send_cdg_group_fec_locked(now_ms, batch->group_id);
+            }
         }
 
         if (g_tx_state.asset_size > 0) {
@@ -1468,11 +1593,13 @@ static void dashcdg_tx_preview_display(void) {
     snprintf(
             hud_line_a,
             sizeof(hud_line_a),
-            "TX dg:%llu fail:%llu live:%llu aud:%llu prefix:%u/%u",
+            "TX dg:%llu fail:%llu live:%llu aud:%llu fec:%llu/%llu prefix:%u/%u",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.cdg_batch_packets_sent,
             (unsigned long long) g_tx_state.audio_packets_sent,
+            (unsigned long long) g_tx_state.fec_audio_packets_sent,
+            (unsigned long long) g_tx_state.fec_cdg_packets_sent,
             (unsigned int) available_prefix_bytes,
             (unsigned int) g_tx_state.beacon.total_asset_bytes
     );
