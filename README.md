@@ -187,6 +187,8 @@ Key runtime rules:
   live send
 - TX now uses a random-access CDG source for wire send paths; headless/default TX
   can stay file-backed, while preview mode still uses an in-memory fallback
+- TX now has an opt-in `--badnet-v4` sender path with bounded startup pacing,
+  loading-screen packets, compact anchor chunks, and structured startup events
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
 - RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches
@@ -254,6 +256,8 @@ Still rough or incomplete:
 - TX preview mode still falls back to a whole-memory `.cdg` load for the local
   OpenGL preview path even though default TX wire send is now random-access
   backed
+- bad-network v4 is TX-opt-in right now; RX v4 decode/startup is still the next
+  tranche
 
 ## Important Current Limitations
 

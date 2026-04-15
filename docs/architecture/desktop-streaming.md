@@ -83,6 +83,8 @@ Important current behavior:
   thread fills a bounded `audio_ready_queue` during live send.
 - default TX wire send can now use a file-backed random-access CDG source;
   preview mode still uses a whole-memory fallback reader
+- TX also has an explicit `--badnet-v4` path that emits v4 session, loading,
+  anchor, audio, video, and backfill traffic with bounded per-pass pacing
 - Console output now prints a preparation line immediately, but some media
   preparation cost is still on the hot path.
 - Directory playback defaults to the local `cdg/` folder when no TX source path is provided.
