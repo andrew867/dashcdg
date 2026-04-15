@@ -12,7 +12,8 @@
 - desktop TX/RX proof runnable from the repo
 - live `AUDIO_FRAME` and `CDG_BATCH` transport observable in TX/RX status output
 - bounded `FEC_PARITY` generation and recovery observable in TX/RX status output
-- documented impairment matrix for loss, jitter, and late join
+- documented impairment matrix for loss, jitter, burst loss, and late join
+- repeatable desktop impairment relay workflow available from the repo
 - packet captures can be analyzed via sequence and sender timestamps
 
 ## Tranche 4-6

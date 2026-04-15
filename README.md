@@ -136,6 +136,21 @@ The desktop TX/RX proof is currently a hybrid late-join/live-media transport:
 - TX now emits bounded `FEC_PARITY` packets for audio and CD+G groups, and RX attempts single-missing-packet repair before treating a group as lost
 - TX/RX status lines now expose startup gates, clock-update quality, repair hotness, and FEC profile/overhead telemetry
 
+## Impairment validation relay
+
+For repeatable loss/reorder proof runs, use `scripts/desktop_impairment.py` between TX and RX instead of sending TX directly to the RX multicast group:
+
+```sh
+python scripts/desktop_impairment.py \
+  --listen-group 239.255.77.91 \
+  --listen-port 24684 \
+  --emit-group 239.255.77.92 \
+  --emit-port 24685 \
+  --drop-every 11
+```
+
+The relay joins one multicast group, applies deterministic packet loss, reordering, and burst-loss rules, then forwards to a second multicast group while printing packet counters. See `docs/test/desktop-impairment-validation.md` for the baseline, single-loss, reorder, burst-loss, and mixed-impairment command matrix.
+
 Current TX defaults:
 
 - audio sample rate: 48 kHz
@@ -150,7 +165,7 @@ Current TX defaults:
 
 ## Important current limitations
 
-- The desktop proof now emits and consumes bounded XOR-style `FEC_PARITY`, but live impairment testing for repair thresholds is still incomplete.
+- The desktop proof now has a repeatable impairment relay and validation workflow, but long-duration impaired multicast soak data is still incomplete.
 - Clock discipline now includes software-timestamped `PTP_DELAY_REQ` / `PTP_DELAY_RESP`, but it is still not a hardware-timestamped or sub-millisecond implementation.
 - Late join is still guaranteed primarily by repeated asset replay, not by long-window FEC or retransmit.
 - RX startup can still show a small number of early Opus decode failures or deadline skips during bring-up before the steady-state queue settles.
@@ -160,6 +175,7 @@ Current TX defaults:
 
 - `docs/specs/transport-protocol.md`: full protocol v2 field-level documentation
 - `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove
+- `docs/test/desktop-impairment-validation.md`: repeatable impaired-network proof workflow and expected counters
 - `docs/architecture/portable-core.md`: portable vs desktop-specific boundaries
 - `docs/hardware/`: future ESP32 receiver and productization docs
 - `docs/ops/quality-gates.md`: current tranche release criteria

@@ -33,7 +33,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 
 ## Impairment tests
 
-The next automation step should inject and measure:
+The current automation step is the multicast relay in `scripts/desktop_impairment.py`, which injects and measures:
 
 - packet loss
 - reordering
@@ -47,5 +47,5 @@ The next automation step should inject and measure:
 - no hardware-timestamp or sub-millisecond PTP discipline yet
 - no session catalog or operator control UI
 - no dedicated network metrics UI beyond HUD/stdout status lines
-- live impairment validation for actual repair thresholds is still incomplete
+- long-duration impaired-network soak data for actual repair thresholds is still incomplete; use `docs/test/desktop-impairment-validation.md` for the current repeatable matrix
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles
