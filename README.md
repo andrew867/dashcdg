@@ -158,7 +158,7 @@ Network defaults:
 
 ```mermaid
 flowchart LR
-    src[CDG plus MP3 library] --> txprep[TX track load and pre-encode]
+    src[CDG plus MP3 library] --> txprep[TX track load plus runtime queues]
     txprep --> ann[ANNOUNCE and CLOCK_BEACON]
     txprep --> ach[AUDIO_FRAME]
     txprep --> cb[CDG_BATCH]
@@ -178,10 +178,11 @@ flowchart LR
 
 Key runtime rules:
 
-- TX currently preloads the full `.cdg` asset and pre-encodes the current track's audio before live send starts
+- TX preloads the `.cdg` asset but now produces Opus frames incrementally on a dedicated audio thread during live send
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
 - RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches
+- RX late-skip decisions now compare against sender playback time rather than sender wall clock, which keeps long playout from collapsing into false `wait-preroll`
 - once audio playout is running, RX uses audio time as the render master
 - pause mode freezes the song timeline, suppresses normal media scheduling, and repeatedly emits a custom pause-screen snapshot state
 - snapshots are no longer just bootstrap helpers; RX can use them as active recovery anchors during a running session
@@ -220,6 +221,8 @@ The relay joins one multicast group, applies deterministic packet loss, reorderi
 Implemented and documented:
 
 - protocol v3 live-media packet families
+- threaded TX/RX runtime boundaries with bounded queues between network, media, audio, and render work
+- incremental TX MP3 decode/resample/Opus production during live send
 - queue-driven RX streaming audio path
 - timed live CD+G batches
 - bounded XOR FEC generation and single-loss recovery
@@ -227,27 +230,28 @@ Implemented and documented:
 - TX pause/play with a networked pause screen
 - default multicast plus explicit broadcast endpoint support
 - startup, repair, and clock telemetry in both TX and RX
+- measured isolated soak proving steady-state RX playout progression no longer falls back into `wait-preroll` while traffic continues
+- measured forced session restart to a different track proving RX can tear down the old session and lock onto a fresh announce/bootstrap cycle cleanly
 
 Still rough or incomplete:
 
-- TX track preparation is still synchronous, so large assets or MP3 decode/pre-encode work can still be visible on startup and track switches
 - clock discipline is still software timestamped rather than venue-grade hardware-timestamped PTP
 - long impaired-network soak data is still incomplete
 - current FEC only repairs one missing payload per protected group
-- some desktop proof scenarios still show early decode failures while queues settle
+- some desktop proof scenarios can still show a small burst of early decode failures while queues settle after startup
 
 ## Important Current Limitations
 
 - This is a desktop proof transport, not a finished venue-grade production stack.
 - Long-duration impaired multicast soak data is still incomplete.
 - Full asset replay is still required for deterministic seek/backfill even though snapshots now accelerate late join and recovery.
-- TX still pre-encodes the current song rather than encoding incrementally during playback.
+- TX still preloads the `.cdg` asset and is not yet a fully streaming bootstrap pipeline end-to-end.
 - Embedded receiver work is still documentation-first; there is no buildable ESP-IDF receiver in the repo yet.
 
 ## Related documentation
 
 - `docs/architecture/desktop-streaming.md`: end-to-end desktop TX/RX architecture and runtime diagrams
-- `docs/architecture/threaded-streaming-runtime.md`: planned task/queue ownership model for the threaded incremental refactor
+- `docs/architecture/threaded-streaming-runtime.md`: implemented task/queue ownership model for the threaded desktop runtime
 - `docs/specs/transport-protocol.md`: full protocol v3 field-level documentation
 - `docs/specs/receiver-progress-invariants.md`: receiver rules that prevent long-play ingress-without-playout stalls
 - `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove and how to read its status

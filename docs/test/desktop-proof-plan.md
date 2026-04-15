@@ -72,12 +72,15 @@ Implemented:
 - TX pause/resume with a generated pause screen
 - default multicast endpoint plus explicit broadcast endpoint support
 - HUD/headless observability for gates, sync, reorder, repair, and snapshot state
+- threaded TX/RX runtime split with explicit queues for TX audio production and RX media progression/render publication
+- measured isolated multicast soak where RX stayed in `running`, `live_applied` kept climbing, and audio buffering remained stable instead of regressing to a false long-play stall
+- measured forced session restart to a different track, proving RX can drain an ended session and cleanly acquire a new announce/bootstrap/live cycle
 
 Still to prove more deeply:
 
 - repeated long impaired-network soak runs with captured logs
 - quantified recovery thresholds under real burst loss
-- operational limits for track-switch latency once incremental encode replaces synchronous whole-track prebuild
+- operational limits for rapid repeated track switches under sustained live send pressure
 
 ## Current Proof Limitations
 
@@ -86,4 +89,4 @@ Still to prove more deeply:
 - no dedicated network metrics UI beyond HUD/stdout status lines
 - long-duration impaired-network soak data for actual repair thresholds is still incomplete; use `docs/test/desktop-impairment-validation.md` for the current repeatable matrix
 - startup can still show a small number of early Opus decode failures or deadline skips before the steady-state playout queue settles
-- TX still prepares tracks synchronously, so startup and track changes are improved but not architecturally instant yet
+- TX still preloads the `.cdg` asset before a session is fully established, so bootstrap is not yet a purely streaming asset path
