@@ -66,14 +66,14 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Integrated network modes through the player entrypoint:
 
 ```sh
-build/bin/desktop-player tx [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]
+build/bin/desktop-player tx [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 build/bin/desktop-player rx [endpoint-address] [port]
 ```
 
 Standalone network transmitter:
 
 ```sh
-build/bin/desktop-tx [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]
+build/bin/desktop-tx [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 ```
 
 Standalone network receiver:
@@ -86,6 +86,7 @@ Network defaults:
 
 - default endpoint address: `239.255.77.77`
 - default UDP port: `24684`
+- default TX media library: `.\cdg` when no source path is provided
 - TX and RX still accept explicit multicast endpoints
 - TX and RX now also accept IPv4 broadcast destinations such as `192.168.0.255` for `/24` LAN broadcast setups
 
@@ -93,12 +94,14 @@ Network defaults:
 
 - With no path, `desktop-player` scans the local `cdg/` folder and plays tracks sequentially.
 - With `--shuffle`, `desktop-player` scans a folder and shuffles the playlist.
+- With no TX source path, `desktop-player tx` and `desktop-tx` scan the local `cdg/` folder.
 - With a folder path, TX/player scan for `.cdg` files and auto-pair same-name `.mp3` files.
 - With a single `.cdg` file, the app still auto-detects a sibling `.mp3` when present.
 - With a single `.mp3` file, the app looks for a same-name sibling `.cdg`.
 - With a bare stem such as `C:/songs/MyTrack`, the app resolves `MyTrack.cdg` and `MyTrack.mp3`.
 - With `<file.cdg> <file.mp3>`, the player uses the explicit pair.
 - In TX, paired media is treated as `MP3+G`; CDG-only tracks fall back to graphics-only timing and omit network audio metadata.
+- TX reshuffles the playlist each time it wraps past the end, so repeated library loops do not stay in the same song order.
 
 ## UI Controls
 
@@ -110,8 +113,8 @@ Network defaults:
 `desktop-tx` foreground command controls:
 
 - `p`: play/pause
-- `n`: next track
-- `b`: previous track
+- `n` or `]`: next track
+- `b` or `[`: back through played-track history
 - `r`: restart current track
 - `f`: force late-join asset rebroadcast
 - `s`: print current status
@@ -122,6 +125,8 @@ Network defaults:
 `desktop-tx --display` preview:
 
 - opens a local OpenGL preview window while TX continues broadcasting
+- `Right Arrow`: next track
+- `Left Arrow`: back through played-track history
 - the same `v` command blanks/unblanks only the local preview; it does not stop network send
 
 `desktop-rx`:

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include <pthread.h>
 
@@ -32,6 +33,7 @@
 #define DASHCDG_AUDIO_GROUP_SIZE 5U
 #define DASHCDG_CDG_GROUP_SIZE 9U
 #define DASHCDG_CDG_BATCH_PACKETS DASHCDG_MAX_CDG_BATCH_PACKETS
+#define DASHCDG_DEFAULT_LIBRARY_DIR "cdg"
 
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
@@ -120,6 +122,10 @@ struct dashcdg_tx_state {
     uint64_t ptp_delay_resp_packets_sent;
     uint32_t ptp_sync_id;
     uint64_t last_ptp_sync_ms;
+    size_t *track_history;
+    size_t track_history_count;
+    size_t track_history_capacity;
+    size_t track_history_position;
     int preview_enabled;
     int display_requested;
     int paused;
@@ -425,6 +431,73 @@ static int dashcdg_tx_compare_tracks(const void *left, const void *right) {
     return strcmp(lhs->title, rhs->title);
 }
 
+static void dashcdg_tx_playlist_shuffle(struct dashcdg_tx_playlist *playlist) {
+    if (playlist == NULL || playlist->count < 2U) {
+        return;
+    }
+
+    for (size_t i = playlist->count - 1U; i > 0U; --i) {
+        size_t j = (size_t) (rand() % (int) (i + 1U));
+        struct dashcdg_tx_track temp = playlist->tracks[i];
+
+        playlist->tracks[i] = playlist->tracks[j];
+        playlist->tracks[j] = temp;
+    }
+}
+
+static void dashcdg_tx_playlist_shuffle_avoiding_title(
+        struct dashcdg_tx_playlist *playlist,
+        const char *avoid_title
+) {
+    if (playlist == NULL || playlist->count < 2U) {
+        return;
+    }
+
+    dashcdg_tx_playlist_shuffle(playlist);
+    if (avoid_title == NULL || playlist->tracks[0].title == NULL || strcmp(playlist->tracks[0].title, avoid_title) != 0) {
+        return;
+    }
+
+    for (size_t i = 1; i < playlist->count; ++i) {
+        if (playlist->tracks[i].title != NULL && strcmp(playlist->tracks[i].title, avoid_title) != 0) {
+            struct dashcdg_tx_track temp = playlist->tracks[0];
+
+            playlist->tracks[0] = playlist->tracks[i];
+            playlist->tracks[i] = temp;
+            return;
+        }
+    }
+}
+
+static int dashcdg_tx_history_push_locked(size_t track_index) {
+    size_t *resized;
+
+    if (g_tx_state.track_history_position + 1U < g_tx_state.track_history_count) {
+        g_tx_state.track_history_count = g_tx_state.track_history_position + 1U;
+    }
+
+    if (g_tx_state.track_history_count > 0U &&
+            g_tx_state.track_history[g_tx_state.track_history_count - 1U] == track_index) {
+        g_tx_state.track_history_position = g_tx_state.track_history_count - 1U;
+        return 1;
+    }
+
+    if (g_tx_state.track_history_count >= g_tx_state.track_history_capacity) {
+        size_t next_capacity = g_tx_state.track_history_capacity == 0U ? 16U : g_tx_state.track_history_capacity * 2U;
+
+        resized = (size_t *) realloc(g_tx_state.track_history, next_capacity * sizeof(*g_tx_state.track_history));
+        if (resized == NULL) {
+            return 0;
+        }
+        g_tx_state.track_history = resized;
+        g_tx_state.track_history_capacity = next_capacity;
+    }
+
+    g_tx_state.track_history[g_tx_state.track_history_count++] = track_index;
+    g_tx_state.track_history_position = g_tx_state.track_history_count - 1U;
+    return 1;
+}
+
 static int dashcdg_tx_playlist_from_directory(struct dashcdg_tx_playlist *playlist, const char *directory) {
     DIR *dir;
     struct dirent *entry;
@@ -558,7 +631,7 @@ static int dashcdg_tx_ipv4_is_broadcast(const struct in_addr *address) {
 static void dashcdg_tx_print_usage(const char *argv0) {
     fprintf(
             stderr,
-            "usage: %s [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]\n",
+            "usage: %s [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     fprintf(
@@ -567,6 +640,7 @@ static void dashcdg_tx_print_usage(const char *argv0) {
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT
     );
+    fprintf(stderr, "default TX library: %s (reshuffled each time the playlist wraps)\n", DASHCDG_DEFAULT_LIBRARY_DIR);
 }
 
 static const struct dashcdg_tx_track *dashcdg_tx_current_track(void) {
@@ -1101,22 +1175,76 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     return 1;
 }
 
+static int dashcdg_tx_load_track_with_history_locked(size_t index, int apply_warmup, int record_history) {
+    if (!dashcdg_tx_load_track_locked(index, apply_warmup)) {
+        return 0;
+    }
+
+    if (record_history && !dashcdg_tx_history_push_locked(index)) {
+        fprintf(stderr, "failed to record TX track history\n");
+    }
+
+    return 1;
+}
+
 static int dashcdg_tx_load_relative_track_locked(int delta) {
     size_t next_index;
+    int wrapped = 0;
+    const char *current_title = NULL;
 
     if (g_tx_state.playlist.count == 0U) {
         return 0;
     }
 
     next_index = g_tx_state.playlist.current_index;
+    if (dashcdg_tx_current_track() != NULL) {
+        current_title = dashcdg_tx_current_track()->title;
+    }
     if (delta > 0) {
-        next_index = (next_index + (size_t) delta) % g_tx_state.playlist.count;
+        size_t raw_index = next_index + (size_t) delta;
+
+        wrapped = raw_index >= g_tx_state.playlist.count;
+        next_index = raw_index % g_tx_state.playlist.count;
     } else if (delta < 0) {
         size_t offset = (size_t) (-delta) % g_tx_state.playlist.count;
         next_index = (next_index + g_tx_state.playlist.count - offset) % g_tx_state.playlist.count;
     }
 
-    return dashcdg_tx_load_track_locked(next_index, 1);
+    if (wrapped && g_tx_state.playlist.count > 1U) {
+        dashcdg_tx_playlist_shuffle_avoiding_title(&g_tx_state.playlist, current_title);
+        next_index = 0U;
+    }
+
+    return dashcdg_tx_load_track_with_history_locked(next_index, 1, 1);
+}
+
+static int dashcdg_tx_load_history_delta_locked(int delta) {
+    size_t target_position;
+
+    if (g_tx_state.track_history_count == 0U) {
+        return 0;
+    }
+
+    target_position = g_tx_state.track_history_position;
+    if (delta < 0) {
+        if (target_position == 0U) {
+            return 0;
+        }
+        target_position--;
+    } else if (delta > 0) {
+        if (target_position + 1U >= g_tx_state.track_history_count) {
+            return dashcdg_tx_load_relative_track_locked(1);
+        }
+        target_position++;
+    } else {
+        return 0;
+    }
+
+    if (!dashcdg_tx_load_track_locked(g_tx_state.track_history[target_position], 1)) {
+        return 0;
+    }
+    g_tx_state.track_history_position = target_position;
+    return 1;
 }
 
 static int dashcdg_tx_send_packet(const uint8_t *packet, size_t packet_size) {
@@ -1304,7 +1432,10 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
 }
 
 static void dashcdg_tx_print_help(void) {
-    fprintf(stdout, "[tx] controls: p=play/pause, n=next, b=back, r=restart, f=force-broadcast, s=status, v=toggle preview, h=help, q=quit\n");
+    fprintf(
+            stdout,
+            "[tx] controls: p=play/pause, n or ]=next, b or [=back(history), r=restart, f=force-broadcast, s=status, v=toggle preview, h=help, q=quit\n"
+    );
     fflush(stdout);
 }
 
@@ -1317,13 +1448,15 @@ static int dashcdg_tx_handle_command(int command) {
             dashcdg_tx_set_paused_locked(!g_tx_state.paused, dashcdg_clock_now_ms());
             break;
         case 'n':
-            if (!dashcdg_tx_load_relative_track_locked(1)) {
+        case ']':
+            if (!dashcdg_tx_load_history_delta_locked(1)) {
                 fprintf(stdout, "[tx] no next track available\n");
             }
             break;
         case 'b':
-            if (!dashcdg_tx_load_relative_track_locked(-1)) {
-                fprintf(stdout, "[tx] no previous track available\n");
+        case '[':
+            if (!dashcdg_tx_load_history_delta_locked(-1)) {
+                fprintf(stdout, "[tx] no previous history track available\n");
             }
             break;
         case 'r':
@@ -1368,6 +1501,23 @@ static int dashcdg_tx_handle_command(int command) {
     return handled;
 }
 
+static int dashcdg_tx_parse_console_command(const char *line) {
+    if (line == NULL || line[0] == '\0' || line[0] == '\n') {
+        return 0;
+    }
+
+    if (line[0] == '\x1b' && line[1] == '[') {
+        if (line[2] == 'C') {
+            return ']';
+        }
+        if (line[2] == 'D') {
+            return '[';
+        }
+    }
+
+    return (unsigned char) line[0];
+}
+
 static void *dashcdg_tx_control_thread_main(void *unused) {
     char line[64];
 
@@ -1379,11 +1529,13 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
     pthread_mutex_unlock(&g_tx_state.mutex);
 
     while (!g_tx_state.shutdown_requested && fgets(line, sizeof(line), stdin) != NULL) {
-        if (line[0] == '\0' || line[0] == '\n') {
+        int command = dashcdg_tx_parse_console_command(line);
+
+        if (command == 0) {
             continue;
         }
-        if (!dashcdg_tx_handle_command((unsigned char) line[0])) {
-            fprintf(stdout, "[tx] unknown command '%c'\n", line[0]);
+        if (!dashcdg_tx_handle_command(command)) {
+            fprintf(stdout, "[tx] unknown command '%c'\n", command);
             dashcdg_tx_print_help();
         }
     }
@@ -1750,10 +1902,26 @@ static void dashcdg_tx_preview_keyboard(unsigned char key, int x, int y) {
     dashcdg_tx_handle_command((int) key);
 }
 
+static void dashcdg_tx_preview_special(int key, int x, int y) {
+    (void) x;
+    (void) y;
+
+    if (key == GLUT_KEY_RIGHT) {
+        dashcdg_tx_handle_command(']');
+    } else if (key == GLUT_KEY_LEFT) {
+        dashcdg_tx_handle_command('[');
+    }
+}
+
 static void dashcdg_tx_cleanup(void) {
     free(g_tx_state.asset_bytes);
     g_tx_state.asset_bytes = NULL;
     dashcdg_tx_free_live_media_locked();
+    free(g_tx_state.track_history);
+    g_tx_state.track_history = NULL;
+    g_tx_state.track_history_count = 0U;
+    g_tx_state.track_history_capacity = 0U;
+    g_tx_state.track_history_position = 0U;
     free(g_tx_state.chunk_seen);
     g_tx_state.chunk_seen = NULL;
     g_tx_state.chunk_count = 0;
@@ -1774,7 +1942,7 @@ static void dashcdg_tx_cleanup(void) {
 int dashcdg_desktop_tx_main(int argc, char **argv) {
     const char *endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
     const char *song_id = NULL;
-    const char *source_path = NULL;
+    const char *source_path = DASHCDG_DEFAULT_LIBRARY_DIR;
     const char *warmup_value = NULL;
     int port = DASHCDG_DEFAULT_NETWORK_PORT;
     int positional_index = 0;
@@ -1792,6 +1960,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
     g_tx_state.warmup_ms = 3000;
+    srand((unsigned int) time(NULL));
     pthread_mutex_init(&g_tx_state.mutex, NULL);
     dashcdg_cdg_reader_init(&g_tx_state.reader);
 
@@ -1823,7 +1992,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     remaining_positionals = positional_index - positionals_consumed;
-    if (remaining_positionals <= 0 || remaining_positionals > 3) {
+    if (remaining_positionals > 3) {
         dashcdg_tx_print_usage(argv[0]);
         dashcdg_tx_cleanup();
         return 1;
@@ -1835,7 +2004,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         return 1;
     }
 
-    if (remaining_positionals == 1) {
+    if (remaining_positionals == 0) {
+        source_path = DASHCDG_DEFAULT_LIBRARY_DIR;
+    } else if (remaining_positionals == 1) {
         source_path = positionals[positionals_consumed];
     } else if (remaining_positionals == 2) {
         if (dashcdg_tx_is_number(positionals[positionals_consumed + 1])) {
@@ -1976,7 +2147,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     g_tx_state.sequence = 1;
-    if (!dashcdg_tx_load_track_locked(0, 1)) {
+    if (!dashcdg_tx_load_track_with_history_locked(0, 1, 1)) {
         dashcdg_tx_cleanup();
         return 1;
     }
@@ -2023,6 +2194,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     glutDisplayFunc(dashcdg_tx_preview_display);
     glutReshapeFunc(dashcdg_tx_preview_resize);
     glutKeyboardFunc(dashcdg_tx_preview_keyboard);
+    glutSpecialFunc(dashcdg_tx_preview_special);
     glutMainLoop();
 
     g_tx_state.shutdown_requested = 1;

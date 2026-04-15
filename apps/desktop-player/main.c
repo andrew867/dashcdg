@@ -692,7 +692,7 @@ int main(int argc, char **argv) {
 
     if (!dashcdg_parse_args(&g_playlist, argc, argv)) {
         fprintf(stderr, "usage: %s [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]\n", argv[0]);
-        fprintf(stderr, "   or: %s tx [--display] [endpoint-address] [port] [song-id] <file|folder> [warmup-ms]\n", argv[0]);
+        fprintf(stderr, "   or: %s tx [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n", argv[0]);
         fprintf(stderr, "   or: %s rx [endpoint-address] [port]\n", argv[0]);
         fprintf(
                 stderr,
@@ -700,6 +700,7 @@ int main(int argc, char **argv) {
                 DASHCDG_DEFAULT_NETWORK_ADDRESS,
                 DASHCDG_DEFAULT_NETWORK_PORT
         );
+        fprintf(stderr, "tx defaults to the folder '%s' when no file or folder is provided.\n", DASHCDG_DEFAULT_LIBRARY_DIR);
         fprintf(stderr, "with no path, the default folder '%s' is scanned.\n", DASHCDG_DEFAULT_LIBRARY_DIR);
         fprintf(stderr, "single-file opens accept .cdg, .mp3, or a stem and auto-pair sibling media when present.\n");
         return 1;
