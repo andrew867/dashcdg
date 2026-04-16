@@ -270,14 +270,28 @@ int dashcdg_win32_gdi_view_present_rgba(
     );
 
     if (show_hud && hud_line_a != NULL) {
+        int len_a;
+        int len_b;
+        size_t i;
+
+        len_a = 0;
+        for (i = 0; i < 512U && hud_line_a[i] != '\0'; ++i) {
+            len_a++;
+        }
+        len_b = 0;
+        if (hud_line_b != NULL) {
+            for (i = 0; i < 512U && hud_line_b[i] != '\0'; ++i) {
+                len_b++;
+            }
+        }
         HFONT font = (HFONT) GetStockObject(ANSI_FIXED_FONT);
         HFONT old = (HFONT) SelectObject(hdc, font);
         SetBkMode(hdc, OPAQUE);
         SetBkColor(hdc, RGB(0, 0, 0));
         SetTextColor(hdc, RGB(120, 240, 120));
-        TextOutA(hdc, 8, 8, hud_line_a, (int) strlen(hud_line_a));
+        TextOutA(hdc, 8, 8, hud_line_a, len_a);
         if (hud_line_b != NULL) {
-            TextOutA(hdc, 8, 24, hud_line_b, (int) strlen(hud_line_b));
+            TextOutA(hdc, 8, 24, hud_line_b, len_b);
         }
         SelectObject(hdc, old);
     }

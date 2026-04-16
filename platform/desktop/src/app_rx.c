@@ -41,6 +41,20 @@
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
 
+/*
+ * MinGW32 builds use -D__USE_MINGW_ANSI_STDIO=0 (see Makefile), so printf-style
+ * functions resolve to Windows XP msvcrt.dll. That CRT does not support C99
+ * %zu / %ll length modifiers reliably; using them corrupts the va_list and can
+ * fault inside vsnprintf (observed when toggling the on-screen HUD).
+ */
+#ifdef _WIN32
+#define DASHCDG_RX_PRIu64 "I64u"
+#define DASHCDG_RX_PRIi64 "I64d"
+#else
+#define DASHCDG_RX_PRIu64 "llu"
+#define DASHCDG_RX_PRIi64 "lld"
+#endif
+
 #if DASHCDG_RX_HAVE_GLUT
 #ifdef _WIN32
 #include "dashcdg/win32_gdi_view.h"
@@ -707,6 +721,23 @@ static void receiver_state_reset(struct receiver_state *state) {
     dashcdg_cdg_state_init(&state->live_state);
 }
 
+static uint64_t dashcdg_rx_ms_since_last_datagram(uint64_t local_now_ms, uint64_t last_datagram_local_ms) {
+    int64_t d;
+
+    if (last_datagram_local_ms == 0U) {
+        return 0U;
+    }
+    d = (int64_t) local_now_ms - (int64_t) last_datagram_local_ms;
+    if (d < 0) {
+        /*
+         * QueryPerformanceCounter can step backward on some older chipsets / ACPI
+         * transitions; treat as no elapsed time so we do not flash RECONNECTING.
+         */
+        return 0U;
+    }
+    return (uint64_t) d;
+}
+
 static int receiver_state_prepare_asset(
         struct receiver_state *state,
         uint32_t asset_size,
@@ -761,6 +792,17 @@ static void receiver_state_try_finalize(struct receiver_state *state) {
     state->last_progress_local_ms = dashcdg_clock_now_ms();
     fprintf(stdout, "[rx] asset ready for %s\n", state->song_id[0] == '\0' ? "<unknown>" : state->song_id);
     fflush(stdout);
+}
+
+static uint64_t dashcdg_rx_elapsed_ms_safe(uint64_t now_ms, uint64_t then_ms) {
+    if (then_ms == 0U) {
+        return 0U;
+    }
+    if (now_ms < then_ms) {
+        /* QueryPerformanceCounter glitch or thread reordering: treat as "just now". */
+        return 0U;
+    }
+    return now_ms - then_ms;
 }
 
 static uint32_t receiver_prefix_bytes_snapshot(const struct receiver_state *state) {
@@ -972,6 +1014,14 @@ static void dashcdg_rx_apply_loading_screen_locked(
     if (state == NULL) {
         return;
     }
+    /*
+     * TX may keep sending REPAIRING loading frames until first audio is on the wire
+     * even when CDG batches are still sitting in the jitter buffer on slow CPUs.
+     * Never repaint the loading bitmap over the live canvas once media packets exist.
+     */
+    if (state->v4_audio_chunk_packets > 0U || state->v4_video_delta_packets > 0U) {
+        return;
+    }
     if (state->live_packets_applied > 0U) {
         return;
     }
@@ -1168,7 +1218,10 @@ static void dashcdg_rx_format_audio_gate_locked(
         int64_t sender_now_ms = dashcdg_media_clock_remote_now(&state->sender_clock, (int64_t) local_now_ms);
 
         if (sender_now_ms < (int64_t) state->session_start_ms) {
-            snprintf(buffer, buffer_size, "wait-start %lldms",
+            snprintf(
+                    buffer,
+                    buffer_size,
+                    "wait-start %" DASHCDG_RX_PRIi64 "ms",
                     (long long) ((int64_t) state->session_start_ms - sender_now_ms));
         } else if (!g_audio_stream_started) {
             snprintf(buffer, buffer_size, "ready-to-start");
@@ -1197,9 +1250,19 @@ static void dashcdg_rx_format_render_gate_locked(
     } else if (state->asset_size == 0 || state->chunk_count == 0) {
         snprintf(buffer, buffer_size, "wait-announce");
     } else if (state->cdg_snapshots_applied > 0) {
-        snprintf(buffer, buffer_size, "live-snapshot %zu/%zu", state->received_chunks, state->chunk_count);
+        snprintf(
+                buffer,
+                buffer_size,
+                "live-snapshot %u/%u",
+                (unsigned int) state->received_chunks,
+                (unsigned int) state->chunk_count);
     } else {
-        snprintf(buffer, buffer_size, "wait-bootstrap %zu/%zu", state->received_chunks, state->chunk_count);
+        snprintf(
+                buffer,
+                buffer_size,
+                "wait-bootstrap %u/%u",
+                (unsigned int) state->received_chunks,
+                (unsigned int) state->chunk_count);
     }
 }
 
@@ -1962,16 +2025,9 @@ static void dashcdg_rx_print_status_locked(void) {
     char render_gate[64];
     int muted = g_audio != NULL ? dashcdg_desktop_audio_is_muted(g_audio) : g_audio_muted;
 
-    if (g_receiver.last_progress_local_ms > 0U) {
-        stall_ms = now_ms - g_receiver.last_progress_local_ms;
-    }
-
-    if (g_receiver.last_datagram_local_ms > 0U) {
-        since_last_dg_ms = now_ms - g_receiver.last_datagram_local_ms;
-    }
-    if (g_receiver.last_clock_update_local_ms > 0U) {
-        clock_hold_ms = now_ms - g_receiver.last_clock_update_local_ms;
-    }
+    stall_ms = dashcdg_rx_elapsed_ms_safe(now_ms, g_receiver.last_progress_local_ms);
+    since_last_dg_ms = dashcdg_rx_elapsed_ms_safe(now_ms, g_receiver.last_datagram_local_ms);
+    clock_hold_ms = dashcdg_rx_elapsed_ms_safe(now_ms, g_receiver.last_clock_update_local_ms);
 
     dashcdg_rx_collect_fec_group_stats(
             g_receiver.audio_fec_groups,
@@ -1990,7 +2046,23 @@ static void dashcdg_rx_print_status_locked(void) {
 
     fprintf(
             stdout,
-            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu snap=%llu/%llu fec=%llu/%llu/%llu ptp=%llu/%llu/%llu/%llu v4=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | repair aud=%llu live=%llu fail=%llu grp=%zu/%zu parity=%zu/%zu hot=%zu/%zu | audio buffered=%ums decode_fail=%llu queue_ovf=%llu started=%d muted=%d gate=%s render=%s | sync off=%lldms path=%lldms step=%lld/%lld peak=%lld/%lld upd=%llu ptp_ok=%llu fallback=%llu hold=%llums | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d proto=%u prof=%u codec=%u\n",
+            "[rx] net: dg=%" DASHCDG_RX_PRIu64 " bytes=%" DASHCDG_RX_PRIu64 " parse_fail=%" DASHCDG_RX_PRIu64
+            " | pkt ann=%" DASHCDG_RX_PRIu64 " ch=%" DASHCDG_RX_PRIu64 " bc=%" DASHCDG_RX_PRIu64 " aud=%" DASHCDG_RX_PRIu64
+            " live=%" DASHCDG_RX_PRIu64 " snap=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " fec=%" DASHCDG_RX_PRIu64
+            "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " ptp=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
+            "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " v4=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
+            "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
+            "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " unk=%" DASHCDG_RX_PRIu64 " | asset prefix_bytes=%u/%u"
+            " chunks=%u/%u rcv=%u dup=%" DASHCDG_RX_PRIu64 " written=%" DASHCDG_RX_PRIu64 " live_applied=%" DASHCDG_RX_PRIu64
+            " | jitter aud=%u skip=%" DASHCDG_RX_PRIu64 " drop=%" DASHCDG_RX_PRIu64 " reord=%" DASHCDG_RX_PRIu64
+            " live=%u skip=%" DASHCDG_RX_PRIu64 " drop=%" DASHCDG_RX_PRIu64 " reord=%" DASHCDG_RX_PRIu64
+            " | repair aud=%" DASHCDG_RX_PRIu64 " live=%" DASHCDG_RX_PRIu64 " fail=%" DASHCDG_RX_PRIu64
+            " grp=%u/%u parity=%u/%u hot=%u/%u | audio buffered=%ums decode_fail=%" DASHCDG_RX_PRIu64
+            " queue_ovf=%" DASHCDG_RX_PRIu64 " started=%d muted=%d gate=%s render=%s | sync off=%" DASHCDG_RX_PRIi64
+            "ms path=%" DASHCDG_RX_PRIi64 "ms step=%" DASHCDG_RX_PRIi64 "/%" DASHCDG_RX_PRIi64 " peak=%" DASHCDG_RX_PRIi64
+            "/%" DASHCDG_RX_PRIi64 " upd=%" DASHCDG_RX_PRIu64 " ptp_ok=%" DASHCDG_RX_PRIu64 " fallback=%" DASHCDG_RX_PRIu64
+            " hold=%" DASHCDG_RX_PRIu64 "ms | since_last_dg=%" DASHCDG_RX_PRIu64 "ms stall_since_progress=%" DASHCDG_RX_PRIu64
+            "ms ready=%d clock=%d pause=%d proto=%u prof=%u codec=%u\n",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.bytes_received,
             (unsigned long long) g_receiver.parse_failures,
@@ -2019,29 +2091,29 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.unknown_packets,
             (unsigned int) prefix_bytes,
             (unsigned int) g_receiver.asset_size,
-            g_receiver.contiguous_prefix_chunks,
-            g_receiver.chunk_count,
-            g_receiver.received_chunks,
+            (unsigned int) g_receiver.contiguous_prefix_chunks,
+            (unsigned int) g_receiver.chunk_count,
+            (unsigned int) g_receiver.received_chunks,
             (unsigned long long) g_receiver.duplicate_chunks,
             (unsigned long long) g_receiver.asset_bytes_written,
             (unsigned long long) g_receiver.live_packets_applied,
-            pending_audio,
+            (unsigned int) pending_audio,
             (unsigned long long) g_receiver.audio_missing_skips,
             (unsigned long long) g_receiver.audio_jitter.pending_drops,
             (unsigned long long) g_receiver.audio_jitter.reordered_packets,
-            pending_cdg,
+            (unsigned int) pending_cdg,
             (unsigned long long) g_receiver.live_missing_skips,
             (unsigned long long) g_receiver.cdg_batch_jitter.pending_drops,
             (unsigned long long) g_receiver.cdg_batch_jitter.reordered_batches,
             (unsigned long long) g_receiver.fec_audio_recovered,
             (unsigned long long) g_receiver.fec_cdg_recovered,
             (unsigned long long) g_receiver.fec_recovery_failures,
-            tracked_audio_groups,
-            tracked_cdg_groups,
-            audio_groups_with_parity,
-            cdg_groups_with_parity,
-            audio_repairable,
-            cdg_repairable,
+            (unsigned int) tracked_audio_groups,
+            (unsigned int) tracked_cdg_groups,
+            (unsigned int) audio_groups_with_parity,
+            (unsigned int) cdg_groups_with_parity,
+            (unsigned int) audio_repairable,
+            (unsigned int) cdg_repairable,
             (unsigned int) audio_buffered_ms,
             (unsigned long long) g_receiver.audio_decode_failures,
             (unsigned long long) g_receiver.audio_queue_overflows,
@@ -2795,65 +2867,108 @@ static void dashcdg_rx_fill_hud_lines_locked(
     char audio_gate[64];
     char render_gate[64];
     int muted = g_audio != NULL ? dashcdg_desktop_audio_is_muted(g_audio) : g_audio_muted;
+    uint32_t audio_buf_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+
+    if (hud_line_a == NULL || hud_line_a_size == 0U || hud_line_b == NULL || hud_line_b_size == 0U) {
+        return;
+    }
+    hud_line_a[0] = '\0';
+    hud_line_b[0] = '\0';
+    audio_gate[0] = '\0';
+    render_gate[0] = '\0';
 
     pending_audio = dashcdg_audio_jitter_occupied_count(&g_receiver.audio_jitter);
     pending_cdg = dashcdg_rx_pending_cdg_count(&g_receiver);
     dashcdg_rx_collect_fec_group_stats(g_receiver.audio_fec_groups, NULL, NULL, &audio_repairable);
     dashcdg_rx_collect_fec_group_stats(g_receiver.cdg_fec_groups, NULL, NULL, &cdg_repairable);
     hud_prefix_bytes = receiver_prefix_bytes_snapshot(&g_receiver);
-    if (g_receiver.last_datagram_local_ms > 0U) {
-        hud_since_last_dg_ms = local_now_ms - g_receiver.last_datagram_local_ms;
-    }
-    if (g_receiver.last_progress_local_ms > 0U) {
-        hud_stall_ms = local_now_ms - g_receiver.last_progress_local_ms;
-    }
-    if (g_receiver.last_clock_update_local_ms > 0U) {
-        clock_hold_ms = local_now_ms - g_receiver.last_clock_update_local_ms;
-    }
+    hud_since_last_dg_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, g_receiver.last_datagram_local_ms);
+    hud_stall_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, g_receiver.last_progress_local_ms);
+    clock_hold_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, g_receiver.last_clock_update_local_ms);
+
     dashcdg_rx_format_audio_gate_locked(&g_receiver, local_now_ms, audio_gate, sizeof(audio_gate));
     dashcdg_rx_format_render_gate_locked(&g_receiver, render_gate, sizeof(render_gate));
 
-    snprintf(
-            hud_line_a,
-            hud_line_a_size,
-            "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu snap:%llu/%llu fec:%llu/%llu rec:%llu/%llu ptp:%llu/%llu",
-            (unsigned long long) g_receiver.datagrams_received,
-            (unsigned long long) g_receiver.parse_failures,
-            (unsigned long long) g_receiver.announce_packets,
-            (unsigned long long) g_receiver.asset_chunk_packets,
-            (unsigned long long) g_receiver.clock_beacon_packets,
-            (unsigned long long) g_receiver.audio_packets,
-            (unsigned long long) g_receiver.cdg_batch_packets,
-            (unsigned long long) g_receiver.cdg_snapshot_packets,
-            (unsigned long long) g_receiver.cdg_snapshots_applied,
-            (unsigned long long) g_receiver.fec_audio_packets,
-            (unsigned long long) g_receiver.fec_cdg_packets,
-            (unsigned long long) g_receiver.fec_audio_recovered,
-            (unsigned long long) g_receiver.fec_cdg_recovered,
-            (unsigned long long) g_receiver.ptp_delay_req_packets,
-            (unsigned long long) g_receiver.ptp_delay_resp_packets
-    );
-    snprintf(
-            hud_line_b,
-            hud_line_b_size,
-            "prefix:%u/%u pend:%zu/%zu hot:%zu/%zu mute:%s gate:%s render:%s | off:%lld path:%lld step:%lld/%lld hold:%llums dg:%llums stall:%llums",
-            (unsigned int) hud_prefix_bytes,
-            (unsigned int) g_receiver.asset_size,
-            pending_audio,
-            pending_cdg,
-            audio_repairable,
-            cdg_repairable,
-            muted ? "on" : "off",
-            audio_gate,
-            render_gate,
-            (long long) g_receiver.sender_offset_ms,
-            (long long) g_receiver.sender_path_delay_ms,
-            (long long) g_receiver.sender_offset_step_ms,
-            (long long) g_receiver.sender_path_step_ms,
-            (unsigned long long) clock_hold_ms,
-            (unsigned long long) hud_since_last_dg_ms,
-            (unsigned long long) hud_stall_ms
-    );
+    if (g_receiver.announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4) {
+        snprintf(
+                hud_line_a,
+                hud_line_a_size,
+                "v4 dg:%" DASHCDG_RX_PRIu64 " parse:%" DASHCDG_RX_PRIu64 " si:%" DASHCDG_RX_PRIu64
+                " a:%" DASHCDG_RX_PRIu64 " v:%" DASHCDG_RX_PRIu64 " live:%" DASHCDG_RX_PRIu64
+                " fec:%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64,
+                (unsigned long long) g_receiver.datagrams_received,
+                (unsigned long long) g_receiver.parse_failures,
+                (unsigned long long) g_receiver.v4_session_info_packets,
+                (unsigned long long) g_receiver.v4_audio_chunk_packets,
+                (unsigned long long) g_receiver.v4_video_delta_packets,
+                (unsigned long long) g_receiver.live_packets_applied,
+                (unsigned long long) g_receiver.fec_audio_recovered,
+                (unsigned long long) g_receiver.fec_cdg_recovered
+        );
+        snprintf(
+                hud_line_b,
+                hud_line_b_size,
+                "c%u p%u buf:%ums pend:%u/%u hot:%u/%u mute:%s | %.20s | %.20s"
+                " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%" DASHCDG_RX_PRIu64
+                "ms dg:%" DASHCDG_RX_PRIu64 "ms st:%" DASHCDG_RX_PRIu64 "ms pre:%u/%u",
+                (unsigned int) g_receiver.announced_audio_codec_id,
+                (unsigned int) g_receiver.announced_audio_profile_id,
+                (unsigned int) audio_buf_ms,
+                (unsigned int) pending_audio,
+                (unsigned int) pending_cdg,
+                (unsigned int) audio_repairable,
+                (unsigned int) cdg_repairable,
+                muted ? "on" : "off",
+                audio_gate,
+                render_gate,
+                (long long) g_receiver.sender_offset_ms,
+                (long long) g_receiver.sender_path_delay_ms,
+                (unsigned long long) clock_hold_ms,
+                (unsigned long long) hud_since_last_dg_ms,
+                (unsigned long long) hud_stall_ms,
+                (unsigned int) hud_prefix_bytes,
+                (unsigned int) g_receiver.asset_size
+        );
+    } else {
+        snprintf(
+                hud_line_a,
+                hud_line_a_size,
+                "v3 dg:%" DASHCDG_RX_PRIu64 " parse:%" DASHCDG_RX_PRIu64 " ann:%" DASHCDG_RX_PRIu64
+                " ch:%" DASHCDG_RX_PRIu64 " aud:%" DASHCDG_RX_PRIu64 " live:%" DASHCDG_RX_PRIu64
+                " snap:%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64,
+                (unsigned long long) g_receiver.datagrams_received,
+                (unsigned long long) g_receiver.parse_failures,
+                (unsigned long long) g_receiver.announce_packets,
+                (unsigned long long) g_receiver.asset_chunk_packets,
+                (unsigned long long) g_receiver.audio_packets,
+                (unsigned long long) g_receiver.cdg_batch_packets,
+                (unsigned long long) g_receiver.cdg_snapshot_packets,
+                (unsigned long long) g_receiver.cdg_snapshots_applied
+        );
+        snprintf(
+                hud_line_b,
+                hud_line_b_size,
+                "pre:%u/%u pend:%u/%u hot:%u/%u mute:%s | %.20s | %.20s"
+                " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%" DASHCDG_RX_PRIu64
+                "ms dg:%" DASHCDG_RX_PRIu64 "ms st:%" DASHCDG_RX_PRIu64 "ms",
+                (unsigned int) hud_prefix_bytes,
+                (unsigned int) g_receiver.asset_size,
+                (unsigned int) pending_audio,
+                (unsigned int) pending_cdg,
+                (unsigned int) audio_repairable,
+                (unsigned int) cdg_repairable,
+                muted ? "on" : "off",
+                audio_gate,
+                render_gate,
+                (long long) g_receiver.sender_offset_ms,
+                (long long) g_receiver.sender_path_delay_ms,
+                (unsigned long long) clock_hold_ms,
+                (unsigned long long) hud_since_last_dg_ms,
+                (unsigned long long) hud_stall_ms
+        );
+    }
+    hud_line_a[hud_line_a_size - 1U] = '\0';
+    hud_line_b[hud_line_b_size - 1U] = '\0';
 }
 
 static int dashcdg_rx_claim_audio_start_locked(void) {
@@ -2902,7 +3017,8 @@ static void display(void) {
     pthread_mutex_lock(&g_receiver.mutex);
     if (g_receiver.last_datagram_local_ms == 0U) {
         show_connecting = 1;
-    } else if (local_now_ms - g_receiver.last_datagram_local_ms >= DASHCDG_STREAM_LOSS_CONNECTING_MS) {
+    } else if (dashcdg_rx_elapsed_ms_safe(local_now_ms, g_receiver.last_datagram_local_ms) >=
+            DASHCDG_STREAM_LOSS_CONNECTING_MS) {
         show_connecting = 1;
         reconnecting = 1;
     }
@@ -3067,7 +3183,8 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
         pthread_mutex_lock(&g_receiver.mutex);
         if (g_receiver.last_datagram_local_ms == 0U) {
             show_connecting = 1;
-        } else if (local_now_ms - g_receiver.last_datagram_local_ms >= DASHCDG_STREAM_LOSS_CONNECTING_MS) {
+        } else if (dashcdg_rx_elapsed_ms_safe(local_now_ms, g_receiver.last_datagram_local_ms) >=
+                DASHCDG_STREAM_LOSS_CONNECTING_MS) {
             show_connecting = 1;
             reconnecting = 1;
         }
