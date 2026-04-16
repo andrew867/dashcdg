@@ -19,7 +19,7 @@ Built from `platform/desktop/src/` with shared core/proto libs.
 | `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Decodes Opus, AMR-WB/NB, NB-IMA, EVRC, QCELP-13k, or SBC per **`v4_session_info`** / chunk `codec_id`; **`--help`** documents behaviour. |
 | `desktop-gdi-rx.exe` | GDI-only receiver link | No GL imports. Opus + PortAudio. |
 | `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use; default v4 codec **sbc-like** (NB-IMA). |
-| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + PortAudio; **no Opus** (stub); NB-IMA + other narrowband ids when linked. |
+| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + **WinMM** (`waveOut`); **no Opus** (stub); NB-IMA + other narrowband ids when linked. |
 | `desktop-player.exe` | Local player + `tx` / `rx` shims | Full GL + Win32 GDI code paths: `tx` preview on by default (`--headless` to disable); `rx` same GL→GDI fallback as `desktop-rx`. |
 
 Implementation pointers:
@@ -125,6 +125,10 @@ Documented in detail in [`v4-audio-codecs.md`](v4-audio-codecs.md):
 
 - [`audio-codec-modules.md`](audio-codec-modules.md) — **GL/GDI-style** optional `audio_modules/*` backends + vendoring script for every linked codec repo
 - [`v4-audio-codecs.md`](v4-audio-codecs.md) — wire IDs, fixed-point narrowband, MCU portability
+- [`v4-display-audio-sync.md`](v4-display-audio-sync.md) — TX preview delay vs RX playout (normative for future work)
+- [`v4-network-stats-and-adaptation.md`](v4-network-stats-and-adaptation.md) — stats / adaptation design (wire TBD)
+- [`vendored-opus-portaudio-windows.md`](vendored-opus-portaudio-windows.md) — vendored libopus / PortAudio builds (retro / MCU roadmap)
+- [`../test/v4-network-observability-validation.md`](../test/v4-network-observability-validation.md) — future QA checklist
 - [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md) — PE audit, DLL lists, retro profile
 - [`win32-gdi-view-backend.md`](win32-gdi-view-backend.md) — GDI backend behavior
 - [`../architecture/desktop-streaming.md`](../architecture/desktop-streaming.md) — end-to-end TX/RX + render paths

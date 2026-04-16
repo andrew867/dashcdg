@@ -4,7 +4,11 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#if defined(__has_include)
+#if defined(DASHCDG_DESKTOP_WIN32_WAVEOUT) && (DASHCDG_DESKTOP_WIN32_WAVEOUT)
+#undef DASHCDG_HAVE_PORTAUDIO
+#define DASHCDG_HAVE_PORTAUDIO 0
+typedef void PaStream;
+#elif defined(__has_include)
 #if __has_include(<portaudio.h>)
 #include <portaudio.h>
 #define DASHCDG_HAVE_PORTAUDIO 1
@@ -34,6 +38,7 @@ struct dashcdg_desktop_audio {
     mp3dec_file_info_t file_info;
     mp3dec_ex_t stream_decoder;
     PaStream *stream;
+    void *audio_io_ctx;
     pthread_t thread;
     int timestamp_ms;
     int seek_to_sample;

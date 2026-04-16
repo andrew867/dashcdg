@@ -18,7 +18,7 @@ payload (see [v4-audio-codecs.md](v4-audio-codecs.md)).
 | Module directory | Wire id / role (target) | Upstream (clone / reference) | Default strategy |
 | ---------------- | ------------------------ | ---------------------------- | ---------------- |
 | `audio_modules/nb_ima/` | v4 ids **2–7** baseline; id **2** canonical name `sbc-like` | **First-party** — `core/include/dashcdg/nb_ima_codec.h`, `core/src/nb_ima_codec.c` | Shipped |
-| `audio_modules/opus_lib/` | v4 id **1** | **libopus** via existing `platform/desktop/src/opus_codec.c` + system `-lopus` | Shipped (desktop) |
+| `audio_modules/opus/` | v4 id **1** | **libopus** via `platform/desktop/src/opus_codec.c` + system `-lopus` (optional **`vendor/opus`** build — see [`vendored-opus-portaudio-windows.md`](vendored-opus-portaudio-windows.md)) | Shipped (desktop) |
 | `audio_modules/amr_pschatzmann/` | v4 ids **5** (NB), **6** (WB) when native | [pschatzmann/codec-amr](https://github.com/pschatzmann/codec-amr) — wraps 3GPP reference; [API docs](https://pschatzmann.github.io/codec-amr/html/index.html) | **Vendor copy** under `vendor/` + thin `dashcdg_amr_*.c` adapter; resolve [3GPP license ambiguity](https://github.com/pschatzmann/codec-amr) before product |
 | `audio_modules/evrc_arulk77/` | v4 id **4** when native | [arulk77/gpu.evrc](https://github.com/arulk77/gpu.evrc) | **Vendor copy** + adapter; compare with `evrc_maolin` for code quality |
 | `audio_modules/evrc_maolin/` | alternate / second opinion for id **4** | [maolin-cdzl/evrcc](https://github.com/maolin-cdzl/evrcc) | **Vendor copy** + adapter; pick **one** primary tree for product, keep other as research |
@@ -50,8 +50,12 @@ audio_modules/
     vendor/
   nb_ima/
     README.md               # pointer to core/ (single source of truth)
-  opus_lib/
-    README.md               # pointer to platform opus_codec + libopus
+  opus/
+    README.md               # platform opus_codec + system or vendored libopus
+    vendor/                 # optional: scripts/fetch_opus_portaudio_vendors.sh
+  portaudio/
+    README.md               # optional vendored host I/O (desktop; retro uses WinMM)
+    vendor/
 ```
 
 **Rule:** no hand-edited “mystery” copies — either **`vendor/`** is produced by

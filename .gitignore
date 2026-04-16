@@ -8,4 +8,7 @@ build/
 
 # Local clones / experiments (use scripts/fetch_audio_codec_vendors.sh into audio_modules/*/vendor/)
 third_party/
+# Optional large upstream clones (see scripts/fetch_opus_portaudio_vendors.sh)
+audio_modules/opus/vendor/
+audio_modules/portaudio/vendor/
 

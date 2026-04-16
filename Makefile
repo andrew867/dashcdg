@@ -81,16 +81,22 @@ endif
 endif
 WINDOWS_RUNTIME_DLLS := $(shell for pattern in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-WINDOWS_RUNTIME_DLLS := $(shell for pattern in libportaudio.dll libwinpthread-1.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
+WINDOWS_RUNTIME_DLLS := $(shell for pattern in libwinpthread-1.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
 endif
 else
 WINDOWS_RUNTIME_DLLS :=
 endif
-LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lopus -lpthread
+ifeq ($(WINDOWS_RETRO_BUNDLE),1)
+LDLIBS_DESKTOP_AUDIO := -lwinmm
+else
+LDLIBS_DESKTOP_AUDIO := -lportaudio
+endif
+LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) -lopus -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
 WINDOWS_GDI_LIBS := -lgdi32 -luser32
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-LDLIBS_DESKTOP_RETRO := -lportaudio -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_RETRO := -lwinmm -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+DESKTOP_AUDIO_CPPFLAGS := -DDASHCDG_DESKTOP_WIN32_WAVEOUT=1
 endif
 else
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread -lm
@@ -107,8 +113,8 @@ BIN_DIR := $(BUILD_DIR)/bin
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
 RX_GDI_BIN := $(BIN_DIR)/desktop-gdi-rx.exe
 TX_GDI_BIN := $(BIN_DIR)/desktop-gdi-tx.exe
-LDLIBS_DESKTOP_RX_GDI := -lportaudio -lopus -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
-LDLIBS_DESKTOP_TX_GDI := -lportaudio -lopus -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_RX_GDI := $(LDLIBS_DESKTOP_AUDIO) -lopus -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_TX_GDI := $(LDLIBS_DESKTOP_AUDIO) -lopus -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 RETRO_RX_BIN :=
 RETRO_TX_BIN :=
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
@@ -271,8 +277,10 @@ $(OBJ_DIR)/desktop_file_io.o: platform/desktop/src/file_io.c
 $(OBJ_DIR)/desktop_net_compat.o: platform/desktop/src/net_compat.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+DESKTOP_AUDIO_CPPFLAGS ?=
+
 $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DESKTOP_AUDIO_CPPFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_pcm_rate_convert.o: platform/desktop/src/pcm_rate_convert.c
 	$(CC) $(CFLAGS) -c -o $@ $<

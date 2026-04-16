@@ -3463,16 +3463,12 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 continue;
             }
 
-            if (copy_frames > 0U) {
-                dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
-            }
-
             pthread_mutex_lock(&g_tx_state.mutex);
             if (g_tx_state.audio_pipeline_generation != local_generation) {
                 pthread_mutex_unlock(&g_tx_state.mutex);
                 continue;
             }
-            frame.media_sequence = ++g_tx_state.audio_media_sequence;
+            frame.media_sequence = g_tx_state.audio_media_sequence + 1U;
             frame.group_id = (uint32_t) (frame_index / DASHCDG_AUDIO_GROUP_SIZE);
             frame.group_index = (uint8_t) (frame_index % DASHCDG_AUDIO_GROUP_SIZE);
             frame.frame_ms = DASHCDG_AUDIO_FRAME_MS;
@@ -3480,14 +3476,6 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             frame.codec_id = current_codec_id;
             frame.encoded_length = (uint16_t) encoded_length;
             frame.playback_ms = next_playback_ms;
-            g_tx_state.audio_frames_generated = frame_index + 1U;
-            g_tx_state.audio_playback_end_ms = frame.playback_ms + DASHCDG_AUDIO_FRAME_MS;
-            if (g_tx_state.audio_playback_end_ms > g_tx_state.duration_ms) {
-                g_tx_state.duration_ms = g_tx_state.audio_playback_end_ms;
-            }
-            if (reached_eof && fifo_frames == 0U) {
-                g_tx_state.audio_producer_finished = 1;
-            }
             pthread_mutex_unlock(&g_tx_state.mutex);
 
             if (!dashcdg_runtime_queue_push(&g_tx_state.audio_ready_queue, &frame, now_ms, 0)) {
@@ -3497,6 +3485,24 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 dashcdg_sleep_ms(5);
                 continue;
             }
+
+            if (copy_frames > 0U) {
+                dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
+            }
+
+            pthread_mutex_lock(&g_tx_state.mutex);
+            if (g_tx_state.audio_pipeline_generation == local_generation) {
+                g_tx_state.audio_media_sequence = frame.media_sequence;
+                g_tx_state.audio_frames_generated = frame_index + 1U;
+                g_tx_state.audio_playback_end_ms = frame.playback_ms + DASHCDG_AUDIO_FRAME_MS;
+                if (g_tx_state.audio_playback_end_ms > g_tx_state.duration_ms) {
+                    g_tx_state.duration_ms = g_tx_state.audio_playback_end_ms;
+                }
+                if (reached_eof && fifo_frames == 0U) {
+                    g_tx_state.audio_producer_finished = 1;
+                }
+            }
+            pthread_mutex_unlock(&g_tx_state.mutex);
 
             next_playback_ms += DASHCDG_AUDIO_FRAME_MS;
             frame_index++;
