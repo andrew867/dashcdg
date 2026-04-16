@@ -63,6 +63,7 @@ struct dashcdg_desktop_audio *dashcdg_desktop_audio_new(void);
 void dashcdg_desktop_audio_free(struct dashcdg_desktop_audio *audio);
 int dashcdg_desktop_audio_load_file(struct dashcdg_desktop_audio *audio, const char *path);
 int dashcdg_desktop_audio_open_mp3_stream(struct dashcdg_desktop_audio *audio, const char *path);
+int dashcdg_desktop_audio_seek_mp3_stream(struct dashcdg_desktop_audio *audio, uint32_t seek_ms);
 void dashcdg_desktop_audio_close_mp3_stream(struct dashcdg_desktop_audio *audio);
 size_t dashcdg_desktop_audio_read_mp3_frames(
         struct dashcdg_desktop_audio *audio,

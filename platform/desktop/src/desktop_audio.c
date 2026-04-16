@@ -302,11 +302,11 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
      */
     if (audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
         host_latency_s = dev_info->defaultHighOutputLatency;
-        if (host_latency_s < 0.08) {
-            host_latency_s = 0.08;
+        if (host_latency_s < 0.12) {
+            host_latency_s = 0.12;
         }
-        if (host_latency_s > 0.25) {
-            host_latency_s = 0.25;
+        if (host_latency_s > 0.28) {
+            host_latency_s = 0.28;
         }
     } else {
         host_latency_s = dev_info->defaultLowOutputLatency;
@@ -737,7 +737,7 @@ int dashcdg_desktop_audio_open_mp3_stream(struct dashcdg_desktop_audio *audio, c
     }
 
     dashcdg_desktop_audio_close_mp3_stream(audio);
-    err = mp3dec_ex_open(&audio->stream_decoder, path, MP3D_DO_NOT_SCAN);
+    err = mp3dec_ex_open(&audio->stream_decoder, path, MP3D_DO_NOT_SCAN | MP3D_SEEK_TO_SAMPLE);
     if (err < 0) {
         fprintf(stderr, "failed to open streaming MP3 decoder: %d\n", err);
         memset(&audio->stream_decoder, 0, sizeof(audio->stream_decoder));
@@ -745,6 +745,31 @@ int dashcdg_desktop_audio_open_mp3_stream(struct dashcdg_desktop_audio *audio, c
     }
 
     audio->stream_decoder_open = 1;
+    return 1;
+}
+
+int dashcdg_desktop_audio_seek_mp3_stream(struct dashcdg_desktop_audio *audio, uint32_t seek_ms) {
+    uint64_t pcm_pos;
+    int channels;
+    uint32_t hz;
+
+    if (audio == NULL || !audio->stream_decoder_open) {
+        return 0;
+    }
+    if ((audio->stream_decoder.flags & MP3D_SEEK_TO_SAMPLE) == 0) {
+        return 0;
+    }
+    channels = audio->stream_decoder.info.channels;
+    hz = (uint32_t) audio->stream_decoder.info.hz;
+    if (channels <= 0 || hz == 0) {
+        return 0;
+    }
+    /* minimp3 sample index is total interleaved PCM samples (all channels). */
+    pcm_pos = (uint64_t) seek_ms * (uint64_t) hz / 1000ULL;
+    pcm_pos *= (uint64_t) channels;
+    if (mp3dec_ex_seek(&audio->stream_decoder, pcm_pos) != 0) {
+        return 0;
+    }
     return 1;
 }
 

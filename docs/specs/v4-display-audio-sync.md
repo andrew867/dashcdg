@@ -31,6 +31,10 @@ On **TX**, local **preview** (GDI/GL) historically tracks **file/encode position
 
 Without compensating, **TX preview is early** relative to what clients hear and see.
 
+## TX codec cycle (TTY `c`) and the media timeline
+
+Hot-swapping the v4 audio codec **reopens** the MP3 decoder (new encoder state). The decoder must **seek** to the same **logical playback position** as `dashcdg_tx_current_playback_ms_locked()` so each emitted frame’s **`playback_ms`** stays on the **session wall-clock timeline**. Otherwise audio packet timestamps fall far behind CDG/video and v4 send scheduling (`playback_deadline` in `dashcdg_tx_tick_v4_locked`) can stop forwarding audio until a **full track load** (next/back), which resets anchors. Implementation: `dashcdg_desktop_audio_seek_mp3_stream()` after reopen; **`next_playback_ms`** / **`frame_index`** align to the seek position.
+
 ## Target behaviour (to implement)
 
 1. **RX (all platforms)**  

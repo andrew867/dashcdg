@@ -3259,7 +3259,34 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                             &encoder_ready,
                             current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS
                     )) {
+                    uint64_t resume_ms;
+                    uint64_t cap_ms;
+
                     reached_eof = 0;
+                    /*
+                     * Codec hot-swap (TTY 'c') reopens the MP3 from the start. Without seeking, encoded
+                     * frames use playback_ms 0,20,... while v4 send scheduling uses wall-clock playback
+                     * (minutes into the show). That desynchronizes audio vs CDG and can stall v4 audio
+                     * sends until a full track reload. Align decoder + next_playback_ms to the current
+                     * session timeline (same idea as next/prev track resetting anchors).
+                     */
+                    pthread_mutex_lock(&g_tx_state.mutex);
+                    resume_ms = dashcdg_tx_current_playback_ms_locked(dashcdg_clock_now_ms());
+                    cap_ms = g_tx_state.duration_ms;
+                    pthread_mutex_unlock(&g_tx_state.mutex);
+                    if (cap_ms > 0U && resume_ms > cap_ms) {
+                        resume_ms = cap_ms;
+                    }
+                    resume_ms = (resume_ms / (uint64_t) DASHCDG_AUDIO_FRAME_MS) * (uint64_t) DASHCDG_AUDIO_FRAME_MS;
+                    if (!dashcdg_desktop_audio_seek_mp3_stream(source, (uint32_t) resume_ms)) {
+                        fprintf(
+                                stderr,
+                                "[tx] warning: MP3 seek to %llu ms after codec/pipeline change failed\n",
+                                (unsigned long long) resume_ms
+                        );
+                    }
+                    next_playback_ms = resume_ms;
+                    frame_index = resume_ms / (uint64_t) DASHCDG_AUDIO_FRAME_MS;
                 } else {
                     if (amr_wb_encoder != NULL) {
                         dashcdg_amr_wb_encoder_destroy(amr_wb_encoder);
