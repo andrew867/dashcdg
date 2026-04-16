@@ -5,7 +5,7 @@
 #   1. windows-x64          — mingw64, default PE, GL+GDI RX + TX + player
 #   2. windows-x86          — mingw32 i686, default PE, GL+GDI RX + TX + player
 #   3. windows-x86-legacy-p3 — mingw32 + WINDOWS_LEGACY_TARGET=1 (XP PE + -march=pentium3)
-#   4. windows-x86-retro    — mingw32 + WINDOWS_RETRO_BUNDLE=1 (Win2000 PE, pentium2,
+#   4. windows-x86-retro    — mingw32 + WINDOWS_RETRO_BUNDLE=1 (Win2000 PE, pentium3,
 #                             GDI+SBC-only RX/TX; no Opus / no GL stack)
 #
 # Standard folders ship distinct EXEs: headless desktop-tx, GL desktop-rx, GDI RX/TX,

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Clone optional audio codec upstreams into audio_modules/*/vendor/
-# (gitignored). Review audio_modules/NOTICES.md before product use.
+# Optional: clone codec trees into audio_modules/*/vendor/ (see audio_modules/README.md).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -19,18 +18,15 @@ clone_ref() {
 }
 
 clone_ref "codec-amr" "https://github.com/pschatzmann/codec-amr.git" \
-  "$ROOT/audio_modules/amr_pschatzmann/vendor/codec-amr"
-
-clone_ref "gpu.evrc" "https://github.com/arulk77/gpu.evrc.git" \
-  "$ROOT/audio_modules/evrc_arulk77/vendor/gpu.evrc"
+  "$ROOT/audio_modules/amr/vendor/codec-amr"
 
 clone_ref "evrcc" "https://github.com/maolin-cdzl/evrcc.git" \
-  "$ROOT/audio_modules/evrc_maolin/vendor/evrcc"
+  "$ROOT/audio_modules/evr/vendor/evrcc"
 
 clone_ref "celp13k" "https://github.com/RupW/celp13k.git" \
-  "$ROOT/audio_modules/qcelp_rupw/vendor/celp13k"
+  "$ROOT/audio_modules/qcelp/vendor/celp13k"
 
 clone_ref "sbc" "https://git.kernel.org/pub/scm/bluetooth/sbc.git" \
-  "$ROOT/audio_modules/bluetooth_sbc_kernel/vendor/sbc"
+  "$ROOT/audio_modules/bt_sbc/vendor/sbc"
 
-echo "Done. Vendored trees are under audio_modules/*/vendor/ (see .gitignore)."
+echo "Done."
