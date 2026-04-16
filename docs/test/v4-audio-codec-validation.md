@@ -5,6 +5,7 @@ Manual and automated checks for v4 audio codec selection and session metadata.
 ## Automated (core / protocol)
 
 - `make test` (or CI equivalent): `tests/test_core.c` round-trips **v4 session info** including `song_id` and each **audio_codec_id** value used on the wire (at minimum: `OPUS`, `SBC_LIKE`, `CELP13K`, `EVRC`, `AMR_NB`, `AMR_WB`, `BLUETOOTH_SBC`).
+- After running **`scripts/fetch_audio_codec_vendors.sh`**, add CI or local steps to verify **vendored `vendor/` trees** match pinned commits (optional submodule / lockfile — TBD).
 - **`test_nb_ima_codec_roundtrip()`** — encode/decode one frame with **`dashcdg_nb_ima_*`** (`core/src/nb_ima_codec.c`); asserts fixed-point path stays linked in **`libdashcdg_core`**.
 - Assert **parse → serialize → parse** preserves `song_id` nul-padded field semantics.
 

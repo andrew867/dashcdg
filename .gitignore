@@ -6,3 +6,6 @@
 *.tar
 build/
 
+# Optional vendored audio upstreams (see scripts/fetch_audio_codec_vendors.sh)
+audio_modules/**/vendor/
+

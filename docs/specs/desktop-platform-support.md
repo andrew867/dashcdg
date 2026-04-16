@@ -121,6 +121,7 @@ Documented in detail in [`v4-audio-codecs.md`](v4-audio-codecs.md):
 
 ## Further reading
 
+- [`audio-codec-modules.md`](audio-codec-modules.md) — **GL/GDI-style** optional `audio_modules/*` backends + vendoring script for every linked codec repo
 - [`v4-audio-codecs.md`](v4-audio-codecs.md) — wire IDs, fixed-point narrowband, MCU portability
 - [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md) — PE audit, DLL lists, retro profile
 - [`win32-gdi-view-backend.md`](win32-gdi-view-backend.md) — GDI backend behavior

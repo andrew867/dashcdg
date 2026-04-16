@@ -239,7 +239,9 @@ Key runtime rules:
 - TX v4 supports `--audio-profile=quality|resilience` (Opus vs **NB-IMA** narrowband,
   same family as legacy “SBC-like” on the wire) plus **`--v4-audio-codec=`** and
   **`--badnet-v4*`** (see [`docs/specs/v4-audio-codecs.md`](docs/specs/v4-audio-codecs.md));
-  narrowband codec implementation lives in **`core/src/nb_ima_codec.c`** (fixed-point, MCU-friendly)
+  narrowband codec implementation lives in **`core/src/nb_ima_codec.c`** (fixed-point, MCU-friendly).
+  Optional **vendored** AMR / EVRC / QCELP / Bluetooth-SBC trees live under **`audio_modules/`**
+  (see [`docs/specs/audio-codec-modules.md`](docs/specs/audio-codec-modules.md); run **`scripts/fetch_audio_codec_vendors.sh`** to populate `vendor/`)
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
 - RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches
