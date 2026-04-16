@@ -74,6 +74,7 @@ CFLAGS += -march=pentium3 -mtune=pentium3 -mno-sse2 -mfpmath=387 -DDASHCDG_CPU_P
 CFLAGS += -U_FORTIFY_SOURCE -fno-tree-vectorize -fno-tree-slp-vectorize
 # MinGW's ANSI stdio pulls in mingw_pformat.c (uses SSE2); use MSVCRT printf path on XP-era CPUs.
 CFLAGS += -D__USE_MINGW_ANSI_STDIO=0
+# MSVCRT on XP does not implement C99 %zu / %ll* reliably; desktop code uses I64u/I64d-style HUD prints.
 # MSVCRT printf checking disagrees with %zu under -pedantic; silence format warnings for this column.
 CFLAGS += -Wno-format
 endif

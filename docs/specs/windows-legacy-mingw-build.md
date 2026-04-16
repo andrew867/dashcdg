@@ -96,6 +96,36 @@ Use **`objdump -d`** on `libopus-0.dll` and search for **`sse2`** / **`pslld`**
 style opcodes, or run under a debugger and watch for **`ILLEGAL_INSTRUCTION`**
 on the first Opus call.
 
+### CPU / ISA tiers (plan once, reuse for MCU-class bring-up)
+
+| Tier | Typical CPU | ISA floor you can assume if built with matching `-march` | Notes |
+| --- | --- | --- | --- |
+| **pre-sse2** | Pentium III, early Athlon | MMX + SSE1 only | Match **EXE + every loaded DLL** (Opus, PortAudio, pthread runtimes). This repo’s `WINDOWS_LEGACY_TARGET=1` / `WINDOWS_RETRO_BUNDLE=1` adds **`-march=pentium3 -mno-sse2 -mfpmath=387`** to **in-tree objects only**. |
+| **i686 + SSE2** | Pentium 4, Core Duo, most WinXP boxes after ~2001 | SSE2 | Default MSYS2 `mingw32` packages; **Dr. Watson `c000001d` on PIII** usually means something in the chain still has SSE2 (`movq xmm`, `pslld`, etc.). |
+| **x86_64** | Any 64-bit Windows | SSE2 baseline | `mingw64` default. |
+
+**Policy:** pick the **lowest** machine you must support, build **dashcdg** and **every** copied runtime DLL with the **same** `-march` floor (or looser EXE + stricter DLLs is invalid — the loader runs DLL code). Verify with:
+
+```sh
+objdump -d path/to/libopus-0.dll | grep -E 'movq.*xmm|pslld|paddq' | head
+objdump -d path/to/desktop-gdi-rx.exe | grep -E 'movq.*xmm' | head
+```
+
+### Rebuilding `libopus` for MinGW32 + Pentium III (no SSE2)
+
+From an **MSYS2 MinGW 32-bit** shell (not UCRT64), using the upstream MSYS2 recipe as a template:
+
+1. Install toolchain deps (example): `pacman -S --needed base-devel mingw-w64-i686-toolchain`.
+2. Fetch the `mingw-w64-mingw32-opus` PKGBUILD (or unpack https://opus-codec.org/downloads/ and `./configure --host=i686-w64-mingw32`).
+3. Export **`CFLAGS` / `CXXFLAGS` / `LDFLAGS`** including **`-march=pentium3 -mtune=pentium3 -mno-sse2 -mfpmath=387 -O2`** for both the library and any bundled tests.
+4. Build and copy **`libopus-0.dll`** next to the sneakernet `desktop-gdi-rx.exe` / `desktop-rx.exe` you ship.
+
+Convenience wrapper (prints the recommended flags and sanity-checks `objdump` when given a DLL path):
+
+```sh
+scripts/rebuild_mingw32_opus_pentium3.sh path/to/libopus-0.dll
+```
+
 ## Import tables (DLLs)
 
 ### desktop-tx.exe, desktop-rx.exe, desktop-player.exe (x64)
