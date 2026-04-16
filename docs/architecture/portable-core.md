@@ -73,9 +73,12 @@ The next logical refactor after the current desktop proof tranche is:
    [`../specs/audio-jitter-playout-boundary.md`](../specs/audio-jitter-playout-boundary.md).
    PortAudio remains the device boundary in `desktop_audio.c`; jitter no longer
    depends on it.
-3. **Render-surface abstraction** — **Partial:** CPU RGBA contract is normative; see
+3. **Playout / jitter (live CDG batches)** — **Landed:** `cdg_batch_jitter` in core; see
+   [`../specs/cdg-batch-jitter-playout-boundary.md`](../specs/cdg-batch-jitter-playout-boundary.md).
+   `dashcdg_cdg_state_process_packet` remains the semantic boundary after drain.
+4. **Render-surface abstraction** — **Partial:** CPU RGBA contract is normative; see
    [`../specs/cpu-rgba-raster-contract.md`](../specs/cpu-rgba-raster-contract.md).
-   OpenGL path consumes the same buffer (single pixel source of truth). Optional
-   GDI/D3D backends remain future work.
-4. **Golden / headless** — satisfied by `dashcdg_cdg_state_to_rgba8` unit tests in
+   OpenGL and **Win32 GDI (`desktop-rx --win-gdi`)** consume the same RGBA buffer; see
+   [`../specs/win32-gdi-view-backend.md`](../specs/win32-gdi-view-backend.md).
+5. **Golden / headless** — satisfied by `dashcdg_cdg_state_to_rgba8` unit tests in
    [`../test/cpu-rgba-raster-validation.md`](../test/cpu-rgba-raster-validation.md).

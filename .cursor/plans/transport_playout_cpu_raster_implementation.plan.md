@@ -32,7 +32,7 @@
 - `make test` green
 - Docs and code agree on dimensions (`DASHCDG_CDG_RGBA_BYTES`)
 
-## Deferred (explicitly out of this plan)
+## Follow-up (landed after this plan file)
 
-- CDG batch jitter extraction to core (same pattern as audio; future spec)
-- Win32 GDI window backend (Phase 2 of `windows_retro_graphics_backend.plan.md`)
+- CDG batch jitter in core: `cdg_batch_jitter.{h,c}` + `docs/specs/cdg-batch-jitter-playout-boundary.md`
+- Win32 GDI RX path: `win32_gdi_view.{h,c}`, `--win-gdi`, Phase 2 in `windows_retro_graphics_backend.plan.md`

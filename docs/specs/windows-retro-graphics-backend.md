@@ -49,6 +49,9 @@ window** (minimum code, works back to 95 for a windowed tool) **or** **D3D9
 exclusive** if fullscreen vsync matters. Add **DirectDraw 7** only if a
 stakeholder needs authentic pre-D3D9 behavior.
 
+**Status (Phase 2):** `desktop-rx` supports **`--win-gdi`** using the same CPU RGBA
+path as OpenGL; see [`win32-gdi-view-backend.md`](win32-gdi-view-backend.md).
+
 ## Abstraction boundary
 
 Introduce a narrow C API, for example:

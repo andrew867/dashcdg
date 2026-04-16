@@ -11,7 +11,7 @@ legacy Windows targets, once implemented.
 For each **OS + backend** cell: launch, resize window, toggle HUD if applicable,
 run for **10 minutes** with live TX/RX on the same subnet.
 
-| Environment | OpenGL3 build (current) | GDI / DDraw / D3D9 backend (future) |
+| Environment | OpenGL3 build (current) | GDI (`--win-gdi` RX) / DDraw / D3D9 |
 | --- | --- | --- |
 | Windows XP x86 SP3 (32-bit) VM | Baseline after main-thread GLUT fix | Primary acceptance target |
 | Windows XP x64 | Baseline | Secondary |
@@ -38,9 +38,8 @@ Stretch rows (only if the project commits to those SKUs):
 
 Where VMs are unavailable in CI:
 
-- **CPU-only:** unit tests that feed a fixed `struct dashcdg_cdg_state` into a
-  software **RGB888 row generator** shared by OpenGL and the new backend; compare
-  against a reference buffer (no GPU).
+- **CPU-only:** `dashcdg_cdg_state_to_rgba8` golden tests in `tests/test_core.c`
+  (shared truth for GL and GDI). See also [`win32-gdi-view-validation.md`](win32-gdi-view-validation.md).
 - **Headless:** existing `--headless` RX mode remains the networking regression
   harness; raster tests do not replace it.
 
