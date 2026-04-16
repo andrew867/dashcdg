@@ -14,12 +14,12 @@ Built from `platform/desktop/src/` with shared core/proto libs.
 
 | Binary | Role | Notes |
 | --- | --- | --- |
-| `desktop-tx.exe` | **Headless** transmitter (Windows build) | No OpenGL/FreeGLUT in this link: server-style TX only. **Protocol v4 by default** (`--v3` for legacy v3 loop). Opus by default; narrowband (**NB-IMA**, CLI `sbc-like` / `--v4-audio-codec=…`) with `--audio-profile=resilience` or explicit `--v4-audio-codec`. See [v4-audio-codecs.md](v4-audio-codecs.md). On Linux/macOS, `desktop-tx` is still the GL-capable object: default **no** window unless `--display` (use `desktop-player tx` for preview-on-by-default). |
-| `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Opus or narrowband same as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
-| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Opus + fixed-point narrowband decode per session. |
+| `desktop-tx.exe` | **Headless** transmitter (Windows build) | No OpenGL/FreeGLUT in this link: server-style TX only. **Protocol v4 by default** (`--v3` for legacy v3 loop). **Default audio:** resilience profile + **AMR-WB** (`--v4-audio-codec=amr-wb`); use `--audio-profile=quality` for Opus or `--v4-audio-codec=…` for other ids. **`--audio-profile=resilience`** does not override the codec. **`--help`** lists flags; TTY **`c`** cycles codecs. See [v4-audio-codecs.md](v4-audio-codecs.md). On Linux/macOS, `desktop-tx` is still the GL-capable object: default **no** window unless `--display` (use `desktop-player tx` for preview-on-by-default). |
+| `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Same v4 codec defaults as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
+| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Decodes Opus, AMR-WB/NB, NB-IMA, EVRC, QCELP-13k, or SBC per **`v4_session_info`** / chunk `codec_id`; **`--help`** documents behaviour. |
 | `desktop-gdi-rx.exe` | GDI-only receiver link | No GL imports. Opus + PortAudio. |
-| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use; **NB-IMA** narrowband only. |
-| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + PortAudio; **no Opus** (stub); **NB-IMA** narrowband decode. |
+| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use; default v4 codec **sbc-like** (NB-IMA). |
+| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + PortAudio; **no Opus** (stub); NB-IMA + other narrowband ids when linked. |
 | `desktop-player.exe` | Local player + `tx` / `rx` shims | Full GL + Win32 GDI code paths: `tx` preview on by default (`--headless` to disable); `rx` same GL→GDI fallback as `desktop-rx`. |
 
 Implementation pointers:
@@ -115,9 +115,11 @@ Not allowed without new proof:
 
 Documented in detail in [`v4-audio-codecs.md`](v4-audio-codecs.md):
 
+- **`--help` / `-h`** — full synopsis, defaults (**AMR-WB** on non-retro builds), and TTY hotkeys (**`c`** cycles codecs).
 - `--v4-audio-codec=<name>` / `--v4-audio-codec <name>` — select v4 `audio_codec_id` (`opus`, `sbc-like`, `celp13k`, `evrc`, `amr-nb`, `amr-wb`, `bluetooth-sbc`).
-- `--badnet-v4` — v4 + resilience + default id **`celp13k`** (same **NB-IMA** payload as other narrowband ids).
+- `--badnet-v4` — v4 + resilience + **amr-wb** (shorthand for the same default as a fresh TX).
 - `--badnet-v4-sbc`, `--badnet-v4-evrc` — resilience + wire id **2** or **4**.
+- `--audio-profile=resilience` — sets the resilience **profile** only; does **not** change the selected `audio_codec_id`.
 
 ## Further reading
 

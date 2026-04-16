@@ -692,9 +692,18 @@ int main(int argc, char **argv) {
 
     if (!dashcdg_parse_args(&g_playlist, argc, argv)) {
         fprintf(stderr, "usage: %s [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]\n", argv[0]);
-        fprintf(stderr, "   or: %s tx [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n", argv[0]);
-        fprintf(stderr, "        OpenGL preview on by default; on Windows, falls back to GDI if GL init fails. --headless sends without a window.\n");
-        fprintf(stderr, "   or: %s rx [--headless] [--gdi] [endpoint-address] [port]\n", argv[0]);
+        fprintf(
+                stderr,
+                "   or: %s tx [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=...] "
+                "[endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+                argv[0]
+        );
+        fprintf(
+                stderr,
+                "        v4 default audio: AMR-WB; OpenGL preview on by default; on Windows, falls back to GDI if GL init fails. "
+                "--headless sends without a window.\n"
+        );
+        fprintf(stderr, "   or: %s rx [--help] [--headless] [--gdi] [endpoint-address] [port]\n", argv[0]);
         fprintf(stderr, "        --gdi forces GDI on Windows; default tries OpenGL first, then GDI fallback if GL init fails.\n");
         fprintf(
                 stderr,

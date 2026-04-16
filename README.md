@@ -132,22 +132,24 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Integrated network modes through the player entrypoint:
 
 ```sh
-build/bin/desktop-player tx [--headless] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
-build/bin/desktop-player rx [--headless] [--gdi] [endpoint-address] [port]
+build/bin/desktop-player tx [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-player rx [--help] [--headless] [--gdi] [endpoint-address] [port]
 ```
 
 Standalone network transmitter (Windows MSYS2: **headless** `desktop-tx.exe`; use **`desktop-gdi-tx.exe`** for a GDI preview window without GL):
 
 ```sh
-build/bin/desktop-tx [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-tx [--help] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 ```
+
+**V4 audio defaults (non-retro builds):** protocol v4 with **resilience** profile and **AMR-WB** (`--v4-audio-codec=amr-wb`) for wideband speech/music at 48 kHz session timing. **`--audio-profile=resilience`** adjusts the resilience/FEC profile only and does **not** switch the codec away from AMR-WB. Use **`--audio-profile=quality`** for Opus, or **`--v4-audio-codec=...`** to pick another id. Run **`--help`** on `tx` / `rx` for the full flag list. With a TTY, press **`c`** while TX is running to cycle codecs; receivers follow **`v4_session_info`** and reconfigure decoders automatically.
 
 On Linux/macOS, `desktop-tx` is still the GL-capable binary: add **`--display`** for a FreeGLUT preview, or use **`desktop-player tx`** (preview on by default when the executable name contains `player`).
 
 Standalone network receiver:
 
 ```sh
-build/bin/desktop-rx [--headless] [--gdi|--win-gdi] [endpoint-address] [port]
+build/bin/desktop-rx [--help] [--headless] [--gdi|--win-gdi] [endpoint-address] [port]
 ```
 
 Windows MSYS2 `make debug` also produces **`desktop-gdi-rx.exe`** and **`desktop-gdi-tx.exe`** (no GL in those links). On Windows, `desktop-rx` tries OpenGL first and **falls back to GDI** if the GL renderer fails to init; `--gdi` forces GDI.
@@ -188,6 +190,7 @@ Network defaults:
 - `b` or `[`: back through played-track history
 - `r`: restart current track
 - `f`: force late-join asset rebroadcast
+- `c`: cycle v4 audio codec (re-sends session_info so receivers retune)
 - `s`: print current status
 - `v`: toggle preview visibility when a preview window is active
 - `h` or `?`: print help

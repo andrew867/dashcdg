@@ -47,6 +47,11 @@ enum dashcdg_packet_type {
     DASHCDG_PACKET_V4_CLOCK_SYNC = 20
 };
 
+/*
+ * Quality vs resilience/FEC tuning for v4 session_info.
+ * Resilience does not imply a specific audio_codec_id on the wire; desktop TX
+ * defaults to AMR-WB under resilience unless overridden (see CLI docs).
+ */
 enum dashcdg_v4_audio_profile_id {
     DASHCDG_V4_AUDIO_PROFILE_QUALITY = 1,
     DASHCDG_V4_AUDIO_PROFILE_RESILIENCE = 2

@@ -548,15 +548,48 @@ static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
 
 static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
-    fprintf(stderr, "usage: %s [--headless] [--win-gdi|--gdi] [endpoint-address] [port]\n", argv0);
+    fprintf(stderr, "usage: %s [--help] [--headless] [--win-gdi|--gdi] [endpoint-address] [port]\n", argv0);
     fprintf(stderr, "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
     fprintf(stderr, "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
 #else
-    fprintf(stderr, "usage: %s [--headless] [endpoint-address] [port]\n", argv0);
+    fprintf(stderr, "usage: %s [--help] [--headless] [endpoint-address] [port]\n", argv0);
 #endif
     fprintf(
             stderr,
             "defaults: endpoint-address=%s port=%d\n",
+            DASHCDG_DEFAULT_NETWORK_ADDRESS,
+            DASHCDG_DEFAULT_NETWORK_PORT
+    );
+    fprintf(stderr, "use --help or -h for receiver behaviour and v4 session notes.\n");
+}
+
+static void dashcdg_rx_cli_print_help(const char *argv0) {
+    const char *prog = argv0 != NULL ? argv0 : "desktop-rx";
+
+    fprintf(stdout, "%s — desktop receiver (v4 + v3)\n\n", prog);
+#if DASHCDG_RX_HAVE_GLUT
+    fprintf(
+            stdout,
+            "Synopsis: %s [--help] [--headless] [--win-gdi|--gdi] [endpoint-address] [port]\n\n",
+            prog
+    );
+    fprintf(
+            stdout,
+            "Listens for UDP multicast/broadcast on the given endpoint. Windowed mode shows CD+G; "
+            "HUD is hidden by default (press I). M toggles mute; S prints a stats line.\n\n"
+    );
+#else
+    fprintf(stdout, "Synopsis: %s [--help] [--headless] [endpoint-address] [port]\n\n", prog);
+#endif
+    fprintf(
+            stdout,
+            "V4 audio: decoders follow each v4_session_info packet. When the transmitter changes "
+            "audio_codec_id (CLI --v4-audio-codec or the c hotkey on TX), the receiver tears down "
+            "the old decoder, re-opens PortAudio if needed, and continues with the new codec.\n\n"
+    );
+    fprintf(
+            stdout,
+            "Network defaults: %s:%d\n",
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT
     );
@@ -2235,7 +2268,8 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
                     state->announced_audio_channels != view->v4_session_info.audio_channels ||
                     state->announced_audio_frame_ms != view->v4_session_info.audio_frame_ms ||
                     state->announced_playout_delay_ms != view->v4_session_info.startup_preroll_ms ||
-                    state->announced_audio_profile_id != view->v4_session_info.audio_profile_id);
+                    state->announced_audio_profile_id != view->v4_session_info.audio_profile_id ||
+                    state->announced_audio_codec_id != view->v4_session_info.audio_codec_id);
     has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
             view->v4_session_info.audio_channels > 0 &&
             view->v4_session_info.audio_frame_ms > 0;
@@ -3115,6 +3149,14 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     int positional_index = 0;
     int positionals_consumed = 0;
     int port = DASHCDG_DEFAULT_NETWORK_PORT;
+    int help_i;
+
+    for (help_i = 1; help_i < argc; ++help_i) {
+        if (strcmp(argv[help_i], "--help") == 0 || strcmp(argv[help_i], "-h") == 0 || strcmp(argv[help_i], "-?") == 0) {
+            dashcdg_rx_cli_print_help(argv[0] != NULL ? argv[0] : "desktop-rx");
+            return 0;
+        }
+    }
 
     g_endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
     memset(&g_endpoint_in_addr, 0, sizeof(g_endpoint_in_addr));

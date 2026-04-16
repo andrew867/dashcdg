@@ -680,6 +680,15 @@ static void test_fec_recovery(void) {
     assert(memcmp(recovered, payload_b, sizeof(payload_b)) == 0);
 }
 
+static void test_v4_audio_codec_predicate_helpers(void) {
+    assert(dashcdg_v4_audio_codec_is_evrc(DASHCDG_V4_AUDIO_CODEC_EVRC) == 1);
+    assert(dashcdg_v4_audio_codec_is_evrc(DASHCDG_V4_AUDIO_CODEC_OPUS) == 0);
+    assert(dashcdg_v4_audio_codec_is_qcelp13k(DASHCDG_V4_AUDIO_CODEC_CELP13K) == 1);
+    assert(dashcdg_v4_audio_codec_is_qcelp13k(DASHCDG_V4_AUDIO_CODEC_SBC_LIKE) == 0);
+    assert(dashcdg_v4_audio_codec_is_bluetooth_sbc(DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) == 1);
+    assert(dashcdg_v4_audio_codec_is_bluetooth_sbc(DASHCDG_V4_AUDIO_CODEC_AMR_WB) == 0);
+}
+
 static void test_nb_ima_codec_roundtrip(void) {
     struct dashcdg_nb_ima_state enc;
     struct dashcdg_nb_ima_state dec;
@@ -717,6 +726,7 @@ int main(void) {
     test_reader_seek_and_keyframes();
     test_protocol_roundtrip();
     test_protocol_v4_roundtrip();
+    test_v4_audio_codec_predicate_helpers();
     test_media_clock();
     test_audio_jitter_duplicate_drop();
     test_audio_jitter_drain_apply_and_note();

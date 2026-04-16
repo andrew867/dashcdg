@@ -1512,32 +1512,103 @@ static int dashcdg_tx_apply_v4_audio_codec_name(const char *name, const char *ar
     return 0;
 }
 
+static void dashcdg_tx_sync_v4_profile_for_codec_locked(void) {
+    if (g_tx_state.v4_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+    } else {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+    }
+}
+
+static const char *dashcdg_tx_v4_codec_cli_name(uint8_t codec_id) {
+    switch (codec_id) {
+    case DASHCDG_V4_AUDIO_CODEC_OPUS:
+        return "opus";
+    case DASHCDG_V4_AUDIO_CODEC_SBC_LIKE:
+        return "sbc-like";
+    case DASHCDG_V4_AUDIO_CODEC_CELP13K:
+        return "celp13k";
+    case DASHCDG_V4_AUDIO_CODEC_EVRC:
+        return "evrc";
+    case DASHCDG_V4_AUDIO_CODEC_AMR_NB:
+        return "amr-nb";
+    case DASHCDG_V4_AUDIO_CODEC_AMR_WB:
+        return "amr-wb";
+    case DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC:
+        return "bluetooth-sbc";
+    default:
+        return "?";
+    }
+}
+
+static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) || defined(DASHCDG_DESKTOP_NO_OPUS)
+    static const uint8_t cycle[] = {
+            DASHCDG_V4_AUDIO_CODEC_SBC_LIKE,
+            DASHCDG_V4_AUDIO_CODEC_AMR_WB,
+            DASHCDG_V4_AUDIO_CODEC_AMR_NB,
+            DASHCDG_V4_AUDIO_CODEC_EVRC,
+            DASHCDG_V4_AUDIO_CODEC_CELP13K,
+            DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC,
+    };
+#else
+    static const uint8_t cycle[] = {
+            DASHCDG_V4_AUDIO_CODEC_AMR_WB,
+            DASHCDG_V4_AUDIO_CODEC_OPUS,
+            DASHCDG_V4_AUDIO_CODEC_AMR_NB,
+            DASHCDG_V4_AUDIO_CODEC_SBC_LIKE,
+            DASHCDG_V4_AUDIO_CODEC_EVRC,
+            DASHCDG_V4_AUDIO_CODEC_CELP13K,
+            DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC,
+    };
+#endif
+    const int n = (int) (sizeof(cycle) / sizeof(cycle[0]));
+    int idx = 0;
+    int j;
+    int next_idx;
+
+    for (j = 0; j < n; ++j) {
+        if (cycle[j] == g_tx_state.v4_audio_codec_id) {
+            idx = j;
+            break;
+        }
+    }
+    if (j == n) {
+        idx = 0;
+    }
+    next_idx = ((idx + delta) % n + n) % n;
+    g_tx_state.v4_audio_codec_id = cycle[next_idx];
+    dashcdg_tx_sync_v4_profile_for_codec_locked();
+    g_tx_state.audio_pipeline_generation++;
+    g_tx_state.last_v4_session_info_ms = 0U;
+}
+
 static void dashcdg_tx_print_usage(const char *argv0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     fprintf(
             stderr,
-            "usage: %s [--v3] [--audio-profile=resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--v3] [--audio-profile=resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     fprintf(stderr, "  (retro: v4 wire format by default; --v3 for legacy v3 only; SBC-like audio)\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
     fprintf(
             stderr,
-            "usage: %s [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     fprintf(stderr, "  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)\n");
 #elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
     fprintf(
             stderr,
-            "usage: %s [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     fprintf(stderr, "  v4 by default; --v3 for legacy v3. GDI preview on by default; --headless hides the window.\n");
 #else
     fprintf(
             stderr,
-            "usage: %s [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     fprintf(stderr, "  v4 by default; --v3 for legacy v3. OpenGL preview for desktop-player tx; --headless sends without a window.\n");
@@ -1556,6 +1627,71 @@ static void dashcdg_tx_print_usage(const char *argv0) {
     fprintf(
             stderr,
             "          --badnet-v4 (resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-evrc\n"
+    );
+    fprintf(stderr, "use --help or -h for full options, defaults, and TTY hotkeys.\n");
+}
+
+static void dashcdg_tx_cli_print_help(const char *argv0) {
+    const char *prog = argv0 != NULL ? argv0 : "desktop-tx";
+
+    fprintf(stdout, "%s — desktop transmitter (v4 by default)\n\n", prog);
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+    fprintf(
+            stdout,
+            "Synopsis: %s [--help] [--v3] [--audio-profile=resilience] [--v4-audio-codec=...] "
+            "[endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
+            prog
+    );
+    fprintf(stdout, "Defaults: v4 wire, resilience profile, audio codec sbc-like (NB-IMA); no Opus in this build.\n");
+#elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
+    fprintf(
+            stdout,
+            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] "
+            "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
+            prog
+    );
+    fprintf(
+            stdout,
+            "Defaults: v4, resilience profile, audio codec amr-wb (3GPP wideband @ 48 kHz session). "
+            "Use --audio-profile=quality for Opus.\n"
+    );
+#else
+    fprintf(
+            stdout,
+            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] "
+            "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
+            prog
+    );
+    fprintf(
+            stdout,
+            "Defaults: v4, resilience profile, audio codec amr-wb (3GPP wideband @ 48 kHz session). "
+            "Use --audio-profile=quality for Opus.\n"
+    );
+#endif
+    fprintf(
+            stdout,
+            "\n--audio-profile=resilience sets the v4 resilience/FEC profile only; it does not change the "
+            "audio codec (default stays amr-wb unless you pass --v4-audio-codec).\n"
+            "--audio-profile=quality selects the quality profile and switches the codec to Opus (non-retro builds).\n\n"
+    );
+    fprintf(
+            stdout,
+            "v4 audio codec (override): --v4-audio-codec=opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc "
+            "or two-arg --v4-audio-codec <name>.\n"
+            "Shorthand: --badnet-v4 (same as resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-evrc.\n\n"
+    );
+    fprintf(
+            stdout,
+            "Network defaults: %s:%d  Library folder default: %s\n\n",
+            DASHCDG_DEFAULT_NETWORK_ADDRESS,
+            DASHCDG_DEFAULT_NETWORK_PORT,
+            DASHCDG_DEFAULT_LIBRARY_DIR
+    );
+    fprintf(
+            stdout,
+            "When stdin is a TTY, interactive keys apply (see startup banner). "
+            "Press c to cycle the v4 audio codec in order; the sender re-issues session_info so receivers "
+            "reconfigure decoders on the fly.\n"
     );
 }
 
@@ -1924,12 +2060,13 @@ static void dashcdg_tx_log_v4_event_locked(const char *event_name, uint64_t now_
     }
     fprintf(
             stdout,
-            "[tx] event=%s mode=v4 now=%llu playback=%llu profile=%u codec=%u peak_window=%uB\n",
+            "[tx] event=%s mode=v4 now=%llu playback=%llu profile=%u codec=%u (%s) peak_window=%uB\n",
             event_name,
             (unsigned long long) now_ms,
             (unsigned long long) playback_ms,
             (unsigned int) g_tx_state.v4_audio_profile_id,
             (unsigned int) g_tx_state.v4_audio_codec_id,
+            dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
             (unsigned int) g_tx_state.v4_peak_window_bytes
     );
     fflush(stdout);
@@ -2103,9 +2240,10 @@ static void dashcdg_tx_print_status_locked(void) {
     if (g_tx_state.transport_v4_enabled) {
         fprintf(
                 stdout,
-                "[tx] v4: prof=%u codec=%u info=%llu load=%llu anchor=%llu audio=%llu video=%llu repair=%llu backfill=%llu clock=%llu first=%llu/%llu/%llu peak=%uB anchor_off=%zu/%zu state=%u\n",
+                "[tx] v4: prof=%u codec=%u (%s) info=%llu load=%llu anchor=%llu audio=%llu video=%llu repair=%llu backfill=%llu clock=%llu first=%llu/%llu/%llu peak=%uB anchor_off=%zu/%zu state=%u\n",
                 (unsigned int) g_tx_state.v4_audio_profile_id,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
+                dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
                 (unsigned long long) g_tx_state.v4_session_info_packets_sent,
                 (unsigned long long) g_tx_state.v4_loading_screen_packets_sent,
                 (unsigned long long) g_tx_state.v4_video_anchor_packets_sent,
@@ -3694,7 +3832,7 @@ static void dashcdg_tx_format_status_bar_locked(char *buffer, size_t buffer_size
             (long long) audio_lead_ms,
             (long long) cdg_lead_ms,
             (unsigned long long) until_start_ms,
-            g_tx_state.playlist_scan_running ? "| p/n/b/u/r/s/q" : "| p/n/b/u/r/s/q"
+            g_tx_state.playlist_scan_running ? "| p/n/b/u/r/c/s/q" : "| p/n/b/u/r/c/s/q"
     );
 
     dashcdg_tx_console_get_dimensions(&rows, &cols);
@@ -3762,10 +3900,11 @@ static void dashcdg_tx_draw_status_bar_locked(void) {
     g_tx_console.status_bar_valid = 1;
 }
 
-static void dashcdg_tx_print_help(void) {
+static void dashcdg_tx_print_controls_help(void) {
     fprintf(
             stdout,
-            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, f=force-broadcast, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
+            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, "
+            "f=force-broadcast, c=cycle v4 audio codec, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
     );
     fflush(stdout);
 }
@@ -3828,16 +3967,26 @@ static int dashcdg_tx_handle_command(int command) {
         case 'q':
             g_tx_state.shutdown_requested = 1;
             break;
+        case 'c':
+            dashcdg_tx_cycle_v4_audio_codec_locked(1);
+            fprintf(
+                    stdout,
+                    "[tx] v4 audio codec -> %s (id %u); session_info will refresh for receivers\n",
+                    dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
+                    (unsigned int) g_tx_state.v4_audio_codec_id
+            );
+            fflush(stdout);
+            break;
         case 'h':
         case '?':
-            dashcdg_tx_print_help();
+            dashcdg_tx_print_controls_help();
             break;
         default:
             handled = 0;
             break;
     }
 
-    if (handled && command != 'h' && command != '?' && command != 's') {
+    if (handled && command != 'h' && command != '?' && command != 's' && command != 'c') {
         dashcdg_tx_draw_status_bar_locked();
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
@@ -3860,7 +4009,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
     dashcdg_tx_console_init();
     dashcdg_tx_console_sync_scroll_layout_for_tty();
     dashcdg_tx_console_scroll_log_past_status_row();
-    dashcdg_tx_print_help();
+    dashcdg_tx_print_controls_help();
     pthread_mutex_lock(&g_tx_state.mutex);
     if (g_tx_console.status_bar_enabled) {
         dashcdg_tx_draw_status_bar_locked();
@@ -3896,7 +4045,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
                         "[tx] unknown command '%c'\n",
                         isprint(command) ? command : '?'
                 );
-                dashcdg_tx_print_help();
+                dashcdg_tx_print_controls_help();
             }
             continue;
         }
@@ -4739,6 +4888,14 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     size_t startup_track_total = 0U;
     size_t startup_seed_count = 0U;
     size_t startup_seed_start = 0U;
+    int help_i;
+
+    for (help_i = 1; help_i < argc; ++help_i) {
+        if (strcmp(argv[help_i], "--help") == 0 || strcmp(argv[help_i], "-h") == 0 || strcmp(argv[help_i], "-?") == 0) {
+            dashcdg_tx_cli_print_help(argv[0] != NULL ? argv[0] : "desktop-tx");
+            return 0;
+        }
+    }
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
@@ -4871,7 +5028,6 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--audio-profile=resilience") == 0) {
             g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
-            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
             continue;
         }
 
