@@ -5,6 +5,7 @@
 This matrix validates the portability/slimdown tranche described by:
 
 - `docs/specs/tx-cdg-source-model.md`
+- `docs/specs/desktop-platform-support.md`
 - `docs/architecture/modern-desktop-baseline.md`
 - `docs/architecture/legacy-windows-gui-feasibility.md`
 
@@ -109,7 +110,7 @@ Expected result:
 - preview either continues working on the new source model or uses a documented
   fallback path
 
-### 5. Windows baseline smoke
+### 5. Windows x64 baseline smoke
 
 Purpose:
 
@@ -119,50 +120,60 @@ Checks:
 
 - `make debug`
 - `make test`
-- `make package`
+- `scripts/build_release.sh x64`
 
 Expected result:
 
 - desktop binaries build
 - tests pass
-- portable zip package is produced
+- `build/amd64/release/dashcdg-windows-x64-portable.zip` is produced
+- optional: `scripts/build_release.sh all` or `make dist-windows` also places both
+  architecture zips under `build/dist/` (see `docs/specs/desktop-platform-support.md`)
 
-### 6. Linux baseline smoke
+### 6. Windows x86 baseline smoke
 
 Purpose:
 
-- validate the modern Linux target is more than a vague aspiration
+- prove the repository can still emit a 32-bit Windows desktop artifact for
+  legacy OS testing
+
+Checks:
+
+- install `mingw-w64-i686-*` desktop dependencies
+- run `scripts/build_release.sh x86`
+- verify the release zip contains the expected EXEs and runtime DLLs
+
+Expected result:
+
+- `build/x86/release/dashcdg-windows-x86-portable.zip` is produced
+- 32-bit packaging claims are grounded in a real artifact, not just a plan
+
+### 7. Linux baseline smoke
+
+Purpose:
+
+- validate the modern Linux targets are more than a vague aspiration
 
 Checks:
 
 - install documented GL/GLEW/GLUT/PortAudio/Opus dependencies
-- build desktop binaries
+- build desktop binaries on the relevant CPU family
 - run portable tests
 - run at least one TX or RX smoke launch
 
-Expected result:
+Linux rows to execute separately:
 
-- documented dependency recipe matches reality
-- current desktop runtime builds and starts on a modern Linux host
-
-### 7. macOS baseline smoke
-
-Purpose:
-
-- validate the modern macOS target is documented and testable
-
-Checks:
-
-- install documented dependencies
-- build portable tests and desktop binaries using the documented recipe
-- run at least one TX or RX smoke launch
+- `amd64`
+- `x86`
+- `arm64`
+- `arm`
 
 Expected result:
 
 - documented dependency recipe matches reality
-- current desktop runtime builds and starts on a modern macOS host
+- current desktop runtime builds and starts on each claimed Linux CPU family
 
-### 8. Legacy Windows research gate
+### 8. Legacy Windows runtime gate
 
 Purpose:
 
@@ -170,11 +181,12 @@ Purpose:
 
 Checks:
 
-- record chosen research OS floor, if any
-- record renderer feasibility result
-- record dependency feasibility result
-- explicitly state whether the result is "current renderer viable" or
-  "alternate renderer required"
+- test the `x86` portable zip on Windows XP SP2/SP3, if available
+- test the current desktop runtime on Windows Vista and Windows 7, if available
+- record renderer feasibility result for each tested OS
+- record dependency feasibility result for each tested OS
+- explicitly state whether the result is `current renderer viable`,
+  `build-only`, or `alternate renderer required`
 
 Expected result:
 
@@ -188,6 +200,6 @@ The portability/slimdown tranche should be considered complete only when:
 - the current live-wire parallel audio+CDG claim has been re-proven
 - Stage A and any later TX CD+G source changes are backed by memory and behavior
   evidence
-- Windows remains green
-- Linux and macOS have real documented smoke paths
+- Windows `x64` and `x86` packaging remains green
+- Linux `amd64`, `x86`, `arm64`, and `arm` have real documented smoke paths
 - legacy Windows remains clearly labeled as research unless separately proven

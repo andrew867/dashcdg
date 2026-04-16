@@ -62,10 +62,37 @@ make test
 Windows portable package:
 
 ```sh
-make package
+scripts/build_release.sh x64
 ```
 
-That produces `build/release/dashcdg-windows-portable.zip`.
+That produces `build/amd64/release/dashcdg-windows-x64-portable.zip`.
+
+Windows `x86` portable package:
+
+```sh
+scripts/build_release.sh x86
+```
+
+That produces `build/x86/release/dashcdg-windows-x86-portable.zip`.
+
+MSYS2 builds use separate trees (`build/amd64/...` vs `build/x86/...`) so switching `MINGW_ARCH` does not reuse object files from the other architecture.
+
+Build both Windows packages in one pass:
+
+```sh
+scripts/build_release.sh all
+```
+
+That also copies both zips into `build/dist/` for a single pick-up directory.
+For an **XP-oriented PE** (subsystem/OS version fields and `WINVER`), set
+`DASHCDG_WINDOWS_LEGACY=1` for the script or `WINDOWS_LEGACY_TARGET=1` for
+`make` (see `docs/specs/windows-legacy-mingw-build.md`).
+
+Or from the Makefile:
+
+```sh
+make dist-windows
+```
 
 ## Desktop dependencies
 
@@ -76,11 +103,15 @@ The desktop apps require:
 - PortAudio
 - `libopus`
 
-On the current Windows/MSYS2 flow, `mingw-w64-x86_64-opus` must be available so `desktop-tx`, `desktop-rx`, and `desktop-player` can link and ship `libopus-0.dll`.
+On the current Windows/MSYS2 flow:
+
+- `x64` packaging requires `mingw-w64-x86_64-gcc`, `mingw-w64-x86_64-opus`, `mingw-w64-x86_64-portaudio`, `mingw-w64-x86_64-freeglut`, and `mingw-w64-x86_64-glew`
+- `x86` packaging requires `mingw-w64-i686-gcc`, `mingw-w64-i686-opus`, `mingw-w64-i686-portaudio`, `mingw-w64-i686-freeglut`, and `mingw-w64-i686-glew`
+- the packaged Windows zips ship `glew32.dll`, `libfreeglut.dll`, `libportaudio.dll`, `libopus-0.dll`, `libwinpthread-1.dll`, a matching `libgcc_s_*.dll`, and `libstdc++-6.dll`
 
 ## Desktop App Usage
 
-Local player:
+Local player (POSIX: `build/bin/...`; MSYS2 x64: `build/amd64/bin/...`; MSYS2 x86: `build/x86/bin/...`):
 
 ```sh
 build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]

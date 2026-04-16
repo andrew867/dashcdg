@@ -28,10 +28,14 @@ Example groups:
 
 ## Commands
 
+Use the binary directory for your platform: **Linux** `build/bin/`, **MSYS2
+x64** `build/amd64/bin/`, **MSYS2 x86** `build/x86/bin/`. The examples below use
+the x64 MSYS2 layout.
+
 Start RX:
 
 ```sh
-build/bin/desktop-rx --headless 239.255.77.92 24685
+build/amd64/bin/desktop-rx --headless 239.255.77.92 24685
 ```
 
 Start the impairment relay:
@@ -47,7 +51,7 @@ python scripts/desktop_impairment.py \
 Start TX:
 
 ```sh
-build/bin/desktop-tx 239.255.77.91 24684 "C:/Users/andrew/OneDrive - Green O365/Documents/GitHub/dashcdg/cdg" 1000
+build/amd64/bin/desktop-tx 239.255.77.91 24684 "C:/Users/andrew/OneDrive - Green O365/Documents/GitHub/dashcdg/cdg" 1000
 ```
 
 ## Suggested matrix

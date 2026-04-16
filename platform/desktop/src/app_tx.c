@@ -9,6 +9,19 @@
 
 #include <pthread.h>
 
+#ifdef _WIN32
+#include <conio.h>
+#include <io.h>
+#include <windows.h>
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <termios.h>
+#include <unistd.h>
+#endif
+
 #include <GL/glew.h>
 #include <GL/glut.h>
 
@@ -44,6 +57,7 @@
 #define DASHCDG_TX_AUDIO_CHUNK_FRAMES 4096U
 #define DASHCDG_TX_PCM_FIFO_FRAMES (DASHCDG_AUDIO_FRAME_SAMPLES * 32U)
 #define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
+#define DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT 64U
 #define DASHCDG_V4_SESSION_INFO_INTERVAL_MS 1000U
 #define DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS 250U
 #define DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS 100U
@@ -51,6 +65,7 @@
 #define DASHCDG_V4_MAX_AUDIO_PER_PASS 2U
 #define DASHCDG_V4_MAX_VIDEO_PER_PASS 2U
 #define DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT 1U
+#define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
@@ -104,6 +119,7 @@ struct dashcdg_tx_state {
     pthread_t control_thread;
     pthread_t ptp_thread;
     pthread_t audio_thread;
+    pthread_t playlist_scan_thread;
     uint8_t *asset_bytes;
     size_t asset_size;
     size_t next_asset_offset;
@@ -154,6 +170,10 @@ struct dashcdg_tx_state {
     size_t track_history_count;
     size_t track_history_capacity;
     size_t track_history_position;
+    char *playlist_scan_directory;
+    size_t playlist_scan_total_tracks;
+    size_t playlist_scan_seed_start_index;
+    size_t playlist_scan_seed_count;
     struct dashcdg_runtime_queue audio_ready_queue;
     struct dashcdg_tx_audio_frame pending_audio_frame;
     uint8_t audio_fec_payloads[DASHCDG_AUDIO_GROUP_SIZE][DASHCDG_MAX_AUDIO_FRAME_BYTES];
@@ -194,12 +214,38 @@ struct dashcdg_tx_state {
     int preview_hud_visible;
     int display_requested;
     int transport_v4_enabled;
+    int playlist_scan_running;
+    int playlist_scan_thread_created;
+    int control_thread_created;
     int v4_running_logged;
     int paused;
     int shutdown_requested;
 };
 
 static struct dashcdg_tx_state g_tx_state;
+
+struct dashcdg_tx_console_state {
+    int input_ready;
+    int status_bar_enabled;
+    int status_scroll_layout;
+    size_t layout_rows;
+    int status_bar_valid;
+    size_t last_status_row;
+    size_t last_status_cols;
+    size_t last_status_length;
+    char last_status_line[512];
+#ifdef _WIN32
+    DWORD original_output_mode;
+    int output_mode_saved;
+#else
+    struct termios original_termios;
+    int termios_saved;
+    int stdin_flags;
+    int stdin_flags_saved;
+#endif
+};
+
+static struct dashcdg_tx_console_state g_tx_console;
 
 static const struct {
     char c;
@@ -689,11 +735,172 @@ static int dashcdg_tx_playlist_add_auto_paired_track(
     return ok;
 }
 
-static int dashcdg_tx_compare_tracks(const void *left, const void *right) {
-    const struct dashcdg_tx_track *lhs = (const struct dashcdg_tx_track *) left;
-    const struct dashcdg_tx_track *rhs = (const struct dashcdg_tx_track *) right;
+static int dashcdg_tx_playlist_has_cdg_path(
+        const struct dashcdg_tx_playlist *playlist,
+        const char *cdg_path
+) {
+    if (playlist == NULL || cdg_path == NULL) {
+        return 0;
+    }
 
-    return strcmp(lhs->title, rhs->title);
+    for (size_t i = 0; i < playlist->count; ++i) {
+        if (playlist->tracks[i].cdg_path != NULL && strcmp(playlist->tracks[i].cdg_path, cdg_path) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int dashcdg_tx_dirent_is_directory(const char *directory, const struct dirent *entry) {
+    char *path;
+    int is_directory = 0;
+
+    if (directory == NULL || entry == NULL) {
+        return 0;
+    }
+
+#ifdef DT_DIR
+    if (entry->d_type == DT_DIR) {
+        return 1;
+    }
+#endif
+#ifdef DT_REG
+    if (entry->d_type == DT_REG) {
+        return 0;
+    }
+#endif
+#ifdef DT_UNKNOWN
+    if (entry->d_type != DT_UNKNOWN && entry->d_type != 0) {
+        return 0;
+    }
+#endif
+
+    path = dashcdg_join_path(directory, entry->d_name);
+    if (path == NULL) {
+        return 0;
+    }
+    is_directory = dashcdg_path_is_directory(path);
+    free(path);
+    return is_directory;
+}
+
+#ifdef _WIN32
+static char *dashcdg_tx_windows_search_pattern(const char *directory) {
+    size_t length;
+    int needs_separator;
+    char *pattern;
+
+    if (directory == NULL) {
+        return NULL;
+    }
+
+    length = strlen(directory);
+    needs_separator = length > 0U && directory[length - 1U] != '/' && directory[length - 1U] != '\\';
+    pattern = (char *) malloc(length + (needs_separator ? 3U : 2U));
+    if (pattern == NULL) {
+        return NULL;
+    }
+
+    strcpy(pattern, directory);
+    if (needs_separator) {
+        strcat(pattern, "\\");
+    }
+    strcat(pattern, "*");
+    return pattern;
+}
+#endif
+
+static size_t dashcdg_tx_count_directory_tracks(const char *directory) {
+#ifdef _WIN32
+    WIN32_FIND_DATAA find_data;
+    HANDLE handle;
+    char *pattern;
+    size_t count = 0U;
+
+    if (directory == NULL) {
+        return 0U;
+    }
+
+    pattern = dashcdg_tx_windows_search_pattern(directory);
+    if (pattern == NULL) {
+        return 0U;
+    }
+
+    handle = FindFirstFileA(pattern, &find_data);
+    free(pattern);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return 0U;
+    }
+
+    do {
+        if (find_data.cFileName[0] == '.') {
+            continue;
+        }
+        if ((find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue;
+        }
+        if (!dashcdg_ends_with_ignore_case(find_data.cFileName, ".cdg")) {
+            continue;
+        }
+        count++;
+    } while (FindNextFileA(handle, &find_data) != 0);
+
+    FindClose(handle);
+    return count;
+#else
+    DIR *dir;
+    struct dirent *entry;
+    size_t count = 0U;
+
+    if (directory == NULL) {
+        return 0U;
+    }
+
+    dir = opendir(directory);
+    if (dir == NULL) {
+        return 0U;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') {
+            continue;
+        }
+        if (!dashcdg_ends_with_ignore_case(entry->d_name, ".cdg")) {
+            continue;
+        }
+        if (dashcdg_tx_dirent_is_directory(directory, entry)) {
+            continue;
+        }
+        count++;
+    }
+
+    closedir(dir);
+    return count;
+#endif
+}
+
+static int dashcdg_tx_index_in_seed_window(
+        size_t track_index,
+        size_t start_index,
+        size_t seed_count,
+        size_t total_tracks
+) {
+    size_t end_index;
+
+    if (seed_count == 0U || total_tracks == 0U) {
+        return 0;
+    }
+    if (seed_count >= total_tracks) {
+        return 1;
+    }
+
+    end_index = start_index + seed_count;
+    if (end_index <= total_tracks) {
+        return track_index >= start_index && track_index < end_index;
+    }
+
+    return track_index >= start_index || track_index < (end_index % total_tracks);
 }
 
 static void dashcdg_tx_playlist_shuffle(struct dashcdg_tx_playlist *playlist) {
@@ -703,6 +910,23 @@ static void dashcdg_tx_playlist_shuffle(struct dashcdg_tx_playlist *playlist) {
 
     for (size_t i = playlist->count - 1U; i > 0U; --i) {
         size_t j = (size_t) (rand() % (int) (i + 1U));
+        struct dashcdg_tx_track temp = playlist->tracks[i];
+
+        playlist->tracks[i] = playlist->tracks[j];
+        playlist->tracks[j] = temp;
+    }
+}
+
+static void dashcdg_tx_playlist_shuffle_tail(
+        struct dashcdg_tx_playlist *playlist,
+        size_t start_index
+) {
+    if (playlist == NULL || playlist->count < 2U || start_index >= playlist->count - 1U) {
+        return;
+    }
+
+    for (size_t i = playlist->count - 1U; i > start_index; --i) {
+        size_t j = start_index + (size_t) (rand() % (int) (i - start_index + 1U));
         struct dashcdg_tx_track temp = playlist->tracks[i];
 
         playlist->tracks[i] = playlist->tracks[j];
@@ -734,6 +958,60 @@ static void dashcdg_tx_playlist_shuffle_avoiding_title(
     }
 }
 
+static size_t dashcdg_tx_playlist_preserve_count_locked(void) {
+    size_t preserve_count = 0U;
+
+    if (g_tx_state.playlist.count == 0U) {
+        return 0U;
+    }
+    if (g_tx_state.playlist.current_index < g_tx_state.playlist.count) {
+        preserve_count = g_tx_state.playlist.current_index + 1U;
+    }
+    for (size_t i = 0; i < g_tx_state.track_history_count; ++i) {
+        if (g_tx_state.track_history[i] + 1U > preserve_count) {
+            preserve_count = g_tx_state.track_history[i] + 1U;
+        }
+    }
+    if (preserve_count > g_tx_state.playlist.count) {
+        preserve_count = g_tx_state.playlist.count;
+    }
+    return preserve_count;
+}
+
+static int dashcdg_tx_shuffle_pending_tracks_locked(void) {
+    size_t preserve_count = dashcdg_tx_playlist_preserve_count_locked();
+
+    if (g_tx_state.playlist.count <= preserve_count + 1U) {
+        return 0;
+    }
+    dashcdg_tx_playlist_shuffle_tail(&g_tx_state.playlist, preserve_count);
+    return 1;
+}
+
+static void dashcdg_tx_mix_last_pending_track_locked(void) {
+    size_t preserve_count = dashcdg_tx_playlist_preserve_count_locked();
+    size_t last_index;
+    size_t swap_index;
+    struct dashcdg_tx_track temp;
+
+    if (g_tx_state.playlist.count == 0U) {
+        return;
+    }
+    last_index = g_tx_state.playlist.count - 1U;
+    if (last_index < preserve_count) {
+        return;
+    }
+
+    swap_index = preserve_count + (size_t) (rand() % (int) (last_index - preserve_count + 1U));
+    if (swap_index == last_index) {
+        return;
+    }
+
+    temp = g_tx_state.playlist.tracks[last_index];
+    g_tx_state.playlist.tracks[last_index] = g_tx_state.playlist.tracks[swap_index];
+    g_tx_state.playlist.tracks[swap_index] = temp;
+}
+
 static int dashcdg_tx_history_push_locked(size_t track_index) {
     size_t *resized;
 
@@ -763,11 +1041,85 @@ static int dashcdg_tx_history_push_locked(size_t track_index) {
     return 1;
 }
 
-static int dashcdg_tx_playlist_from_directory(struct dashcdg_tx_playlist *playlist, const char *directory) {
+static int dashcdg_tx_playlist_seed_from_directory(
+        struct dashcdg_tx_playlist *playlist,
+        const char *directory,
+        size_t total_tracks,
+        size_t start_index,
+        size_t max_tracks
+) {
+#ifdef _WIN32
+    WIN32_FIND_DATAA find_data;
+    HANDLE handle;
+    char *pattern;
+    size_t track_index = 0U;
+
+    if (playlist == NULL || directory == NULL || max_tracks == 0U || total_tracks == 0U) {
+        return 0;
+    }
+
+    pattern = dashcdg_tx_windows_search_pattern(directory);
+    if (pattern == NULL) {
+        return 0;
+    }
+
+    handle = FindFirstFileA(pattern, &find_data);
+    free(pattern);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    do {
+        char *cdg_path;
+        char *mp3_path;
+
+        if (find_data.cFileName[0] == '.') {
+            continue;
+        }
+        if ((find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue;
+        }
+        if (!dashcdg_ends_with_ignore_case(find_data.cFileName, ".cdg")) {
+            continue;
+        }
+
+        cdg_path = dashcdg_join_path(directory, find_data.cFileName);
+        if (cdg_path == NULL) {
+            FindClose(handle);
+            return 0;
+        }
+        if (!dashcdg_tx_index_in_seed_window(track_index, start_index, max_tracks, total_tracks)) {
+            track_index++;
+            free(cdg_path);
+            continue;
+        }
+        if (dashcdg_tx_playlist_has_cdg_path(playlist, cdg_path)) {
+            track_index++;
+            free(cdg_path);
+            continue;
+        }
+
+        mp3_path = dashcdg_find_matching_mp3(cdg_path);
+        if (!dashcdg_tx_playlist_add_track(playlist, cdg_path, mp3_path)) {
+            free(cdg_path);
+            free(mp3_path);
+            FindClose(handle);
+            return 0;
+        }
+
+        track_index++;
+        free(cdg_path);
+        free(mp3_path);
+    } while (FindNextFileA(handle, &find_data) != 0);
+
+    FindClose(handle);
+    return playlist->count > 0U;
+#else
     DIR *dir;
     struct dirent *entry;
+    size_t track_index = 0U;
 
-    if (playlist == NULL || directory == NULL) {
+    if (playlist == NULL || directory == NULL || max_tracks == 0U || total_tracks == 0U) {
         return 0;
     }
 
@@ -786,13 +1138,22 @@ static int dashcdg_tx_playlist_from_directory(struct dashcdg_tx_playlist *playli
         if (!dashcdg_ends_with_ignore_case(entry->d_name, ".cdg")) {
             continue;
         }
+        if (dashcdg_tx_dirent_is_directory(directory, entry)) {
+            continue;
+        }
 
         cdg_path = dashcdg_join_path(directory, entry->d_name);
         if (cdg_path == NULL) {
             closedir(dir);
             return 0;
         }
-        if (dashcdg_path_is_directory(cdg_path)) {
+        if (!dashcdg_tx_index_in_seed_window(track_index, start_index, max_tracks, total_tracks)) {
+            track_index++;
+            free(cdg_path);
+            continue;
+        }
+        if (dashcdg_tx_playlist_has_cdg_path(playlist, cdg_path)) {
+            track_index++;
             free(cdg_path);
             continue;
         }
@@ -805,17 +1166,116 @@ static int dashcdg_tx_playlist_from_directory(struct dashcdg_tx_playlist *playli
             return 0;
         }
 
+        track_index++;
         free(cdg_path);
         free(mp3_path);
     }
 
     closedir(dir);
-    if (playlist->count == 0U) {
-        return 0;
+    return playlist->count > 0U;
+#endif
+}
+
+static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
+    char *directory;
+    size_t total_tracks = 0U;
+    size_t appended = 0U;
+    size_t next_progress_log = 256U;
+    size_t total_after = 0U;
+    int did_shuffle = 0;
+
+    (void) unused;
+
+    pthread_mutex_lock(&g_tx_state.mutex);
+    directory = g_tx_state.playlist_scan_directory == NULL ? NULL : dashcdg_strdup(g_tx_state.playlist_scan_directory);
+    total_tracks = g_tx_state.playlist_scan_total_tracks;
+    pthread_mutex_unlock(&g_tx_state.mutex);
+
+    if (directory != NULL) {
+        DIR *dir = opendir(directory);
+        struct dirent *entry;
+        size_t scanned_tracks = 0U;
+
+        if (dir != NULL) {
+            while ((entry = readdir(dir)) != NULL) {
+                char *cdg_path;
+                char *mp3_path;
+                size_t playlist_total = 0U;
+
+                if (entry->d_name[0] == '.') {
+                    continue;
+                }
+                if (!dashcdg_ends_with_ignore_case(entry->d_name, ".cdg")) {
+                    continue;
+                }
+                if (dashcdg_tx_dirent_is_directory(directory, entry)) {
+                    continue;
+                }
+
+                cdg_path = dashcdg_join_path(directory, entry->d_name);
+                if (cdg_path == NULL) {
+                    break;
+                }
+                mp3_path = dashcdg_find_matching_mp3(cdg_path);
+
+                pthread_mutex_lock(&g_tx_state.mutex);
+                if (g_tx_state.shutdown_requested || g_tx_state.playlist_scan_directory == NULL ||
+                        strcmp(g_tx_state.playlist_scan_directory, directory) != 0) {
+                    pthread_mutex_unlock(&g_tx_state.mutex);
+                    free(cdg_path);
+                    free(mp3_path);
+                    break;
+                }
+                if (!dashcdg_tx_playlist_has_cdg_path(&g_tx_state.playlist, cdg_path) &&
+                        dashcdg_tx_playlist_add_track(&g_tx_state.playlist, cdg_path, mp3_path)) {
+                    appended++;
+                    dashcdg_tx_mix_last_pending_track_locked();
+                }
+                playlist_total = g_tx_state.playlist.count;
+                pthread_mutex_unlock(&g_tx_state.mutex);
+
+                scanned_tracks++;
+                if (scanned_tracks >= next_progress_log || (total_tracks > 0U && scanned_tracks >= total_tracks)) {
+                    fprintf(
+                            stdout,
+                            "[tx] scan progress %zu/%zu tracks, playlist now %zu\n",
+                            scanned_tracks,
+                            total_tracks,
+                            playlist_total
+                    );
+                    fflush(stdout);
+                    next_progress_log += 256U;
+                }
+
+                free(cdg_path);
+                free(mp3_path);
+            }
+
+            closedir(dir);
+        }
+
+        pthread_mutex_lock(&g_tx_state.mutex);
+        if (!g_tx_state.shutdown_requested && g_tx_state.playlist.count > 0U) {
+            did_shuffle = dashcdg_tx_shuffle_pending_tracks_locked();
+        }
+        total_after = g_tx_state.playlist.count;
+        g_tx_state.playlist_scan_running = 0;
+        pthread_mutex_unlock(&g_tx_state.mutex);
+
+        fprintf(
+                stdout,
+                "[tx] background scan complete: appended %zu track%s, playlist %zu/%zu%s\n",
+                appended,
+                appended == 1U ? "" : "s",
+                total_after,
+                total_tracks,
+                did_shuffle ? ", reshuffled remaining queue" : ""
+        );
+        fflush(stdout);
     }
 
-    qsort(playlist->tracks, playlist->count, sizeof(*playlist->tracks), dashcdg_tx_compare_tracks);
-    return 1;
+    free(directory);
+    return NULL;
 }
 
 static uint64_t dashcdg_tx_get_audio_duration_ms(struct dashcdg_tx_track *track) {
@@ -868,7 +1328,7 @@ static int dashcdg_tx_parse_ipv4_address(const char *value, struct in_addr *out_
         return 0;
     }
 
-    return inet_pton(AF_INET, value, out_addr) == 1;
+    return dashcdg_inet_pton(AF_INET, value, out_addr) == 1;
 }
 
 static void dashcdg_tx_format_multicast_interface(
@@ -876,7 +1336,7 @@ static void dashcdg_tx_format_multicast_interface(
         char *buffer,
         size_t buffer_size
 ) {
-    char address_buffer[INET_ADDRSTRLEN];
+    char address_buffer[DASHCDG_INET_ADDRSTRLEN];
     const char *interface_kind = "multicast";
 
     if (buffer == NULL || buffer_size == 0U) {
@@ -895,7 +1355,7 @@ static void dashcdg_tx_format_multicast_interface(
         interface_kind = "tailscale";
     }
 
-    if (inet_ntop(AF_INET, &interface_info->ipv4_addr, address_buffer, sizeof(address_buffer)) == NULL) {
+    if (dashcdg_inet_ntop(AF_INET, &interface_info->ipv4_addr, address_buffer, sizeof(address_buffer)) == NULL) {
         strncpy(address_buffer, "unknown", sizeof(address_buffer) - 1U);
         address_buffer[sizeof(address_buffer) - 1U] = '\0';
     }
@@ -1464,7 +1924,7 @@ static void dashcdg_tx_print_status_locked(void) {
     );
     fprintf(
             stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB | audq=%zu hi=%zu ovf=%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB scan=%zu/%zu | audq=%zu hi=%zu ovf=%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -1490,6 +1950,8 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) g_tx_state.asset_loops_completed,
             cdg_source_mode,
             cdg_schedule_bytes,
+            g_tx_state.playlist.count,
+            g_tx_state.playlist_scan_total_tracks,
             audio_queue_stats.depth,
             audio_queue_stats.high_watermark,
             (unsigned long long) g_tx_state.audio_queue_overflows,
@@ -1751,6 +2213,7 @@ static int dashcdg_tx_load_relative_track_locked(int delta) {
     }
 
     if (wrapped && g_tx_state.playlist.count > 1U) {
+        dashcdg_tx_shuffle_pending_tracks_locked();
         dashcdg_tx_playlist_shuffle_avoiding_title(&g_tx_state.playlist, current_title);
         next_index = 0U;
     }
@@ -2637,10 +3100,328 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
     return NULL;
 }
 
+static int dashcdg_tx_console_output_is_tty(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+static int dashcdg_tx_console_input_is_tty(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(STDIN_FILENO) != 0;
+#endif
+}
+
+static void dashcdg_tx_console_get_dimensions(size_t *rows_out, size_t *cols_out) {
+    if (rows_out != NULL) {
+        *rows_out = 0U;
+    }
+    if (cols_out != NULL) {
+        *cols_out = 0U;
+    }
+#ifdef _WIN32
+    {
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+
+        if (handle != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(handle, &info)) {
+            if (rows_out != NULL) {
+                *rows_out = (size_t) (info.srWindow.Bottom - info.srWindow.Top + 1);
+            }
+            if (cols_out != NULL) {
+                *cols_out = (size_t) (info.srWindow.Right - info.srWindow.Left + 1);
+            }
+        }
+    }
+#else
+    {
+        struct winsize ws;
+
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
+            if (rows_out != NULL) {
+                *rows_out = ws.ws_row;
+            }
+            if (cols_out != NULL) {
+                *cols_out = ws.ws_col;
+            }
+        }
+    }
+#endif
+}
+
+static void dashcdg_tx_console_sync_scroll_layout(size_t rows) {
+    if (!g_tx_console.status_bar_enabled) {
+        return;
+    }
+    if (rows < 2U) {
+        if (g_tx_console.status_scroll_layout != 0) {
+            fprintf(stdout, "\033[r");
+            fflush(stdout);
+            g_tx_console.status_scroll_layout = 0;
+            g_tx_console.status_bar_valid = 0;
+        }
+        g_tx_console.layout_rows = rows;
+        return;
+    }
+    if (g_tx_console.status_scroll_layout == 0 || g_tx_console.layout_rows != rows) {
+        fprintf(stdout, "\033[r\033[1;%zur", rows - 1U);
+        fflush(stdout);
+        g_tx_console.status_scroll_layout = 1;
+        g_tx_console.layout_rows = rows;
+        g_tx_console.status_bar_valid = 0;
+    }
+}
+
+static void dashcdg_tx_console_sync_scroll_layout_for_tty(void) {
+    size_t rows = 0U;
+
+    if (!g_tx_console.status_bar_enabled) {
+        return;
+    }
+    dashcdg_tx_console_get_dimensions(&rows, NULL);
+    dashcdg_tx_console_sync_scroll_layout(rows);
+}
+
+static void dashcdg_tx_console_scroll_log_past_status_row(void) {
+    size_t rows = 0U;
+
+    if (!g_tx_console.status_bar_enabled || !g_tx_console.status_scroll_layout) {
+        return;
+    }
+    dashcdg_tx_console_get_dimensions(&rows, NULL);
+    if (rows < 2U) {
+        return;
+    }
+    fprintf(stdout, "\033[%zu;1H\n", rows - 1U);
+    fflush(stdout);
+}
+
+static int dashcdg_tx_console_init(void) {
+    memset(&g_tx_console, 0, sizeof(g_tx_console));
+    g_tx_console.input_ready = dashcdg_tx_console_input_is_tty();
+    g_tx_console.status_bar_enabled = dashcdg_tx_console_output_is_tty();
+
+#ifdef _WIN32
+    if (g_tx_console.status_bar_enabled) {
+        HANDLE output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+
+        if (output_handle != INVALID_HANDLE_VALUE && GetConsoleMode(output_handle, &mode)) {
+            g_tx_console.original_output_mode = mode;
+            g_tx_console.output_mode_saved = 1;
+            SetConsoleMode(output_handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        } else {
+            g_tx_console.status_bar_enabled = 0;
+        }
+    }
+#else
+    if (g_tx_console.input_ready) {
+        struct termios raw;
+
+        if (tcgetattr(STDIN_FILENO, &g_tx_console.original_termios) == 0) {
+            g_tx_console.termios_saved = 1;
+            raw = g_tx_console.original_termios;
+            raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+            raw.c_cc[VMIN] = 0;
+            raw.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        } else {
+            g_tx_console.input_ready = 0;
+        }
+        g_tx_console.stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+        if (g_tx_console.stdin_flags >= 0) {
+            g_tx_console.stdin_flags_saved = 1;
+            fcntl(STDIN_FILENO, F_SETFL, g_tx_console.stdin_flags | O_NONBLOCK);
+        }
+    }
+#endif
+
+    return g_tx_console.input_ready || g_tx_console.status_bar_enabled;
+}
+
+static void dashcdg_tx_console_shutdown(void) {
+#ifdef _WIN32
+    if (g_tx_console.output_mode_saved) {
+        SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), g_tx_console.original_output_mode);
+    }
+#else
+    if (g_tx_console.termios_saved) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_tx_console.original_termios);
+    }
+    if (g_tx_console.stdin_flags_saved) {
+        fcntl(STDIN_FILENO, F_SETFL, g_tx_console.stdin_flags);
+    }
+#endif
+    memset(&g_tx_console, 0, sizeof(g_tx_console));
+}
+
+static int dashcdg_tx_console_read_command_nonblocking(void) {
+    if (!g_tx_console.input_ready) {
+        return 0;
+    }
+
+#ifdef _WIN32
+    if (!_kbhit()) {
+        return 0;
+    }
+    {
+        int ch = _getch();
+
+        if (ch == 0 || ch == 224) {
+            int extended = _getch();
+
+            if (extended == 77) {
+                return ']';
+            }
+            if (extended == 75) {
+                return '[';
+            }
+            return 0;
+        }
+        return ch;
+    }
+#else
+    {
+        unsigned char ch = 0U;
+        ssize_t received = read(STDIN_FILENO, &ch, 1);
+
+        if (received <= 0) {
+            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                return 0;
+            }
+            return 0;
+        }
+        if (ch == '\x1b') {
+            unsigned char seq[2];
+            ssize_t seq_read = read(STDIN_FILENO, seq, sizeof(seq));
+
+            if (seq_read >= 2 && seq[0] == '[') {
+                if (seq[1] == 'C') {
+                    return ']';
+                }
+                if (seq[1] == 'D') {
+                    return '[';
+                }
+            }
+            return 0;
+        }
+        return (int) ch;
+    }
+#endif
+}
+
+static void dashcdg_tx_format_status_bar_locked(char *buffer, size_t buffer_size) {
+    const struct dashcdg_tx_track *track = dashcdg_tx_current_track();
+    uint64_t now_ms = dashcdg_clock_now_ms();
+    uint64_t playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    uint64_t until_start_ms = now_ms < g_tx_state.session_start_ms ? g_tx_state.session_start_ms - now_ms : 0U;
+    int64_t audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
+    int64_t cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(playback_ms);
+    size_t rows = 0U;
+    size_t cols = 0U;
+    char title[64];
+
+    if (buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    title[0] = '\0';
+    if (track != NULL && track->title != NULL) {
+        snprintf(title, sizeof(title), "%.48s", track->title);
+    } else {
+        snprintf(title, sizeof(title), "<no track>");
+    }
+
+    snprintf(
+            buffer,
+            buffer_size,
+            "[tx] %zu/%zu %s %s %llums/%llums scan=%zu/%zu lead a=%lld v=%lld start=%llums %s",
+            g_tx_state.playlist.count == 0U ? 0U : g_tx_state.playlist.current_index + 1U,
+            g_tx_state.playlist.count,
+            g_tx_state.paused ? "paused" : "playing",
+            title,
+            (unsigned long long) playback_ms,
+            (unsigned long long) g_tx_state.duration_ms,
+            g_tx_state.playlist.count,
+            g_tx_state.playlist_scan_total_tracks,
+            (long long) audio_lead_ms,
+            (long long) cdg_lead_ms,
+            (unsigned long long) until_start_ms,
+            g_tx_state.playlist_scan_running ? "| p/n/b/u/r/s/q" : "| p/n/b/u/r/s/q"
+    );
+
+    dashcdg_tx_console_get_dimensions(&rows, &cols);
+    if (cols > 1U && strlen(buffer) >= cols) {
+        buffer[cols - 1U] = '\0';
+    }
+}
+
+static void dashcdg_tx_draw_status_bar_locked(void) {
+    char status_line[512];
+    size_t rows = 0U;
+    size_t cols = 0U;
+    size_t new_length;
+
+    if (!g_tx_console.status_bar_enabled) {
+        return;
+    }
+
+    dashcdg_tx_console_get_dimensions(&rows, &cols);
+    if (rows == 0U) {
+        rows = 1U;
+    }
+    dashcdg_tx_console_sync_scroll_layout(rows);
+    dashcdg_tx_format_status_bar_locked(status_line, sizeof(status_line));
+    new_length = strlen(status_line);
+
+    if (g_tx_console.status_bar_valid &&
+            g_tx_console.last_status_row == rows &&
+            g_tx_console.last_status_cols == cols &&
+            strcmp(g_tx_console.last_status_line, status_line) == 0) {
+        return;
+    }
+
+    if (!g_tx_console.status_bar_valid ||
+            g_tx_console.last_status_row != rows ||
+            g_tx_console.last_status_cols != cols) {
+        fprintf(stdout, "\033[s\033[%zu;1H\033[2K%s\033[u", rows, status_line);
+    } else {
+        size_t first_diff = 0U;
+        size_t old_length = g_tx_console.last_status_length;
+
+        while (first_diff < old_length &&
+                first_diff < new_length &&
+                g_tx_console.last_status_line[first_diff] == status_line[first_diff]) {
+            first_diff++;
+        }
+
+        if (first_diff < old_length || first_diff < new_length) {
+            size_t pad_spaces = old_length > new_length ? old_length - new_length : 0U;
+
+            fprintf(stdout, "\033[s\033[%zu;%zuH%s", rows, first_diff + 1U, status_line + first_diff);
+            if (pad_spaces > 0U) {
+                fprintf(stdout, "%*s", (int) pad_spaces, "");
+            }
+            fprintf(stdout, "\033[u");
+        }
+    }
+    fflush(stdout);
+
+    strncpy(g_tx_console.last_status_line, status_line, sizeof(g_tx_console.last_status_line) - 1U);
+    g_tx_console.last_status_line[sizeof(g_tx_console.last_status_line) - 1U] = '\0';
+    g_tx_console.last_status_length = strlen(g_tx_console.last_status_line);
+    g_tx_console.last_status_row = rows;
+    g_tx_console.last_status_cols = cols;
+    g_tx_console.status_bar_valid = 1;
+}
+
 static void dashcdg_tx_print_help(void) {
     fprintf(
             stdout,
-            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), r=restart, f=force-broadcast, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
+            "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, f=force-broadcast, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
     );
     fflush(stdout);
 }
@@ -2666,6 +3447,13 @@ static int dashcdg_tx_handle_command(int command) {
                 fprintf(stdout, "[tx] no previous history track available\n");
             }
             break;
+        case 'u':
+            if (dashcdg_tx_shuffle_pending_tracks_locked()) {
+                fprintf(stdout, "[tx] reshuffled pending playlist queue\n");
+            } else {
+                fprintf(stdout, "[tx] no pending playlist tail available to reshuffle\n");
+            }
+            break;
         case 'r':
             if (!dashcdg_tx_load_track_locked(g_tx_state.playlist.current_index, 1)) {
                 fprintf(stdout, "[tx] failed to restart current track\n");
@@ -2676,6 +3464,7 @@ static int dashcdg_tx_handle_command(int command) {
             fprintf(stdout, "[tx] force rebroadcast requested\n");
             break;
         case 's':
+            dashcdg_tx_print_status_locked();
             break;
         case 'i':
             if (g_tx_state.display_requested) {
@@ -2704,8 +3493,8 @@ static int dashcdg_tx_handle_command(int command) {
             break;
     }
 
-    if (handled && command != 'h' && command != '?') {
-        dashcdg_tx_print_status_locked();
+    if (handled && command != 'h' && command != '?' && command != 's') {
+        dashcdg_tx_draw_status_bar_locked();
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
@@ -2716,45 +3505,66 @@ static int dashcdg_tx_handle_command(int command) {
     return handled;
 }
 
-static int dashcdg_tx_parse_console_command(const char *line) {
-    if (line == NULL || line[0] == '\0' || line[0] == '\n') {
-        return 0;
-    }
-
-    if (line[0] == '\x1b' && line[1] == '[') {
-        if (line[2] == 'C') {
-            return ']';
-        }
-        if (line[2] == 'D') {
-            return '[';
-        }
-    }
-
-    return (unsigned char) line[0];
-}
-
 static void *dashcdg_tx_control_thread_main(void *unused) {
-    char line[64];
+    uint64_t last_status_ms = 0U;
+    size_t last_playlist_total = SIZE_MAX;
 
     (void) unused;
 
+    dashcdg_tx_console_init();
+    dashcdg_tx_console_sync_scroll_layout_for_tty();
+    dashcdg_tx_console_scroll_log_past_status_row();
     dashcdg_tx_print_help();
     pthread_mutex_lock(&g_tx_state.mutex);
-    dashcdg_tx_print_status_locked();
+    if (g_tx_console.status_bar_enabled) {
+        dashcdg_tx_draw_status_bar_locked();
+    } else {
+        dashcdg_tx_print_status_locked();
+    }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
-    while (!g_tx_state.shutdown_requested && fgets(line, sizeof(line), stdin) != NULL) {
-        int command = dashcdg_tx_parse_console_command(line);
+    for (;;) {
+        int command = dashcdg_tx_console_read_command_nonblocking();
+        int shutdown_requested = 0;
+        uint64_t now_ms = dashcdg_clock_now_ms();
 
-        if (command == 0) {
+        pthread_mutex_lock(&g_tx_state.mutex);
+        shutdown_requested = g_tx_state.shutdown_requested;
+        if (g_tx_state.playlist.count != last_playlist_total) {
+            if (last_playlist_total != SIZE_MAX && g_tx_state.playlist_scan_running) {
+                dashcdg_tx_shuffle_pending_tracks_locked();
+            }
+            last_playlist_total = g_tx_state.playlist.count;
+        }
+        if (g_tx_console.status_bar_enabled &&
+                (last_status_ms == 0U || now_ms - last_status_ms >= DASHCDG_TX_STATUS_BAR_INTERVAL_MS)) {
+            dashcdg_tx_draw_status_bar_locked();
+            last_status_ms = now_ms;
+        }
+        pthread_mutex_unlock(&g_tx_state.mutex);
+
+        if (shutdown_requested) {
+            break;
+        }
+        if (command != 0) {
+            if (!dashcdg_tx_handle_command(command)) {
+                fprintf(
+                        stdout,
+                        "[tx] unknown command '%c'\n",
+                        isprint(command) ? command : '?'
+                );
+                dashcdg_tx_print_help();
+            }
             continue;
         }
-        if (!dashcdg_tx_handle_command(command)) {
-            fprintf(stdout, "[tx] unknown command '%c'\n", command);
-            dashcdg_tx_print_help();
-        }
+        dashcdg_sleep_ms(15);
     }
 
+    if (g_tx_console.status_bar_enabled) {
+        fprintf(stdout, "\033[r");
+        fflush(stdout);
+    }
+    dashcdg_tx_console_shutdown();
     return NULL;
 }
 
@@ -2762,6 +3572,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
     unsigned int audio_sent = 0U;
     unsigned int video_sent = 0U;
+    int anchor_refresh_window_active = 0;
 
     if (g_tx_state.last_v4_session_info_ms == 0U ||
             now_ms - g_tx_state.last_v4_session_info_ms >= DASHCDG_V4_SESSION_INFO_INTERVAL_MS) {
@@ -2771,7 +3582,12 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
             now_ms - g_tx_state.last_v4_clock_sync_ms >= DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS) {
         dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, packet_size);
     }
-    if ((g_tx_state.v4_first_anchor_local_ms == 0U || g_tx_state.v4_first_audio_local_ms == 0U) &&
+    if (g_tx_state.last_v4_video_anchor_ms != 0U &&
+            now_ms >= g_tx_state.last_v4_video_anchor_ms &&
+            now_ms - g_tx_state.last_v4_video_anchor_ms < 500U) {
+        anchor_refresh_window_active = 1;
+    }
+    if ((g_tx_state.v4_first_anchor_local_ms == 0U || g_tx_state.v4_first_audio_local_ms == 0U || anchor_refresh_window_active) &&
             (g_tx_state.last_v4_loading_screen_ms == 0U ||
              now_ms - g_tx_state.last_v4_loading_screen_ms >= DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS)) {
         dashcdg_tx_send_v4_loading_screen_locked(now_ms, packet, packet_size);
@@ -3343,6 +4159,14 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
 }
 
 static void dashcdg_tx_cleanup(void) {
+    if (g_tx_state.control_thread_created) {
+        pthread_join(g_tx_state.control_thread, NULL);
+        g_tx_state.control_thread_created = 0;
+    }
+    if (g_tx_state.playlist_scan_thread_created) {
+        pthread_join(g_tx_state.playlist_scan_thread, NULL);
+        g_tx_state.playlist_scan_thread_created = 0;
+    }
     dashcdg_runtime_queue_shutdown(&g_tx_state.audio_ready_queue);
     dashcdg_cdg_source_free(&g_tx_state.cdg_source);
     free(g_tx_state.v4_video_anchor_bytes);
@@ -3357,6 +4181,9 @@ static void dashcdg_tx_cleanup(void) {
     free(g_tx_state.chunk_seen);
     g_tx_state.chunk_seen = NULL;
     g_tx_state.chunk_count = 0;
+    free(g_tx_state.playlist_scan_directory);
+    g_tx_state.playlist_scan_directory = NULL;
+    g_tx_state.playlist_scan_running = 0;
     if (g_tx_state.sockfd != DASHCDG_INVALID_SOCKET) {
         dashcdg_socket_close(g_tx_state.sockfd);
         g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
@@ -3368,6 +4195,7 @@ static void dashcdg_tx_cleanup(void) {
     dashcdg_cdg_reader_free(&g_tx_state.reader);
     dashcdg_runtime_queue_free(&g_tx_state.audio_ready_queue);
     dashcdg_tx_playlist_free(&g_tx_state.playlist);
+    dashcdg_tx_console_shutdown();
     dashcdg_net_cleanup();
     pthread_mutex_destroy(&g_tx_state.mutex);
 }
@@ -3392,6 +4220,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     struct dashcdg_multicast_interface multicast_interfaces[DASHCDG_MAX_MULTICAST_INTERFACES];
     size_t multicast_interface_count = 0U;
     size_t joined_interface_count = 0U;
+    size_t initial_track_index = 0U;
+    size_t startup_track_total = 0U;
+    size_t startup_seed_count = 0U;
+    size_t startup_seed_start = 0U;
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
@@ -3517,12 +4349,36 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     if (dashcdg_path_is_directory(source_path)) {
-        if (!dashcdg_tx_playlist_from_directory(&g_tx_state.playlist, source_path)) {
+        fprintf(stdout, "[tx] scanning folder for random startup window: %s\n", source_path);
+        fflush(stdout);
+        startup_track_total = dashcdg_tx_count_directory_tracks(source_path);
+        if (startup_track_total == 0U) {
+            fprintf(stderr, "failed to find any CDG tracks in folder: %s\n", source_path);
+            dashcdg_tx_cleanup();
+            return 1;
+        }
+        startup_seed_count = startup_track_total < DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT ?
+                startup_track_total : DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT;
+        startup_seed_start = startup_track_total <= startup_seed_count ?
+                0U : (size_t) (rand() % (int) startup_track_total);
+        if (!dashcdg_tx_playlist_seed_from_directory(
+                    &g_tx_state.playlist,
+                    source_path,
+                    startup_track_total,
+                    startup_seed_start,
+                    DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT
+            )) {
             fprintf(stderr, "failed to build transmitter playlist from folder: %s\n", source_path);
             dashcdg_tx_cleanup();
             return 1;
         }
         dashcdg_tx_playlist_shuffle(&g_tx_state.playlist);
+        g_tx_state.playlist_scan_directory = dashcdg_strdup(source_path);
+        g_tx_state.playlist_scan_total_tracks = startup_track_total;
+        g_tx_state.playlist_scan_seed_start_index = startup_seed_start;
+        g_tx_state.playlist_scan_seed_count = startup_seed_count;
+        g_tx_state.playlist_scan_running =
+                g_tx_state.playlist_scan_directory != NULL && g_tx_state.playlist.count < g_tx_state.playlist_scan_total_tracks;
     } else if (!dashcdg_tx_playlist_add_auto_paired_track(&g_tx_state.playlist, source_path)) {
         fprintf(stderr, "failed to resolve transmitter source path: %s\n", source_path);
         dashcdg_tx_cleanup();
@@ -3623,13 +4479,22 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     g_tx_state.sequence = 1;
-    if (!dashcdg_tx_load_track_with_history_locked(0, 1, 1)) {
+    if (!dashcdg_tx_load_track_with_history_locked(initial_track_index, 1, 1)) {
         dashcdg_tx_cleanup();
         return 1;
     }
 
     fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
     fprintf(stdout, "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "badnet-v4" : "v3");
+    if (g_tx_state.playlist_scan_running) {
+        fprintf(
+                stdout,
+                "[tx] startup seed scan ready with %zu/%zu tracks from window starting at %zu; continuing folder scan in background\n",
+                g_tx_state.playlist.count,
+                g_tx_state.playlist_scan_total_tracks,
+                g_tx_state.playlist_scan_seed_start_index + 1U
+        );
+    }
     if (g_tx_state.display_requested) {
         fprintf(stdout, "[tx] preview enabled; HUD hidden by default, press I to toggle it\n");
     }
@@ -3650,7 +4515,19 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     pthread_create(&g_tx_state.audio_thread, NULL, dashcdg_tx_audio_thread_main, NULL);
     pthread_create(&g_tx_state.tx_thread, NULL, dashcdg_tx_thread_main, NULL);
     pthread_create(&g_tx_state.ptp_thread, NULL, dashcdg_tx_ptp_thread_main, NULL);
-    pthread_create(&g_tx_state.control_thread, NULL, dashcdg_tx_control_thread_main, NULL);
+    g_tx_state.control_thread_created =
+            pthread_create(&g_tx_state.control_thread, NULL, dashcdg_tx_control_thread_main, NULL) == 0;
+    if (!g_tx_state.control_thread_created) {
+        fprintf(stderr, "failed to start TX control thread\n");
+    }
+    if (g_tx_state.playlist_scan_running) {
+        g_tx_state.playlist_scan_thread_created =
+                pthread_create(&g_tx_state.playlist_scan_thread, NULL, dashcdg_tx_playlist_scan_thread_main, NULL) == 0;
+        if (!g_tx_state.playlist_scan_thread_created) {
+            g_tx_state.playlist_scan_running = 0;
+            fprintf(stderr, "failed to start background playlist scan thread\n");
+        }
+    }
 
     if (!g_tx_state.display_requested) {
         pthread_join(g_tx_state.tx_thread, NULL);

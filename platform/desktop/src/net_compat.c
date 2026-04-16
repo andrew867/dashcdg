@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -191,6 +192,81 @@ int dashcdg_socket_close(dashcdg_socket_t sockfd) {
     return closesocket(sockfd);
 #else
     return close(sockfd);
+#endif
+}
+
+int dashcdg_inet_pton(int af, const char *src, void *dst) {
+    struct in_addr *out;
+
+    if (af != AF_INET || src == NULL || dst == NULL) {
+        return -1;
+    }
+    out = (struct in_addr *) dst;
+#ifdef _WIN32
+    {
+        const char *p = src;
+        unsigned long parts[4];
+
+        for (size_t i = 0; i < 4U; ++i) {
+            char *end = NULL;
+            unsigned long v = strtoul(p, &end, 10);
+
+            if (end == p || v > 255UL) {
+                return 0;
+            }
+            parts[i] = v;
+            if (i == 3U) {
+                if (*end != '\0') {
+                    return 0;
+                }
+                break;
+            }
+            if (*end != '.') {
+                return 0;
+            }
+            p = end + 1;
+        }
+        out->s_addr = htonl(
+                (uint32_t) ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3])
+        );
+        return 1;
+    }
+#else
+    return inet_pton(af, src, dst);
+#endif
+}
+
+const char *dashcdg_inet_ntop(int af, const void *src, char *dst, size_t dst_size) {
+    const struct in_addr *in;
+
+    if (af != AF_INET || src == NULL || dst == NULL || dst_size == 0U) {
+        return NULL;
+    }
+    in = (const struct in_addr *) src;
+#ifdef _WIN32
+    {
+        uint32_t h = ntohl(in->s_addr);
+        int n;
+
+        if (dst_size < DASHCDG_INET_ADDRSTRLEN) {
+            return NULL;
+        }
+        n = snprintf(
+                dst,
+                dst_size,
+                "%lu.%lu.%lu.%lu",
+                (unsigned long) ((h >> 24) & 255UL),
+                (unsigned long) ((h >> 16) & 255UL),
+                (unsigned long) ((h >> 8) & 255UL),
+                (unsigned long) (h & 255UL)
+        );
+        if (n <= 0 || (size_t) n >= dst_size) {
+            return NULL;
+        }
+        return dst;
+    }
+#else
+    return inet_ntop(af, src, dst, (socklen_t) dst_size);
 #endif
 }
 

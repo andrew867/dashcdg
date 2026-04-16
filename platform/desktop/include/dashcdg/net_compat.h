@@ -19,6 +19,10 @@ typedef int dashcdg_socket_t;
 
 #define DASHCDG_NET_IFACE_NAME_MAX 128U
 #define DASHCDG_MAX_MULTICAST_INTERFACES 16U
+#define DASHCDG_INET_ADDRSTRLEN 16U
+
+int dashcdg_inet_pton(int af, const char *src, void *dst);
+const char *dashcdg_inet_ntop(int af, const void *src, char *dst, size_t dst_size);
 
 struct dashcdg_multicast_interface {
     struct in_addr ipv4_addr;

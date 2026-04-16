@@ -134,6 +134,7 @@ struct receiver_state {
     uint64_t v4_clock_sync_packets;
     uint64_t live_packets_applied;
     uint64_t audio_decode_failures;
+    uint64_t audio_queue_overflows;
     uint64_t audio_reordered_packets;
     uint64_t audio_missing_skips;
     uint64_t audio_pending_drops;
@@ -429,7 +430,7 @@ static int dashcdg_rx_parse_ipv4_address(const char *value, struct in_addr *out_
         return 0;
     }
 
-    return inet_pton(AF_INET, value, out_addr) == 1;
+    return dashcdg_inet_pton(AF_INET, value, out_addr) == 1;
 }
 
 static void dashcdg_rx_format_multicast_interface(
@@ -437,7 +438,7 @@ static void dashcdg_rx_format_multicast_interface(
         char *buffer,
         size_t buffer_size
 ) {
-    char address_buffer[INET_ADDRSTRLEN];
+    char address_buffer[DASHCDG_INET_ADDRSTRLEN];
     const char *interface_kind = "multicast";
 
     if (buffer == NULL || buffer_size == 0U) {
@@ -456,7 +457,7 @@ static void dashcdg_rx_format_multicast_interface(
         interface_kind = "tailscale";
     }
 
-    if (inet_ntop(AF_INET, &interface_info->ipv4_addr, address_buffer, sizeof(address_buffer)) == NULL) {
+    if (dashcdg_inet_ntop(AF_INET, &interface_info->ipv4_addr, address_buffer, sizeof(address_buffer)) == NULL) {
         strncpy(address_buffer, "unknown", sizeof(address_buffer) - 1U);
         address_buffer[sizeof(address_buffer) - 1U] = '\0';
     }
@@ -557,6 +558,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->v4_clock_sync_packets = 0;
     state->live_packets_applied = 0;
     state->audio_decode_failures = 0;
+    state->audio_queue_overflows = 0;
     state->audio_reordered_packets = 0;
     state->audio_missing_skips = 0;
     state->audio_pending_drops = 0;
@@ -754,9 +756,12 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
         return 0;
     }
     if (!state->playback_paused &&
+            state->live_packets_applied > 0 &&
             state->next_live_packet_initialized &&
             state->active_snapshot_packet_index < state->next_live_packet_index) {
-        return 0;
+        if (state->cdg_snapshots_applied > 0 || state->active_snapshot_packet_index == 0U) {
+            return 0;
+        }
     }
 
     state->live_state.ts = state->active_snapshot_packet_index;
@@ -898,6 +903,9 @@ static void dashcdg_rx_apply_loading_screen_locked(
     int reconnecting = 0;
 
     if (state == NULL) {
+        return;
+    }
+    if (state->cdg_snapshots_applied > 0 || state->next_live_packet_initialized) {
         return;
     }
 
@@ -1796,7 +1804,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
             (int64_t) frame->playback_ms
     );
     if (queued_frames != (size_t) decoded_frames) {
-        state->audio_decode_failures++;
+        state->audio_queue_overflows++;
         return 0;
     }
 
@@ -1962,7 +1970,7 @@ static void dashcdg_rx_print_status_locked(void) {
 
     fprintf(
             stdout,
-            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu snap=%llu/%llu fec=%llu/%llu/%llu ptp=%llu/%llu/%llu/%llu v4=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | repair aud=%llu live=%llu fail=%llu grp=%zu/%zu parity=%zu/%zu hot=%zu/%zu | audio buffered=%ums decode_fail=%llu started=%d muted=%d gate=%s render=%s | sync off=%lldms path=%lldms step=%lld/%lld peak=%lld/%lld upd=%llu ptp_ok=%llu fallback=%llu hold=%llums | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d proto=%u prof=%u codec=%u\n",
+            "[rx] net: dg=%llu bytes=%llu parse_fail=%llu | pkt ann=%llu ch=%llu bc=%llu aud=%llu live=%llu snap=%llu/%llu fec=%llu/%llu/%llu ptp=%llu/%llu/%llu/%llu v4=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu unk=%llu | asset prefix_bytes=%u/%u chunks=%zu/%zu rcv=%zu dup=%llu written=%llu live_applied=%llu | jitter aud=%zu skip=%llu drop=%llu reord=%llu live=%zu skip=%llu drop=%llu reord=%llu | repair aud=%llu live=%llu fail=%llu grp=%zu/%zu parity=%zu/%zu hot=%zu/%zu | audio buffered=%ums decode_fail=%llu queue_ovf=%llu started=%d muted=%d gate=%s render=%s | sync off=%lldms path=%lldms step=%lld/%lld peak=%lld/%lld upd=%llu ptp_ok=%llu fallback=%llu hold=%llums | since_last_dg=%llums stall_since_progress=%llums ready=%d clock=%d pause=%d proto=%u prof=%u codec=%u\n",
             (unsigned long long) g_receiver.datagrams_received,
             (unsigned long long) g_receiver.bytes_received,
             (unsigned long long) g_receiver.parse_failures,
@@ -2016,6 +2024,7 @@ static void dashcdg_rx_print_status_locked(void) {
             cdg_repairable,
             (unsigned int) audio_buffered_ms,
             (unsigned long long) g_receiver.audio_decode_failures,
+            (unsigned long long) g_receiver.audio_queue_overflows,
             g_audio_stream_started,
             muted,
             audio_gate,
@@ -2174,6 +2183,8 @@ static void dashcdg_rx_configure_audio_locked(
         uint16_t playout_delay_ms,
         uint8_t codec_id
 ) {
+    uint32_t buffer_ms;
+
     if (state == NULL || !state->network_audio_enabled) {
         return;
     }
@@ -2185,12 +2196,20 @@ static void dashcdg_rx_configure_audio_locked(
         return;
     }
 
+    buffer_ms = playout_delay_ms > 0 ? (uint32_t) playout_delay_ms * 3U : 1500U;
+    if (buffer_ms < 1500U) {
+        buffer_ms = 1500U;
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE && buffer_ms < 2000U) {
+        buffer_ms = 2000U;
+    }
+
     dashcdg_desktop_audio_stop_stream(g_audio);
     dashcdg_desktop_audio_init_stream(
             g_audio,
             sample_rate,
             channels,
-            playout_delay_ms > 0 ? (uint32_t) playout_delay_ms * 3U : 1500U
+            buffer_ms
     );
     dashcdg_opus_decoder_free(&g_opus_decoder);
     if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
@@ -2207,6 +2226,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     int session_changed;
     int asset_changed;
     int codec_changed;
+    int audio_format_changed;
     int has_network_audio;
 
     if (state == NULL || view == NULL) {
@@ -2218,6 +2238,12 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
             state->chunk_size != DASHCDG_MAX_V4_BACKFILL_CHUNK;
     codec_changed = state->announced_audio_codec_id != 0 &&
             state->announced_audio_codec_id != view->v4_session_info.audio_codec_id;
+    audio_format_changed = state->announced_audio_sample_rate != 0 &&
+            (state->announced_audio_sample_rate != view->v4_session_info.audio_sample_rate ||
+                    state->announced_audio_channels != view->v4_session_info.audio_channels ||
+                    state->announced_audio_frame_ms != view->v4_session_info.audio_frame_ms ||
+                    state->announced_playout_delay_ms != view->v4_session_info.startup_preroll_ms ||
+                    state->announced_audio_profile_id != view->v4_session_info.audio_profile_id);
     has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
             view->v4_session_info.audio_channels > 0 &&
             view->v4_session_info.audio_frame_ms > 0;
@@ -2244,7 +2270,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
     }
 
-    if (has_network_audio) {
+    if (has_network_audio && (session_changed || asset_changed || codec_changed || audio_format_changed || g_audio == NULL)) {
         dashcdg_rx_configure_audio_locked(
                 state,
                 view->v4_session_info.audio_sample_rate,
@@ -2253,7 +2279,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
                 view->v4_session_info.startup_preroll_ms,
                 view->v4_session_info.audio_codec_id
         );
-    } else if (g_audio != NULL) {
+    } else if (!has_network_audio && g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
         dashcdg_opus_decoder_free(&g_opus_decoder);
         g_audio_stream_started = 0;

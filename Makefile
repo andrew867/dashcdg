@@ -2,11 +2,6 @@ CC ?= gcc
 AR ?= ar
 
 BUILD_DIR := build
-OBJ_DIR := $(BUILD_DIR)/obj
-BIN_DIR := $(BUILD_DIR)/bin
-LIB_DIR := $(BUILD_DIR)/lib
-RELEASE_DIR := $(BUILD_DIR)/release
-WINDOWS_PACKAGE_ZIP := $(RELEASE_DIR)/dashcdg-windows-portable.zip
 
 COMMON_CFLAGS := -Wall -Wextra -Wno-cpp -std=c99 -pedantic -D_FORTIFY_SOURCE=2
 INCLUDES := -Icore/include -Iproto/include -Iplatform/desktop/include -Iinc
@@ -15,12 +10,30 @@ CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
-WINDOWS_MINGW_PREFIX := $(shell if [ -d /c/msys64/mingw64 ]; then echo /c/msys64/mingw64; elif [ -d /c/ProgramData/mingw64/mingw64 ]; then echo /c/ProgramData/mingw64/mingw64; elif [ -d /mingw64 ]; then echo /mingw64; fi)
+MINGW_ARCH ?= mingw64
+ifeq ($(MINGW_ARCH),mingw32)
+WINDOWS_ARCH_LABEL := x86
+WINDOWS_BUILD_SLUG := x86
+else
+WINDOWS_ARCH_LABEL := x64
+WINDOWS_BUILD_SLUG := amd64
+endif
+BUILD_DIR := build/$(WINDOWS_BUILD_SLUG)
+WINDOWS_MINGW_PREFIX := $(shell if [ -d /c/msys64/$(MINGW_ARCH) ]; then echo /c/msys64/$(MINGW_ARCH); elif [ -d /c/ProgramData/mingw64/$(MINGW_ARCH) ]; then echo /c/ProgramData/mingw64/$(MINGW_ARCH); elif [ -d /$(MINGW_ARCH) ]; then echo /$(MINGW_ARCH); fi)
 WINDOWS_MINGW_PREFIX_WIN := $(shell if [ -n "$(WINDOWS_MINGW_PREFIX)" ]; then cygpath -m "$(WINDOWS_MINGW_PREFIX)"; fi)
 ifneq ($(WINDOWS_MINGW_PREFIX),)
+export PATH := $(WINDOWS_MINGW_PREFIX)/bin:$(PATH)
+override CC := gcc
+override AR := ar
 INCLUDES += -I$(WINDOWS_MINGW_PREFIX_WIN)/include
 EXTRA_LDFLAGS += -L$(WINDOWS_MINGW_PREFIX_WIN)/lib
-WINDOWS_RUNTIME_DLLS := $(shell for f in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll; do if [ -f "$(WINDOWS_MINGW_PREFIX)/bin/$$f" ]; then printf '%s ' "$(WINDOWS_MINGW_PREFIX)/bin/$$f"; fi; done)
+WINDOWS_LEGACY_TARGET ?= 0
+ifeq ($(WINDOWS_LEGACY_TARGET),1)
+WINDOWS_LEGACY_WINNT := 0x0501
+CFLAGS += -D_WIN32_WINNT=$(WINDOWS_LEGACY_WINNT) -DWINVER=$(WINDOWS_LEGACY_WINNT)
+EXTRA_LDFLAGS += -Wl,--major-os-version=5 -Wl,--minor-os-version=1 -Wl,--major-subsystem-version=5 -Wl,--minor-subsystem-version=1 -Wl,--disable-high-entropy-va
+endif
+WINDOWS_RUNTIME_DLLS := $(shell for pattern in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
 else
 WINDOWS_RUNTIME_DLLS :=
 endif
@@ -30,7 +43,17 @@ else
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread
 NET_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
+WINDOWS_ARCH_LABEL ?= x64
 endif
+
+OBJ_DIR := $(BUILD_DIR)/obj
+BIN_DIR := $(BUILD_DIR)/bin
+LIB_DIR := $(BUILD_DIR)/lib
+RELEASE_DIR := $(BUILD_DIR)/release
+WINDOWS_DIST_DIR := build/dist
+WINDOWS_PACKAGE_ZIP = $(RELEASE_DIR)/dashcdg-windows-$(WINDOWS_ARCH_LABEL)-portable.zip
+WINDOWS_ZIP_X64 := build/amd64/release/dashcdg-windows-x64-portable.zip
+WINDOWS_ZIP_X86 := build/x86/release/dashcdg-windows-x86-portable.zip
 
 CORE_SOURCES := core/src/cdg.c core/src/media_clock.c
 PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
@@ -48,7 +71,7 @@ PLAYER_BIN := $(BIN_DIR)/desktop-player
 TX_BIN := $(BIN_DIR)/desktop-tx
 RX_BIN := $(BIN_DIR)/desktop-rx
 
-.PHONY: all debug dirs libs test desktop-apps bundle-runtime package release clean
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime package package-x64 package-x86 package-all-windows dist-windows release clean
 
 all: CFLAGS += -O2
 all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
@@ -158,10 +181,22 @@ test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN)
 package: debug
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	rm -f "$(WINDOWS_PACKAGE_ZIP)"
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path 'build/bin/*' -DestinationPath 'build/release/dashcdg-windows-portable.zip' -Force"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '$(subst /,\,$(BIN_DIR))\*' -DestinationPath '$(subst /,\,$(WINDOWS_PACKAGE_ZIP))' -Force"
 else
 	@echo "package target currently supports Windows/MSYS2 desktop bundles only" && false
 endif
+
+package-x64:
+	$(MAKE) clean package MINGW_ARCH=mingw64
+
+package-x86:
+	$(MAKE) clean package MINGW_ARCH=mingw32
+
+package-all-windows: package-x64 package-x86
+
+dist-windows: package-all-windows
+	mkdir -p $(WINDOWS_DIST_DIR)
+	cp -f $(WINDOWS_ZIP_X64) $(WINDOWS_ZIP_X86) $(WINDOWS_DIST_DIR)/
 
 release: package
 

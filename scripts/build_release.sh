@@ -3,6 +3,48 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TARGET_ARCH="${1:-all}"
+MAKE_CMD="$(command -v make || command -v mingw32-make || true)"
+
+if [[ -z "${MAKE_CMD}" ]]; then
+  echo "[build-release] no make-compatible command found" >&2
+  exit 1
+fi
+
+run_make_for_arch() {
+  local arch="$1"
+  local toolchain_bin=""
+  local legacy_args=()
+
+  case "${arch}" in
+    mingw64) toolchain_bin="/c/msys64/mingw64/bin" ;;
+    mingw32) toolchain_bin="/c/msys64/mingw32/bin" ;;
+    *)
+      echo "[build-release] unknown toolchain arch: ${arch}" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "${DASHCDG_WINDOWS_LEGACY:-}" == "1" ]]; then
+    legacy_args+=(WINDOWS_LEGACY_TARGET=1)
+    echo "[build-release] WINDOWS_LEGACY_TARGET=1 (XP-oriented PE + WINVER)"
+  fi
+
+  PATH="${toolchain_bin}:$(dirname "${MAKE_CMD}"):${PATH}" \
+    "${MAKE_CMD}" "${legacy_args[@]}" clean package "MINGW_ARCH=${arch}"
+}
+
+copy_zip_to_dist() {
+  local zip_path="$1"
+
+  mkdir -p "${REPO_ROOT}/build/dist"
+  if [[ -f "${zip_path}" ]]; then
+    cp -f "${zip_path}" "${REPO_ROOT}/build/dist/"
+    echo "[build-release] dist: $(basename "${zip_path}") -> build/dist/"
+  else
+    echo "[build-release] warning: missing zip (skip dist copy): ${zip_path}" >&2
+  fi
+}
 
 kill_windows_binary_if_running() {
   local image_name="$1"
@@ -30,8 +72,37 @@ kill_posix_binary_if_running "desktop-player"
 
 cd "${REPO_ROOT}"
 
-echo "[build-release] building clean package"
-mingw32-make clean package
-
-echo "[build-release] release package ready:"
-echo "  ${REPO_ROOT}/build/release/dashcdg-windows-portable.zip"
+case "${TARGET_ARCH}" in
+  x64)
+    echo "[build-release] building x64 package"
+    run_make_for_arch mingw64
+    copy_zip_to_dist "${REPO_ROOT}/build/amd64/release/dashcdg-windows-x64-portable.zip"
+    echo "[build-release] release package ready:"
+    echo "  ${REPO_ROOT}/build/amd64/release/dashcdg-windows-x64-portable.zip"
+    ;;
+  x86)
+    echo "[build-release] building x86 package"
+    run_make_for_arch mingw32
+    copy_zip_to_dist "${REPO_ROOT}/build/x86/release/dashcdg-windows-x86-portable.zip"
+    echo "[build-release] release package ready:"
+    echo "  ${REPO_ROOT}/build/x86/release/dashcdg-windows-x86-portable.zip"
+    ;;
+  all)
+    echo "[build-release] building x64 and x86 packages"
+    run_make_for_arch mingw64
+    run_make_for_arch mingw32
+    copy_zip_to_dist "${REPO_ROOT}/build/amd64/release/dashcdg-windows-x64-portable.zip"
+    copy_zip_to_dist "${REPO_ROOT}/build/x86/release/dashcdg-windows-x86-portable.zip"
+    echo "[build-release] release packages ready:"
+    echo "  ${REPO_ROOT}/build/amd64/release/dashcdg-windows-x64-portable.zip"
+    echo "  ${REPO_ROOT}/build/x86/release/dashcdg-windows-x86-portable.zip"
+    echo "[build-release] unified dist copies:"
+    echo "  ${REPO_ROOT}/build/dist/dashcdg-windows-x64-portable.zip"
+    echo "  ${REPO_ROOT}/build/dist/dashcdg-windows-x86-portable.zip"
+    ;;
+  *)
+    echo "usage: ${0} [x64|x86|all]" >&2
+    echo "  optional: DASHCDG_WINDOWS_LEGACY=1  (passes WINDOWS_LEGACY_TARGET=1 to make)" >&2
+    exit 1
+    ;;
+esac

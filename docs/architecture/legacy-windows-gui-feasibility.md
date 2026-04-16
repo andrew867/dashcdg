@@ -38,6 +38,10 @@ These are the oldest versions that are even worth discussing for full GUI
 support with a desktop OpenGL-based application, and even then only with
 careful dependency validation.
 
+For PE import/subsystem notes, optional XP-oriented MinGW link flags, and why
+**Windows 2000** is not a drop-in target (for example `GetAdaptersAddresses`), see
+`docs/specs/windows-legacy-mingw-build.md`.
+
 ### Non-committed research only
 
 - Windows NT 4
@@ -66,6 +70,13 @@ If the answer to the renderer question is "not reliably," then the current GUI
 stack is not the path for those OS versions.
 
 ## Current Best Estimate
+
+Current repository state before any legacy runtime claim:
+
+- Windows `x64` portable packages build on the current host
+- Windows `x86` portable packages also build on the current host
+- those package results do not by themselves prove Windows 2000/XP/Vista
+  runtime compatibility
 
 ### XP
 

@@ -13,7 +13,9 @@ is misread as "all desktops everywhere."
 ### Tier 1: current proof path
 
 - Windows 10/11
-- MinGW-w64/MSYS2 toolchain
+- Windows `x64` package path proven on the current host
+- Windows `x86` package path now buildable on the current host
+- MinGW-w64/MSYS2 toolchain (`mingw64` and `mingw32`)
 - OpenGL desktop renderer with GLEW and FreeGLUT
 - PortAudio output
 - `libopus`
@@ -22,11 +24,12 @@ This is the currently implemented and routinely exercised desktop path.
 
 ### Tier 2: target modern desktop parity
 
-- modern Linux desktop
-- modern macOS desktop
+- modern Linux desktop on `amd64`, `x86`, `arm64`, and `arm`
+- Windows 7 runtime smoke target
+- Windows Vista runtime smoke target, but not promised
 
-These are valid target platforms for the current OpenGL/PortAudio/Opus desktop
-runtime, but they still need explicit build-path polish and smoke-proof runs.
+These are valid targets for the current OpenGL/PortAudio/Opus desktop runtime,
+but they still need explicit dependency recipes and smoke-proof runs.
 
 ## Renderer Baseline
 
@@ -53,16 +56,6 @@ an ultra-legacy fixed-function baseline.
 - X11/OpenGL desktop driver stack
 - GLEW
 - FreeGLUT or a compatible GLUT implementation
-
-#### macOS
-
-- Apple OpenGL framework or equivalent desktop OpenGL availability
-- FreeGLUT
-- GLEW or a compatible symbol-loading path
-
-macOS is a realistic target for the current desktop renderer, but only if the
-build system and includes are adjusted explicitly for the platform rather than
-assuming Windows/Linux linker names.
 
 ## Audio Baseline
 
@@ -112,8 +105,9 @@ baseline without a deliberate runtime/backend change.
 
 ### Windows
 
-- `make debug`
-- `make package`
+- `make debug` (per-arch tree: `build/amd64/...` for `MINGW_ARCH=mingw64`, `build/x86/...` for `mingw32`)
+- `make package` (same; produces `build/<slug>/release/dashcdg-windows-<x64|x86>-portable.zip`)
+- optional `make dist-windows` or `scripts/build_release.sh all` also copies both zips into `build/dist/`
 - portable zip output remains the reference packaged artifact
 
 ### Linux
@@ -121,16 +115,12 @@ baseline without a deliberate runtime/backend change.
 - must build desktop binaries with system GL/GLEW/GLUT/PortAudio/Opus packages
 - smoke path should include at least `make test` plus desktop binary build
 
-### macOS
-
-- must gain a first-class dependency recipe
-- must gain a documented binary build path
-- smoke path should include at least portable tests plus desktop binary build
-
 Current repo status:
 
-- Windows packaging exists today
-- Linux/macOS packaging does not yet exist as a first-class release artifact
+- Windows `x64` and `x86` portable zip packaging exists today
+- Linux does not yet have a first-class packaged artifact
+- macOS is intentionally omitted from the current portability tranche because no
+  build/test hardware is available
 
 ## Explicit Non-Goals For This Baseline
 
@@ -140,6 +130,7 @@ This baseline does not promise:
 - software-only renderer fallback
 - OpenGL ES/mobile support
 - headless embedded receiver parity
+- macOS proof work in the current tranche
 
 Those require separate design decisions.
 
@@ -147,8 +138,10 @@ Those require separate design decisions.
 
 The modern desktop portability tranche should only claim success when:
 
-- Windows remains green on the current MinGW-w64 path
-- Linux has a documented dependency recipe and successful build/smoke checklist
-- macOS has a documented dependency recipe and successful build/smoke checklist
+- Windows `x64` and `x86` package paths remain green on the current MinGW-w64
+  host
+- Linux `amd64`, `x86`, `arm64`, and `arm` have documented dependency recipes
+  and successful build/smoke checklists
+- legacy Windows stays explicitly marked as research unless separately proven
 - renderer/audio/network dependency assumptions are written down clearly enough
   that a new developer does not have to reverse-engineer them from the Makefile

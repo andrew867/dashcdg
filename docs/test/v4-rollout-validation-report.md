@@ -10,32 +10,37 @@ It complements, but does not replace, the matrices in:
 - `docs/test/bad-network-transport-validation.md`
 - `docs/test/portability-streaming-validation.md`
 
+**Path note:** The proof host was Windows x64. Today’s tree uses `build/amd64/bin/`
+for `mingw64` builds (and `build/x86/bin/` for `mingw32`). The commands below are
+updated to match that layout; the original report used a single `build/bin/`
+prefix.
+
 ## Commands Run
 
 Windows build and packaging:
 
-- `mingw32-make debug`
-- `./build/bin/test-core`
-- `mingw32-make package`
+- `mingw32-make debug MINGW_ARCH=mingw64`
+- `./build/amd64/bin/test-core`
+- `mingw32-make package MINGW_ARCH=mingw64` (or `scripts/build_release.sh x64`)
 
 Local v4 loopback smoke:
 
-- `./build/bin/desktop-rx --headless 127.0.0.1 34567`
-- `./build/bin/desktop-tx --badnet-v4 127.0.0.1 34567 smoke "./cdg" 100`
+- `./build/amd64/bin/desktop-rx --headless 127.0.0.1 34567`
+- `./build/amd64/bin/desktop-tx --badnet-v4 127.0.0.1 34567 smoke "./cdg" 100`
 
 Throughput-clamped relay smoke:
 
 - `python scripts/desktop_impairment.py --listen-group 239.255.77.91 --listen-port 24684 --emit-group 239.255.77.92 --emit-port 24685 --max-bytes-per-second 112500 --max-packets 800`
-- `./build/bin/desktop-rx --headless 239.255.77.92 24685`
-- `./build/bin/desktop-tx --badnet-v4 --audio-profile=resilience 239.255.77.91 24684 clamp "./cdg" 100`
+- `./build/amd64/bin/desktop-rx --headless 239.255.77.92 24685`
+- `./build/amd64/bin/desktop-tx --badnet-v4 --audio-profile=resilience 239.255.77.91 24684 clamp "./cdg" 100`
 
 ## Observed Results
 
 ### Windows baseline
 
 - `mingw32-make debug` completed successfully.
-- `./build/bin/test-core` reported `all tests passed`.
-- `mingw32-make package` produced `build/release/dashcdg-windows-portable.zip`.
+- `./build/amd64/bin/test-core` reported `all tests passed`.
+- Packaging produced `build/amd64/release/dashcdg-windows-x64-portable.zip` (today’s per-arch naming and layout).
 
 ### Local v4 loopback
 
