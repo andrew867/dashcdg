@@ -53,8 +53,8 @@ enum dashcdg_v4_audio_profile_id {
 };
 
 /*
- * Narrowband ids 2–7 share the same first-party fixed-point payload (NB-IMA in
- * core/src/nb_ima_codec.c) until a future spec assigns distinct bytes per id.
+ * Id 1: Opus. Ids 2,3,4,7: NB-IMA octet layout (core/src/nb_ima_codec.c).
+ * Ids 5–6: AMR-NB / AMR-WB native IF2-style octets (audio_modules/amr vendor).
  */
 enum dashcdg_v4_audio_codec_id {
     DASHCDG_V4_AUDIO_CODEC_OPUS = 1,
@@ -446,7 +446,11 @@ int dashcdg_protocol_parse_packet(
         size_t buffer_size
 );
 
-/* Narrowband v4 codecs that currently share the SBC-like IMA wire payload until native encoders land. */
+/* Non-Opus v4 audio (session / jitter tuning). */
 int dashcdg_v4_audio_codec_is_narrowband(uint8_t codec_id);
+/* NB-IMA dashcdg payload (v4 ids 2,3,4,7). */
+int dashcdg_v4_audio_codec_is_nb_ima_payload(uint8_t codec_id);
+/* AMR-NB / AMR-WB native bitstream (v4 ids 5,6). */
+int dashcdg_v4_audio_codec_is_amr(uint8_t codec_id);
 
 #endif
