@@ -480,6 +480,14 @@ dist-windows: package-all-windows
 dist-windows-sneakernet:
 	bash scripts/build_windows_sneakernet_dist.sh
 
+# Optional: clone vendored codec sources (network). Safe to re-run; skips existing dirs.
+vendor-audio-sources:
+	bash scripts/fetch_opus_portaudio_vendors.sh
+	bash scripts/fetch_audio_codec_vendors.sh
+
+# Full sneakernet matrix after fetching sources (same as CI-style local prep).
+dist-windows-sneakernet-with-sources: vendor-audio-sources dist-windows-sneakernet
+
 release: package
 
 clean:
