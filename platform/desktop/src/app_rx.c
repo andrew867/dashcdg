@@ -972,6 +972,9 @@ static void dashcdg_rx_apply_loading_screen_locked(
     if (state == NULL) {
         return;
     }
+    if (state->live_packets_applied > 0U) {
+        return;
+    }
     if (state->cdg_snapshots_applied > 0 || state->cdg_batch_jitter.initialized) {
         return;
     }
@@ -1694,6 +1697,10 @@ static void dashcdg_rx_pcm48_mono_to_interleaved_stereo(
     }
 }
 
+/*
+ * Returns 1 if PCM was queued (full or partial), 0 if PortAudio took no samples
+ * (retry the same jitter frame), -1 if decode failed (caller must advance/drop).
+ */
 static int dashcdg_rx_apply_audio_frame_locked(
         struct receiver_state *state,
         const struct dashcdg_audio_jitter_frame *frame
@@ -1809,7 +1816,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
     }
     if (decoded_frames <= 0) {
         state->audio_decode_failures++;
-        return 0;
+        return -1;
     }
 
     queued_frames = dashcdg_desktop_audio_queue_frames(
@@ -1818,9 +1825,17 @@ static int dashcdg_rx_apply_audio_frame_locked(
             (size_t) decoded_frames,
             (int64_t) frame->playback_ms
     );
-    if (queued_frames != (size_t) decoded_frames) {
+    if (queued_frames == 0U) {
         state->audio_queue_overflows++;
         return 0;
+    }
+    if (queued_frames != (size_t) decoded_frames) {
+        /*
+         * PortAudio accepted a prefix of this frame (buffer back-pressure). Treat as
+         * success so the jitter slot can advance; stalling here wedged the pipeline
+         * and caused permanent choppy output while TX showed a=-1 starvation.
+         */
+        state->audio_queue_overflows++;
     }
 
     return 1;
@@ -1906,10 +1921,15 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                 progressed = 1;
             } else if (step == DASHCDG_AUDIO_DRAIN_APPLY && frame != NULL) {
                 uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
+                int apply_rc = dashcdg_rx_apply_audio_frame_locked(state, frame);
 
-                dashcdg_rx_apply_audio_frame_locked(state, frame);
-                dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
-                progressed = 1;
+                if (apply_rc == 0) {
+                    /* Device buffer full: keep the jitter slot and try again next drain. */
+                    progressed = 0;
+                } else {
+                    dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
+                    progressed = 1;
+                }
             }
         }
 

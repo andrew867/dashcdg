@@ -4064,7 +4064,6 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
     unsigned int audio_sent = 0U;
     unsigned int video_sent = 0U;
-    int anchor_refresh_window_active = 0;
 
     if (g_tx_state.last_v4_session_info_ms == 0U ||
             now_ms - g_tx_state.last_v4_session_info_ms >= DASHCDG_V4_SESSION_INFO_INTERVAL_MS) {
@@ -4074,12 +4073,13 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
             now_ms - g_tx_state.last_v4_clock_sync_ms >= DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS) {
         dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, packet_size);
     }
-    if (g_tx_state.last_v4_video_anchor_ms != 0U &&
-            now_ms >= g_tx_state.last_v4_video_anchor_ms &&
-            now_ms - g_tx_state.last_v4_video_anchor_ms < 500U) {
-        anchor_refresh_window_active = 1;
-    }
-    if ((g_tx_state.v4_first_anchor_local_ms == 0U || g_tx_state.v4_first_audio_local_ms == 0U || anchor_refresh_window_active) &&
+    /*
+     * Loading screens are for true cold start only (first anchor / first audio not
+     * yet on the wire). Do not tie them to periodic anchor refresh — under load the
+     * 500 ms "anchor window" caused CONNECTING/REPAIRING packets for the whole session
+     * and made receivers flash the connecting UI every ~1 s.
+     */
+    if ((g_tx_state.v4_first_anchor_local_ms == 0U || g_tx_state.v4_first_audio_local_ms == 0U) &&
             (g_tx_state.last_v4_loading_screen_ms == 0U ||
              now_ms - g_tx_state.last_v4_loading_screen_ms >= DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS)) {
         dashcdg_tx_send_v4_loading_screen_locked(now_ms, packet, packet_size);
@@ -4118,10 +4118,6 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         }
         if (!dashcdg_tx_send_v4_audio_chunk_locked(now_ms, frame, packet, packet_size)) {
             break;
-        }
-        if (g_tx_state.v4_audio_profile_id == DASHCDG_V4_AUDIO_PROFILE_RESILIENCE &&
-                frame->media_sequence <= 8U) {
-            dashcdg_tx_send_v4_audio_chunk_locked(now_ms, frame, packet, packet_size);
         }
         g_tx_state.audio_packets_sent++;
         g_tx_state.pending_audio_frame_valid = 0;
@@ -4180,9 +4176,17 @@ static void *dashcdg_tx_thread_main(void *unused) {
         }
 
         if (g_tx_state.transport_v4_enabled) {
+            size_t audio_queue_depth;
+
             dashcdg_tx_tick_v4_locked(now_ms, packet, sizeof(packet));
+            audio_queue_depth = dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue);
             pthread_mutex_unlock(&g_tx_state.mutex);
-            dashcdg_sleep_ms(10);
+            /*
+             * When the encoder thread falls behind (CPU load), keep the TX loop tight
+             * so the ready queue refills and pending_audio_frame_valid stays true — the
+             * status bar uses a=-1 when there is no popped frame ready to send.
+             */
+            dashcdg_sleep_ms(audio_queue_depth < 16U ? 1U : 10U);
             continue;
         }
 
