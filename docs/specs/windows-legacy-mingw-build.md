@@ -126,6 +126,8 @@ Convenience wrapper (prints the recommended flags and sanity-checks `objdump` wh
 scripts/rebuild_mingw32_opus_pentium3.sh path/to/libopus-0.dll
 ```
 
+The desktop audio layer uses a **reference-counted** `Pa_Initialize` / `Pa_Terminate` pair so reopening the output stream (for example after a v4 codec change) does not repeatedly destroy the PortAudio host; that pattern avoids a common failure mode on older Windows when switching formats. For a PIII-safe DLL, rebuild PortAudio with the same CFLAGS floor (`scripts/rebuild_mingw32_portaudio_pentium3.sh`) and optionally drop `libportaudio.dll` (and `libopus-0.dll`, GL DLLs) under `vendor/windows-runtime/<arch-label>/` so `make bundle-runtime` picks them up before the MSYS2 copies.
+
 ## Import tables (DLLs)
 
 ### desktop-tx.exe, desktop-rx.exe, desktop-player.exe (x64)

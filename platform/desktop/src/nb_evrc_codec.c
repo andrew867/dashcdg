@@ -5,48 +5,23 @@
 
 #include "evrcc.h"
 
+#include "dashcdg/pcm_rate_convert.h"
+
 #define EVRC_FRAME8K 160
 #define PCM48_FRAME 960
 
-static void dashcdg_pcm48_stereo_to_mono8k_avg6(
-        const int16_t *pcm48,
-        size_t stereo_samples,
-        int16_t *mono8k,
-        size_t mono_count
-) {
+static void dashcdg_mono8k_to_pcm48_stereo(const int16_t *mono8k, int16_t *pcm48, size_t stereo_samples) {
+    int16_t mono48[PCM48_FRAME];
     size_t i;
 
-    for (i = 0; i < mono_count; ++i) {
-        size_t base = i * 6U;
-        int32_t acc = 0;
-        size_t k;
-
-        if (base + 5U >= stereo_samples / 2U) {
-            break;
-        }
-        for (k = 0; k < 6U; ++k) {
-            size_t ix = (base + k) * 2U;
-
-            acc += (int32_t) pcm48[ix] + (int32_t) pcm48[ix + 1U];
-        }
-        mono8k[i] = (int16_t) (acc / 12);
-    }
-    for (; i < mono_count; ++i) {
-        mono8k[i] = 0;
-    }
-}
-
-static void dashcdg_mono8k_hold6_to_pcm48_stereo(const int16_t *mono8k, int16_t *pcm48, size_t stereo_samples) {
-    size_t i;
-    size_t out_pairs = stereo_samples / 2U;
-
-    for (i = 0; i < out_pairs; ++i) {
-        int16_t s = mono8k[i / 6U];
+    dashcdg_pcm_mono_resample_cubic(mono8k, (size_t) EVRC_FRAME8K, 8000U, mono48, PCM48_FRAME, 48000U);
+    for (i = 0U; i < PCM48_FRAME; ++i) {
         size_t ix = i * 2U;
 
-        pcm48[ix] = s;
-        pcm48[ix + 1U] = s;
+        pcm48[ix] = mono48[i];
+        pcm48[ix + 1U] = mono48[i];
     }
+    (void) stereo_samples;
 }
 
 int dashcdg_evrc_encoder_create(void **out_ctx) {
@@ -76,6 +51,7 @@ int dashcdg_evrc_encode_pcm48_stereo_frame(
         uint8_t *out,
         size_t out_max
 ) {
+    int16_t mono48[PCM48_FRAME];
     int16_t mono8k[EVRC_FRAME8K];
     int n;
 
@@ -85,7 +61,8 @@ int dashcdg_evrc_encode_pcm48_stereo_frame(
     if (pcm_samples < PCM48_FRAME * 2U) {
         return -1;
     }
-    dashcdg_pcm48_stereo_to_mono8k_avg6(pcm48_interleaved, pcm_samples, mono8k, EVRC_FRAME8K);
+    dashcdg_pcm_stereo_interleaved_to_mono48(pcm48_interleaved, PCM48_FRAME, mono48);
+    dashcdg_pcm_mono_resample_cubic(mono48, PCM48_FRAME, 48000U, mono8k, (size_t) EVRC_FRAME8K, 8000U);
     n = evrc_encoder_encode_to_packet(ctx, mono8k, EVRC_FRAME8K, out, out_max);
     if (n <= 0) {
         return -1;
@@ -133,6 +110,6 @@ int dashcdg_evrc_decode_to_pcm48_stereo(
     if (got < (int) (EVRC_FRAME8K * (int) sizeof(int16_t))) {
         return -1;
     }
-    dashcdg_mono8k_hold6_to_pcm48_stereo(mono8k, pcm48_interleaved, PCM48_FRAME * 2U);
+    dashcdg_mono8k_to_pcm48_stereo(mono8k, pcm48_interleaved, PCM48_FRAME * 2U);
     return (int) PCM48_FRAME;
 }

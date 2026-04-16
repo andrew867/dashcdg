@@ -163,7 +163,7 @@ CODEC_SBC_OBJS := $(OBJ_DIR)/bt_sbc_sbc.o $(OBJ_DIR)/bt_sbc_sbc_primitives.o
 
 DESKTOP_NB_CODEC_OBJS := $(OBJ_DIR)/desktop_nb_evrc_codec.o $(OBJ_DIR)/desktop_nb_qcelp_codec.o $(OBJ_DIR)/desktop_nb_sbc_codec.o
 
-DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
 DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
 DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
 DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
@@ -223,6 +223,9 @@ dirs:
 	mkdir -p $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR) $(RELEASE_DIR)
 
 bundle-runtime:
+ifneq ($(wildcard vendor/windows-runtime/$(WINDOWS_ARCH_LABEL)/*.dll),)
+	cp -f vendor/windows-runtime/$(WINDOWS_ARCH_LABEL)/*.dll $(BIN_DIR)/
+endif
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
@@ -269,6 +272,9 @@ $(OBJ_DIR)/desktop_net_compat.o: platform/desktop/src/net_compat.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_pcm_rate_convert.o: platform/desktop/src/pcm_rate_convert.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_opus_codec.o: platform/desktop/src/opus_codec.c

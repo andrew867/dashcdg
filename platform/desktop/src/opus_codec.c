@@ -116,10 +116,15 @@ int dashcdg_opus_encoder_init(
     opus_encoder_ctl(encoder->encoder, OPUS_SET_BITRATE(bitrate_bps));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR(1));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(1));
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_COMPLEXITY(10));
+    /*
+     * High complexity + in-band FEC can exceed small UDP payloads and peg CPU under load;
+     * keep frames compact and encoding cheap for real-time desktop streaming.
+     */
+    opus_encoder_ctl(encoder->encoder, OPUS_SET_COMPLEXITY(5));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_INBAND_FEC(1));
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_PACKET_LOSS_PERC(10));
+    opus_encoder_ctl(encoder->encoder, OPUS_SET_INBAND_FEC(0));
+    opus_encoder_ctl(encoder->encoder, OPUS_SET_PACKET_LOSS_PERC(0));
+    opus_encoder_ctl(encoder->encoder, OPUS_SET_DTX(0));
     return 1;
 }
 

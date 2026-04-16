@@ -6,6 +6,8 @@
 
 #include "sbc/sbc.h"
 
+#include "dashcdg/pcm_rate_convert.h"
+
 #define SBC_PCM_FRAME48 960U
 #define SBC_PCM_MONO16 320U
 
@@ -15,47 +17,6 @@ struct dashcdg_bt_sbc_codec {
     int enc_ok;
     int dec_ok;
 };
-
-static void dashcdg_pcm48_stereo_to_mono16_avg3(
-        const int16_t *pcm48,
-        size_t stereo_samples,
-        int16_t *mono16,
-        size_t mono_count
-) {
-    size_t i;
-
-    for (i = 0; i < mono_count; ++i) {
-        size_t base = i * 3U;
-        int32_t acc = 0;
-        size_t k;
-
-        if (base + 2U >= stereo_samples / 2U) {
-            break;
-        }
-        for (k = 0; k < 3U; ++k) {
-            size_t ix = (base + k) * 2U;
-
-            acc += (int32_t) pcm48[ix] + (int32_t) pcm48[ix + 1U];
-        }
-        mono16[i] = (int16_t) (acc / 6);
-    }
-    for (; i < mono_count; ++i) {
-        mono16[i] = 0;
-    }
-}
-
-static void dashcdg_mono16_hold3_to_pcm48_stereo(const int16_t *mono16, int16_t *pcm48, size_t stereo_samples) {
-    size_t i;
-    size_t pairs = stereo_samples / 2U;
-
-    for (i = 0; i < pairs; ++i) {
-        int16_t s = mono16[i / 3U];
-        size_t ix = i * 2U;
-
-        pcm48[ix] = s;
-        pcm48[ix + 1U] = s;
-    }
-}
 
 static int dashcdg_sbc_open_common(sbc_t *sbc, int encoder) {
     int err;
@@ -121,6 +82,7 @@ int dashcdg_bt_sbc_encode_pcm48_stereo_frame(
         size_t out_max
 ) {
     struct dashcdg_bt_sbc_codec *c = (struct dashcdg_bt_sbc_codec *) ctx;
+    int16_t mono48[SBC_PCM_FRAME48];
     int16_t mono16[SBC_PCM_MONO16];
     size_t codesize;
     size_t pos = 1U;
@@ -134,7 +96,15 @@ int dashcdg_bt_sbc_encode_pcm48_stereo_frame(
     if (pcm_samples < SBC_PCM_FRAME48 * 2U) {
         return -1;
     }
-    dashcdg_pcm48_stereo_to_mono16_avg3(pcm48_interleaved, pcm_samples, mono16, SBC_PCM_MONO16);
+    dashcdg_pcm_stereo_interleaved_to_mono48(pcm48_interleaved, SBC_PCM_FRAME48, mono48);
+    dashcdg_pcm_mono_resample_cubic(
+            mono48,
+            SBC_PCM_FRAME48,
+            48000U,
+            mono16,
+            SBC_PCM_MONO16,
+            16000U
+    );
     codesize = sbc_get_codesize(&c->enc);
     if (codesize == 0U || codesize > sizeof(mono16)) {
         return -1;
@@ -195,6 +165,7 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
 ) {
     struct dashcdg_bt_sbc_codec *c = (struct dashcdg_bt_sbc_codec *) ctx;
     int16_t mono16[SBC_PCM_MONO16];
+    int16_t mono48[SBC_PCM_FRAME48];
     size_t pcmo = 0U;
     size_t p = 0U;
     uint8_t n;
@@ -235,6 +206,23 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
     if (pcmo < SBC_PCM_MONO16) {
         return -1;
     }
-    dashcdg_mono16_hold3_to_pcm48_stereo(mono16, pcm48_interleaved, SBC_PCM_FRAME48 * 2U);
+    dashcdg_pcm_mono_resample_cubic(
+            mono16,
+            SBC_PCM_MONO16,
+            16000U,
+            mono48,
+            SBC_PCM_FRAME48,
+            48000U
+    );
+    {
+        size_t i;
+
+        for (i = 0U; i < SBC_PCM_FRAME48; ++i) {
+            size_t ix = i * 2U;
+
+            pcm48_interleaved[ix] = mono48[i];
+            pcm48_interleaved[ix + 1U] = mono48[i];
+        }
+    }
     return (int) SBC_PCM_FRAME48;
 }

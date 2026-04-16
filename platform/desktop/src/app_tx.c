@@ -10,9 +10,10 @@
 #include <pthread.h>
 
 #ifdef _WIN32
-#include <conio.h>
-#include <io.h>
 #include <windows.h>
+#include <conio.h>
+#include <errno.h>
+#include <io.h>
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -269,6 +270,7 @@ struct dashcdg_tx_console_state {
 #ifdef _WIN32
     DWORD original_output_mode;
     int output_mode_saved;
+    int win32_stdin_pipe_read;
 #else
     struct termios original_termios;
     int termios_saved;
@@ -3358,7 +3360,6 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             memset(pcm, 0, sizeof(pcm));
             if (copy_frames > 0U) {
                 memcpy(pcm, pcm_fifo, copy_frames * DASHCDG_AUDIO_CHANNELS * sizeof(int16_t));
-                dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
             }
 
             if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
@@ -3454,9 +3455,16 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 encoded_length = -1;
             }
             if (encoded_length <= 0) {
-                reached_eof = 1;
+                if (encoded_length < 0 && current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+                    dashcdg_sleep_ms(2);
+                    continue;
+                }
                 dashcdg_sleep_ms(5);
                 continue;
+            }
+
+            if (copy_frames > 0U) {
+                dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
             }
 
             pthread_mutex_lock(&g_tx_state.mutex);
@@ -3688,6 +3696,14 @@ static int dashcdg_tx_console_init(void) {
     g_tx_console.status_bar_enabled = dashcdg_tx_console_output_is_tty();
 
 #ifdef _WIN32
+    if (!g_tx_console.input_ready) {
+        HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+
+        if (hin != INVALID_HANDLE_VALUE && hin != NULL && GetFileType(hin) == FILE_TYPE_PIPE) {
+            g_tx_console.input_ready = 1;
+            g_tx_console.win32_stdin_pipe_read = 1;
+        }
+    }
     if (g_tx_console.status_bar_enabled) {
         HANDLE output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
         DWORD mode = 0;
@@ -3747,6 +3763,23 @@ static int dashcdg_tx_console_read_command_nonblocking(void) {
     }
 
 #ifdef _WIN32
+    if (g_tx_console.win32_stdin_pipe_read) {
+        HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD avail = 0U;
+        unsigned char ch = 0U;
+        DWORD nread = 0U;
+
+        if (hin == INVALID_HANDLE_VALUE || hin == NULL) {
+            return 0;
+        }
+        if (!PeekNamedPipe(hin, NULL, 0U, NULL, &avail, NULL) || avail == 0U) {
+            return 0;
+        }
+        if (!ReadFile(hin, &ch, 1U, &nread, NULL) || nread == 0U) {
+            return 0;
+        }
+        return (int) ch;
+    }
     if (!_kbhit()) {
         return 0;
     }

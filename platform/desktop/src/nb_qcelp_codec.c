@@ -9,6 +9,8 @@
 #include "basic_op.h"
 #include "tty.h"
 
+#include "dashcdg/pcm_rate_convert.h"
+
 char *trans_fname = NULL;
 
 struct dashcdg_qcelp13k_codec {
@@ -22,52 +24,27 @@ struct dashcdg_qcelp13k_codec {
     int decoder_ready;
 };
 
-static void dashcdg_pcm48_stereo_to_mono8k_avg6(
-        const int16_t *pcm48,
-        size_t stereo_samples,
-        int16_t *mono8k,
-        size_t mono_count
-) {
+static void dashcdg_float_mono_8k_to_pcm48_stereo(const float *mono_float, int16_t *pcm48_stereo, size_t stereo_samples) {
+    int16_t mono8k[FSIZE];
+    int16_t mono48[960];
     size_t i;
 
-    for (i = 0; i < mono_count; ++i) {
-        size_t base = i * 6U;
-        int32_t acc = 0;
-        size_t k;
-
-        if (base + 5U >= stereo_samples / 2U) {
-            break;
-        }
-        for (k = 0; k < 6U; ++k) {
-            size_t ix = (base + k) * 2U;
-
-            acc += (int32_t) pcm48[ix] + (int32_t) pcm48[ix + 1U];
-        }
-        mono8k[i] = (int16_t) (acc / 12);
-    }
-    for (; i < mono_count; ++i) {
-        mono8k[i] = 0;
-    }
-}
-
-static void dashcdg_float_mono_to_pcm48_stereo(const float *mono, int16_t *pcm48, size_t stereo_samples) {
-    size_t i;
-    size_t pairs = stereo_samples / 2U;
-
-    for (i = 0; i < pairs; ++i) {
-        float s = mono[i / 6U] * 4.0f;
-        int32_t v;
-        size_t ix = i * 2U;
+    for (i = 0U; i < FSIZE; ++i) {
+        float s = mono_float[i] * 4.0f;
 
         if (s > 32767.0f) {
             s = 32767.0f;
         } else if (s < -32768.0f) {
             s = -32768.0f;
         }
-        v = (int32_t) (s < 0 ? s - 0.5f : s + 0.5f);
-        pcm48[ix] = (int16_t) v;
-        pcm48[ix + 1U] = (int16_t) v;
+        mono8k[i] = (int16_t) (s < 0.0f ? s - 0.5f : s + 0.5f);
     }
+    dashcdg_pcm_mono_resample_cubic(mono8k, FSIZE, 8000U, mono48, 960U, 48000U);
+    for (i = 0U; i < 960U; ++i) {
+        pcm48_stereo[i * 2U] = mono48[i];
+        pcm48_stereo[i * 2U + 1U] = mono48[i];
+    }
+    (void) stereo_samples;
 }
 
 int dashcdg_qcelp13k_encoder_create(void **out_ctx) {
@@ -122,6 +99,7 @@ int dashcdg_qcelp13k_encode_pcm48_stereo_frame(
         size_t out_max
 ) {
     struct dashcdg_qcelp13k_codec *c = (struct dashcdg_qcelp13k_codec *) ctx;
+    int16_t mono48[960];
     int16_t mono8k[FSIZE];
     size_t i;
 
@@ -131,7 +109,8 @@ int dashcdg_qcelp13k_encode_pcm48_stereo_frame(
     if (pcm_samples < 960U * 2U || out_max < DASHCDG_QCELP13K_FRAME_BYTES) {
         return -1;
     }
-    dashcdg_pcm48_stereo_to_mono8k_avg6(pcm48_interleaved, pcm_samples, mono8k, FSIZE);
+    dashcdg_pcm_stereo_interleaved_to_mono48(pcm48_interleaved, 960U, mono48);
+    dashcdg_pcm_mono_resample_cubic(mono48, 960U, 48000U, mono8k, FSIZE, 8000U);
     for (i = 0; i < (size_t) (LPCSIZE - FSIZE + LPCOFFSET); ++i) {
         c->in_workspace[i] = 0.0f;
     }
@@ -208,7 +187,7 @@ int dashcdg_qcelp13k_decode_to_pcm48_stereo(
         c->packet.data[j] = (int) w[j];
     }
     decoder(c->out_speech, &c->packet, &c->control, &c->dec_mem);
-    dashcdg_float_mono_to_pcm48_stereo(c->out_speech, pcm48_interleaved, 960U * 2U);
+    dashcdg_float_mono_8k_to_pcm48_stereo(c->out_speech, pcm48_interleaved, 960U * 2U);
     return 960;
 }
 

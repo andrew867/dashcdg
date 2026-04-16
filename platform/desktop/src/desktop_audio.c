@@ -14,6 +14,8 @@
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
 
+void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio);
+
 #define DASHCDG_ATOMIC_GET(value) (__atomic_load_n(&(value), __ATOMIC_RELAXED))
 #define DASHCDG_ATOMIC_SET(value, next) __atomic_store_n(&(value), (next), __ATOMIC_RELAXED)
 #define DASHCDG_AUDIO_MODE_FILE 0
@@ -42,6 +44,37 @@ static void dashcdg_pcm_buffer_free(struct dashcdg_pcm_buffer *pcm) {
 }
 
 #if DASHCDG_HAVE_PORTAUDIO
+static pthread_mutex_t g_dashcdg_pa_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int g_dashcdg_pa_refcount = 0;
+
+static int dashcdg_pa_host_init(void) {
+    PaError err;
+
+    pthread_mutex_lock(&g_dashcdg_pa_mutex);
+    if (g_dashcdg_pa_refcount == 0) {
+        err = Pa_Initialize();
+        if (err != paNoError) {
+            fprintf(stderr, "PortAudio error: %s\n", Pa_GetErrorText(err));
+            pthread_mutex_unlock(&g_dashcdg_pa_mutex);
+            return 0;
+        }
+    }
+    g_dashcdg_pa_refcount++;
+    pthread_mutex_unlock(&g_dashcdg_pa_mutex);
+    return 1;
+}
+
+static void dashcdg_pa_host_deinit(void) {
+    pthread_mutex_lock(&g_dashcdg_pa_mutex);
+    if (g_dashcdg_pa_refcount > 0) {
+        g_dashcdg_pa_refcount--;
+        if (g_dashcdg_pa_refcount == 0) {
+            Pa_Terminate();
+        }
+    }
+    pthread_mutex_unlock(&g_dashcdg_pa_mutex);
+}
+
 static size_t dashcdg_stream_buffer_consume(
         struct dashcdg_desktop_audio *audio,
         unsigned long frame_count,
@@ -196,9 +229,7 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     int sample_rate;
     int channels;
 
-    err = Pa_Initialize();
-    if (err != paNoError) {
-        fprintf(stderr, "PortAudio error: %s\n", Pa_GetErrorText(err));
+    if (!dashcdg_pa_host_init()) {
         return 0;
     }
 
@@ -216,12 +247,16 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     );
     if (err != paNoError) {
         fprintf(stderr, "PortAudio error: %s\n", Pa_GetErrorText(err));
+        dashcdg_pa_host_deinit();
         return 0;
     }
 
     err = Pa_StartStream(audio->stream);
     if (err != paNoError) {
         fprintf(stderr, "PortAudio error: %s\n", Pa_GetErrorText(err));
+        Pa_CloseStream(audio->stream);
+        audio->stream = NULL;
+        dashcdg_pa_host_deinit();
         return 0;
     }
 
@@ -426,11 +461,7 @@ int dashcdg_desktop_audio_play(struct dashcdg_desktop_audio *audio) {
         Pa_Sleep(50);
     }
 
-    if (audio->stream != NULL) {
-        Pa_CloseStream(audio->stream);
-        audio->stream = NULL;
-        Pa_Terminate();
-    }
+    dashcdg_desktop_audio_stop_stream(audio);
 
     DASHCDG_ATOMIC_SET(audio->playback_running, 0);
     return 1;
@@ -530,7 +561,7 @@ void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio) {
         Pa_StopStream(audio->stream);
         Pa_CloseStream(audio->stream);
         audio->stream = NULL;
-        Pa_Terminate();
+        dashcdg_pa_host_deinit();
     }
 #endif
     DASHCDG_ATOMIC_SET(audio->playback_running, 0);

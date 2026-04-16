@@ -137,11 +137,15 @@ int dashcdg_nb_ima_encode_pcm48_mono_frame(
     }
 
     for (size_t i = 0; i < DASHCDG_NB_IMA_FRAME_SAMPLES; ++i) {
-        int32_t sum = 0;
-        for (size_t j = 0; j < 6U; ++j) {
-            sum += pcm_48k_mono[(i * 6U) + j];
-        }
-        downsampled[i] = (int16_t) (sum / 6);
+        int32_t s0 = (int32_t) pcm_48k_mono[(i * 6U) + 0U];
+        int32_t s1 = (int32_t) pcm_48k_mono[(i * 6U) + 1U];
+        int32_t s2 = (int32_t) pcm_48k_mono[(i * 6U) + 2U];
+        int32_t s3 = (int32_t) pcm_48k_mono[(i * 6U) + 3U];
+        int32_t s4 = (int32_t) pcm_48k_mono[(i * 6U) + 4U];
+        int32_t s5 = (int32_t) pcm_48k_mono[(i * 6U) + 5U];
+        int32_t sum = s0 + s5 + 2 * (s1 + s4) + 3 * (s2 + s3);
+
+        downsampled[i] = (int16_t) (sum / 12);
     }
 
     predictor = state->predictor;
@@ -193,8 +197,13 @@ int dashcdg_nb_ima_decode_to_pcm48_mono_frame(
     }
 
     for (size_t i = 0; i < DASHCDG_NB_IMA_FRAME_SAMPLES; ++i) {
+        int16_t cur = decoded[i];
+        int16_t nxt = (i + 1U < DASHCDG_NB_IMA_FRAME_SAMPLES) ? decoded[i + 1U] : cur;
+
         for (size_t j = 0; j < 6U; ++j) {
-            pcm_48k_mono[(i * 6U) + j] = decoded[i];
+            int32_t mix = ((int32_t) cur * (int32_t) (6U - j) + (int32_t) nxt * (int32_t) j) / 6;
+
+            pcm_48k_mono[(i * 6U) + j] = (int16_t) mix;
         }
     }
 
