@@ -22,11 +22,16 @@
 typedef uint64_t dashcdg_tick_t;
 
 static inline uint64_t dashcdg_ms_to_packet_count(uint64_t ms) {
-    return (ms * DASHCDG_PACKETS_PER_SECOND) / 1000ULL;
+    return (ms * DASHCDG_PACKETS_PER_SECOND + 500ULL) / 1000ULL;
 }
 
 static inline uint64_t dashcdg_packet_count_to_ms(uint64_t packets) {
-    return (packets * 1000ULL) / DASHCDG_PACKETS_PER_SECOND;
+    /*
+     * Integer division truncates subchannel time toward zero, which biases CDG
+     * batches slightly early versus the 20 ms audio grid. Rounding keeps the
+     * CDG timeline aligned with MP3-backed audio across long songs.
+     */
+    return (packets * 1000ULL + DASHCDG_PACKETS_PER_SECOND / 2ULL) / DASHCDG_PACKETS_PER_SECOND;
 }
 
 #endif

@@ -61,6 +61,7 @@
 #include "dashcdg/protocol.h"
 #include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
+#include "dashcdg/nb_codec_adapters.h"
 #include "dashcdg/stream_runtime.h"
 
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) && !defined(_WIN32)
@@ -2942,6 +2943,21 @@ static void dashcdg_tx_audio_close_source(
     }
 }
 
+static void dashcdg_tx_expand_mono_to_stereo_interleaved(
+        const int16_t *mono,
+        int16_t *stereo_interleaved,
+        size_t frame_count
+) {
+    size_t i;
+
+    for (i = 0; i < frame_count; ++i) {
+        int16_t s = mono[i];
+
+        stereo_interleaved[i * 2U] = s;
+        stereo_interleaved[i * 2U + 1U] = s;
+    }
+}
+
 static int dashcdg_tx_audio_open_source(
         const char *path,
         struct dashcdg_desktop_audio **out_source,
@@ -2996,6 +3012,9 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     struct dashcdg_nb_ima_state nb_ima_encoder;
     void *amr_wb_encoder;
     void *amr_nb_encoder;
+    void *evrc_encoder;
+    void *qcelp_encoder;
+    void *sbc_encoder;
     int encoder_ready = 0;
     int16_t source_pcm[DASHCDG_TX_AUDIO_CHUNK_FRAMES * 2U];
     int16_t pcm_fifo[DASHCDG_TX_PCM_FIFO_FRAMES * DASHCDG_AUDIO_CHANNELS];
@@ -3011,6 +3030,9 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     memset(pcm_fifo, 0, sizeof(pcm_fifo));
     amr_wb_encoder = NULL;
     amr_nb_encoder = NULL;
+    evrc_encoder = NULL;
+    qcelp_encoder = NULL;
+    sbc_encoder = NULL;
 
     for (;;) {
         char *mp3_path = NULL;
@@ -3057,6 +3079,18 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                     dashcdg_amr_nb_encoder_destroy(amr_nb_encoder);
                     amr_nb_encoder = NULL;
                 }
+                if (evrc_encoder != NULL) {
+                    dashcdg_evrc_encoder_destroy(evrc_encoder);
+                    evrc_encoder = NULL;
+                }
+                if (qcelp_encoder != NULL) {
+                    dashcdg_qcelp13k_encoder_destroy(qcelp_encoder);
+                    qcelp_encoder = NULL;
+                }
+                if (sbc_encoder != NULL) {
+                    dashcdg_bt_sbc_encoder_destroy(sbc_encoder);
+                    sbc_encoder = NULL;
+                }
                 dashcdg_tx_audio_close_source(&source, &encoder, &encoder_ready);
                 fifo_frames = 0U;
                 next_playback_ms = 0U;
@@ -3071,6 +3105,12 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                     dashcdg_amr_wb_encoder_create(&amr_wb_encoder);
                 } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
                     dashcdg_amr_nb_encoder_create(&amr_nb_encoder);
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+                    dashcdg_evrc_encoder_create(&evrc_encoder);
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+                    dashcdg_qcelp13k_encoder_create(&qcelp_encoder);
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                    dashcdg_bt_sbc_encoder_create(&sbc_encoder);
                 }
                 if (dashcdg_tx_audio_open_source(
                             mp3_path,
@@ -3088,6 +3128,18 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                     if (amr_nb_encoder != NULL) {
                         dashcdg_amr_nb_encoder_destroy(amr_nb_encoder);
                         amr_nb_encoder = NULL;
+                    }
+                    if (evrc_encoder != NULL) {
+                        dashcdg_evrc_encoder_destroy(evrc_encoder);
+                        evrc_encoder = NULL;
+                    }
+                    if (qcelp_encoder != NULL) {
+                        dashcdg_qcelp13k_encoder_destroy(qcelp_encoder);
+                        qcelp_encoder = NULL;
+                    }
+                    if (sbc_encoder != NULL) {
+                        dashcdg_bt_sbc_encoder_destroy(sbc_encoder);
+                        sbc_encoder = NULL;
                     }
                 }
                 free(mp3_path);
@@ -3200,6 +3252,66 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
                 );
+            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+                int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
+                const int16_t *src = pcm;
+                size_t stereo_samples = copy_frames * 2U;
+
+                if (evrc_encoder == NULL) {
+                    encoded_length = -1;
+                } else {
+                    if (DASHCDG_AUDIO_CHANNELS != 2U) {
+                        dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
+                        src = stereo_work;
+                    }
+                    encoded_length = dashcdg_evrc_encode_pcm48_stereo_frame(
+                            evrc_encoder,
+                            src,
+                            stereo_samples,
+                            frame.encoded_bytes,
+                            sizeof(frame.encoded_bytes)
+                    );
+                }
+            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+                int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
+                const int16_t *src = pcm;
+                size_t stereo_samples = copy_frames * 2U;
+
+                if (qcelp_encoder == NULL) {
+                    encoded_length = -1;
+                } else {
+                    if (DASHCDG_AUDIO_CHANNELS != 2U) {
+                        dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
+                        src = stereo_work;
+                    }
+                    encoded_length = dashcdg_qcelp13k_encode_pcm48_stereo_frame(
+                            qcelp_encoder,
+                            src,
+                            stereo_samples,
+                            frame.encoded_bytes,
+                            sizeof(frame.encoded_bytes)
+                    );
+                }
+            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
+                const int16_t *src = pcm;
+                size_t stereo_samples = copy_frames * 2U;
+
+                if (sbc_encoder == NULL) {
+                    encoded_length = -1;
+                } else {
+                    if (DASHCDG_AUDIO_CHANNELS != 2U) {
+                        dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
+                        src = stereo_work;
+                    }
+                    encoded_length = dashcdg_bt_sbc_encode_pcm48_stereo_frame(
+                            sbc_encoder,
+                            src,
+                            stereo_samples,
+                            frame.encoded_bytes,
+                            sizeof(frame.encoded_bytes)
+                    );
+                }
             } else {
                 encoded_length = -1;
             }
@@ -3252,6 +3364,18 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     if (amr_nb_encoder != NULL) {
         dashcdg_amr_nb_encoder_destroy(amr_nb_encoder);
         amr_nb_encoder = NULL;
+    }
+    if (evrc_encoder != NULL) {
+        dashcdg_evrc_encoder_destroy(evrc_encoder);
+        evrc_encoder = NULL;
+    }
+    if (qcelp_encoder != NULL) {
+        dashcdg_qcelp13k_encoder_destroy(qcelp_encoder);
+        qcelp_encoder = NULL;
+    }
+    if (sbc_encoder != NULL) {
+        dashcdg_bt_sbc_encoder_destroy(sbc_encoder);
+        sbc_encoder = NULL;
     }
     dashcdg_tx_audio_close_source(&source, &encoder, &encoder_ready);
     return NULL;

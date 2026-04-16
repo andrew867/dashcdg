@@ -37,6 +37,7 @@
 #include "dashcdg/protocol.h"
 #include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
+#include "dashcdg/nb_codec_adapters.h"
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
 
@@ -177,6 +178,8 @@ struct receiver_state {
     uint64_t ptp_fallback_updates;
     uint64_t last_clock_update_local_ms;
     struct dashcdg_cdg_state live_state;
+    struct dashcdg_cdg_state v4_bridge_cdg;
+    int v4_bridge_cdg_valid;
     int reader_ready;
     int have_clock;
     int playback_paused;
@@ -216,8 +219,23 @@ static struct dashcdg_opus_decoder g_opus_decoder;
 static struct dashcdg_nb_ima_state g_nb_ima_decoder;
 static void *g_amr_wb_decoder;
 static void *g_amr_nb_decoder;
+static void *g_evrc_decoder;
+static void *g_qcelp_decoder;
+static void *g_bt_sbc_decoder;
 
 static void dashcdg_rx_amr_decoders_release(void) {
+    if (g_evrc_decoder != NULL) {
+        dashcdg_evrc_decoder_destroy(g_evrc_decoder);
+        g_evrc_decoder = NULL;
+    }
+    if (g_qcelp_decoder != NULL) {
+        dashcdg_qcelp13k_decoder_destroy(g_qcelp_decoder);
+        g_qcelp_decoder = NULL;
+    }
+    if (g_bt_sbc_decoder != NULL) {
+        dashcdg_bt_sbc_decoder_destroy(g_bt_sbc_decoder);
+        g_bt_sbc_decoder = NULL;
+    }
     if (g_amr_wb_decoder != NULL) {
         dashcdg_amr_wb_decoder_destroy(g_amr_wb_decoder);
         g_amr_wb_decoder = NULL;
@@ -545,6 +563,9 @@ static void dashcdg_rx_print_usage(const char *argv0) {
 }
 
 static void receiver_state_reset(struct receiver_state *state) {
+    uint64_t prior_live_packets;
+
+    prior_live_packets = state->live_packets_applied;
     free(state->asset_bytes);
     free(state->chunk_seen);
     state->asset_bytes = NULL;
@@ -644,6 +665,12 @@ static void receiver_state_reset(struct receiver_state *state) {
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
     dashcdg_cdg_reader_init(&state->reader);
+    if (prior_live_packets > 0U) {
+        state->v4_bridge_cdg = state->live_state;
+        state->v4_bridge_cdg_valid = 1;
+    } else {
+        state->v4_bridge_cdg_valid = 0;
+    }
     dashcdg_cdg_state_init(&state->live_state);
 }
 
@@ -913,6 +940,10 @@ static void dashcdg_rx_apply_loading_screen_locked(
         return;
     }
     if (state->cdg_snapshots_applied > 0 || state->cdg_batch_jitter.initialized) {
+        return;
+    }
+    if (state->v4_bridge_cdg_valid &&
+            (kind == DASHCDG_V4_LOADING_SCREEN_CONNECTING || kind == DASHCDG_V4_LOADING_SCREEN_LATE_JOIN)) {
         return;
     }
 
@@ -1185,9 +1216,13 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
      * / GDI framebuffer until a later keyframe.
      */
     if (g_receiver.reader_ready && !g_receiver.playback_paused && g_receiver.live_packets_applied == 0U) {
-        packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
-        dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
-        snapshot.state = g_receiver.reader.state;
+        if (g_receiver.v4_bridge_cdg_valid) {
+            snapshot.state = g_receiver.v4_bridge_cdg;
+        } else {
+            packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
+            dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
+            snapshot.state = g_receiver.reader.state;
+        }
     } else {
         snapshot.state = g_receiver.live_state;
     }
@@ -1611,11 +1646,27 @@ static int dashcdg_rx_store_cdg_batch_locked(struct receiver_state *state, const
     return 1;
 }
 
+static void dashcdg_rx_pcm48_mono_to_interleaved_stereo(
+        const int16_t *mono,
+        int16_t *stereo_interleaved,
+        size_t mono_sample_count
+) {
+    size_t i;
+
+    for (i = 0; i < mono_sample_count; ++i) {
+        int16_t s = mono[i];
+
+        stereo_interleaved[i * 2U] = s;
+        stereo_interleaved[i * 2U + 1U] = s;
+    }
+}
+
 static int dashcdg_rx_apply_audio_frame_locked(
         struct receiver_state *state,
         const struct dashcdg_audio_jitter_frame *frame
 ) {
     int16_t pcm[DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_CHANNELS / 50U];
+    int16_t mono_scratch[960];
     int decoded_frames;
     size_t queued_frames;
 
@@ -1639,9 +1690,16 @@ static int dashcdg_rx_apply_audio_frame_locked(
                     g_amr_wb_decoder,
                     frame->encoded_bytes,
                     frame->encoded_length,
-                    pcm,
-                    sizeof(pcm) / sizeof(pcm[0])
+                    mono_scratch,
+                    sizeof(mono_scratch) / sizeof(mono_scratch[0])
             );
+            if (decoded_frames > 0) {
+                dashcdg_rx_pcm48_mono_to_interleaved_stereo(
+                        mono_scratch,
+                        pcm,
+                        (size_t) decoded_frames
+                );
+            }
         }
     } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
         if (g_amr_nb_decoder == NULL) {
@@ -1651,18 +1709,68 @@ static int dashcdg_rx_apply_audio_frame_locked(
                     g_amr_nb_decoder,
                     frame->encoded_bytes,
                     frame->encoded_length,
-                    pcm,
-                    sizeof(pcm) / sizeof(pcm[0])
+                    mono_scratch,
+                    sizeof(mono_scratch) / sizeof(mono_scratch[0])
             );
+            if (decoded_frames > 0) {
+                dashcdg_rx_pcm48_mono_to_interleaved_stereo(
+                        mono_scratch,
+                        pcm,
+                        (size_t) decoded_frames
+                );
+            }
         }
     } else if (dashcdg_v4_audio_codec_is_nb_ima_payload(frame->codec_id)) {
         decoded_frames = dashcdg_nb_ima_decode_to_pcm48_mono_frame(
                 &g_nb_ima_decoder,
                 frame->encoded_bytes,
                 frame->encoded_length,
-                pcm,
-                sizeof(pcm) / sizeof(pcm[0])
+                mono_scratch,
+                sizeof(mono_scratch) / sizeof(mono_scratch[0])
         );
+        if (decoded_frames > 0) {
+            dashcdg_rx_pcm48_mono_to_interleaved_stereo(
+                    mono_scratch,
+                    pcm,
+                    (size_t) decoded_frames
+            );
+        }
+    } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+        if (g_evrc_decoder == NULL) {
+            decoded_frames = 0;
+        } else {
+            decoded_frames = dashcdg_evrc_decode_to_pcm48_stereo(
+                    g_evrc_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    pcm,
+                    sizeof(pcm) / sizeof(pcm[0])
+            );
+        }
+    } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+        if (g_qcelp_decoder == NULL) {
+            decoded_frames = 0;
+        } else {
+            decoded_frames = dashcdg_qcelp13k_decode_to_pcm48_stereo(
+                    g_qcelp_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    pcm,
+                    sizeof(pcm) / sizeof(pcm[0])
+            );
+        }
+    } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+        if (g_bt_sbc_decoder == NULL) {
+            decoded_frames = 0;
+        } else {
+            decoded_frames = dashcdg_bt_sbc_decode_to_pcm48_stereo(
+                    g_bt_sbc_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    pcm,
+                    sizeof(pcm) / sizeof(pcm[0])
+            );
+        }
     } else {
         decoded_frames = 0;
     }
@@ -1700,14 +1808,14 @@ static void dashcdg_rx_apply_cdg_batch_locked(
         dashcdg_cdg_state_process_packet(&state->live_state, &packets[i]);
         state->live_packets_applied++;
     }
+    state->v4_bridge_cdg_valid = 0;
     state->last_progress_local_ms = dashcdg_clock_now_ms();
 }
 
 static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t local_now_ms) {
     uint64_t sender_playback_now_ms = 0U;
     int have_sender_playback = 0;
-    size_t audio_steps = 0;
-    size_t cdg_steps = 0;
+    size_t combined_steps = 0U;
 
     if (state == NULL) {
         return;
@@ -1715,65 +1823,67 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
 
     have_sender_playback = dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_now_ms);
 
-    while (state->audio_jitter.initialized && audio_steps < DASHCDG_MAX_DRAIN_STEPS_PER_CALL) {
+    /*
+     * Interleave audio and CDG drain steps against the same sender playback
+     * clock so neither stream runs far ahead within one scheduler pass.
+     */
+    while (combined_steps < DASHCDG_MAX_DRAIN_STEPS_PER_CALL * 2U) {
         struct dashcdg_audio_jitter_frame *frame = NULL;
         uint64_t miss_delta = 0U;
         struct dashcdg_audio_jitter_drain_input din;
         enum dashcdg_audio_drain_step step;
-
-        din.have_sender_playback = have_sender_playback;
-        din.sender_playback_now_ms = sender_playback_now_ms;
-        din.announced_audio_frame_ms = state->announced_audio_frame_ms;
-        din.announced_playout_delay_ms = state->announced_playout_delay_ms;
-        din.late_grace_ms = DASHCDG_AUDIO_LATE_GRACE_MS;
-        din.audio_stream_started = g_audio_stream_started;
-        din.audio_device_null = g_audio == NULL ? 1 : 0;
-        din.audio_buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
-
-        step = dashcdg_audio_jitter_drain_step(&state->audio_jitter, &din, &frame, &miss_delta);
-        if (step == DASHCDG_AUDIO_DRAIN_STOP) {
-            break;
-        }
-        if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
-            state->audio_missing_skips += miss_delta;
-            audio_steps++;
-            continue;
-        }
-        if (step == DASHCDG_AUDIO_DRAIN_APPLY && frame != NULL) {
-            uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
-
-            dashcdg_rx_apply_audio_frame_locked(state, frame);
-            dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
-            audio_steps++;
-        }
-    }
-
-    while (state->cdg_batch_jitter.initialized && cdg_steps < DASHCDG_MAX_DRAIN_STEPS_PER_CALL) {
         struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
         struct dashcdg_cdg_batch_jitter_drain_input cdg_din;
         enum dashcdg_cdg_batch_drain_step cdg_step;
         uint64_t cdg_miss = 0U;
+        int progressed = 0;
 
-        memset(&cdg_din, 0, sizeof(cdg_din));
-        cdg_din.have_sender_playback = have_sender_playback;
-        cdg_din.sender_playback_now_ms = sender_playback_now_ms;
-        cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
-        cdg_din.late_gate = (state->cdg_snapshots_applied == 0 || state->live_packets_applied > 0) ? 1 : 0;
+        if (state->cdg_batch_jitter.initialized) {
+            memset(&cdg_din, 0, sizeof(cdg_din));
+            cdg_din.have_sender_playback = have_sender_playback;
+            cdg_din.sender_playback_now_ms = sender_playback_now_ms;
+            cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
+            cdg_din.late_gate = (state->cdg_snapshots_applied == 0 || state->live_packets_applied > 0) ? 1 : 0;
 
-        cdg_step = dashcdg_cdg_batch_jitter_drain_step(&state->cdg_batch_jitter, &cdg_din, &batch, &cdg_miss);
-        if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_STOP) {
+            cdg_step = dashcdg_cdg_batch_jitter_drain_step(&state->cdg_batch_jitter, &cdg_din, &batch, &cdg_miss);
+            if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
+                state->live_missing_skips += cdg_miss;
+                progressed = 1;
+            } else if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_APPLY && batch != NULL) {
+                dashcdg_rx_apply_cdg_batch_locked(state, batch);
+                dashcdg_cdg_batch_jitter_note_applied(&state->cdg_batch_jitter, batch);
+                progressed = 1;
+            }
+        }
+
+        if (state->audio_jitter.initialized) {
+            memset(&din, 0, sizeof(din));
+            din.have_sender_playback = have_sender_playback;
+            din.sender_playback_now_ms = sender_playback_now_ms;
+            din.announced_audio_frame_ms = state->announced_audio_frame_ms;
+            din.announced_playout_delay_ms = state->announced_playout_delay_ms;
+            din.late_grace_ms = DASHCDG_AUDIO_LATE_GRACE_MS;
+            din.audio_stream_started = g_audio_stream_started;
+            din.audio_device_null = g_audio == NULL ? 1 : 0;
+            din.audio_buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+
+            step = dashcdg_audio_jitter_drain_step(&state->audio_jitter, &din, &frame, &miss_delta);
+            if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
+                state->audio_missing_skips += miss_delta;
+                progressed = 1;
+            } else if (step == DASHCDG_AUDIO_DRAIN_APPLY && frame != NULL) {
+                uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
+
+                dashcdg_rx_apply_audio_frame_locked(state, frame);
+                dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
+                progressed = 1;
+            }
+        }
+
+        if (!progressed) {
             break;
         }
-        if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
-            state->live_missing_skips += cdg_miss;
-            cdg_steps++;
-            continue;
-        }
-        if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_APPLY && batch != NULL) {
-            dashcdg_rx_apply_cdg_batch_locked(state, batch);
-            dashcdg_cdg_batch_jitter_note_applied(&state->cdg_batch_jitter, batch);
-            cdg_steps++;
-        }
+        combined_steps++;
     }
 
     dashcdg_rx_purge_audio_fec_locked(state);
@@ -2086,6 +2196,15 @@ static void dashcdg_rx_configure_audio_locked(
         dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
     } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
         dashcdg_amr_nb_decoder_create(&g_amr_nb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+        dashcdg_evrc_decoder_create(&g_evrc_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+        dashcdg_qcelp13k_decoder_create(&g_qcelp_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+        dashcdg_bt_sbc_decoder_create(&g_bt_sbc_decoder);
         dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
     } else {
         dashcdg_nb_ima_state_init(&g_nb_ima_decoder);

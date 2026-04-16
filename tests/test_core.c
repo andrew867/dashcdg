@@ -328,6 +328,7 @@ static void test_protocol_v4_roundtrip(void) {
     assert(strcmp(view.v4_session_info.song_id, "badnet-song") == 0);
     assert(view.v4_session_info.audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE);
     assert(view.v4_session_info.startup_preroll_ms == 240);
+    assert(dashcdg_v4_audio_codec_is_nb_ima_payload(view.v4_session_info.audio_codec_id) == 1);
 
     {
         const uint8_t codec_ids[] = {
@@ -365,11 +366,7 @@ static void test_protocol_v4_roundtrip(void) {
             assert(strcmp(view.v4_session_info.song_id, "codec-scan") == 0);
             assert(view.v4_session_info.audio_codec_id == codec_ids[codec_index]);
             assert(dashcdg_v4_audio_codec_is_narrowband(view.v4_session_info.audio_codec_id) == 1);
-            if (dashcdg_v4_audio_codec_is_amr(view.v4_session_info.audio_codec_id)) {
-                assert(dashcdg_v4_audio_codec_is_nb_ima_payload(view.v4_session_info.audio_codec_id) == 0);
-            } else {
-                assert(dashcdg_v4_audio_codec_is_nb_ima_payload(view.v4_session_info.audio_codec_id) == 1);
-            }
+            assert(dashcdg_v4_audio_codec_is_nb_ima_payload(view.v4_session_info.audio_codec_id) == 0);
         }
     }
 

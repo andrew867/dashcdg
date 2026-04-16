@@ -53,8 +53,12 @@ enum dashcdg_v4_audio_profile_id {
 };
 
 /*
- * Id 1: Opus. Ids 2,3,4,7: NB-IMA octet layout (core/src/nb_ima_codec.c).
- * Ids 5–6: AMR-NB / AMR-WB native IF2-style octets (audio_modules/amr vendor).
+ * Id 1: Opus.
+ * Id 2: legacy NB-IMA octet layout (core/src/nb_ima_codec.c), “SBC-like” name.
+ * Id 3: QCELP-13 packed frame (18 little-endian 16-bit words, celp13k).
+ * Id 4: EVRC 8 kbit/s packet octets (evrcc).
+ * Id 5–6: AMR-NB / AMR-WB native IF2-style octets (codec-amr).
+ * Id 7: Bluetooth SBC multi-frame blob (dashcdg_bt_sbc_*).
  */
 enum dashcdg_v4_audio_codec_id {
     DASHCDG_V4_AUDIO_CODEC_OPUS = 1,
@@ -448,9 +452,12 @@ int dashcdg_protocol_parse_packet(
 
 /* Non-Opus v4 audio (session / jitter tuning). */
 int dashcdg_v4_audio_codec_is_narrowband(uint8_t codec_id);
-/* NB-IMA dashcdg payload (v4 ids 2,3,4,7). */
+/* NB-IMA dashcdg payload (v4 id 2 only). */
 int dashcdg_v4_audio_codec_is_nb_ima_payload(uint8_t codec_id);
 /* AMR-NB / AMR-WB native bitstream (v4 ids 5,6). */
 int dashcdg_v4_audio_codec_is_amr(uint8_t codec_id);
+int dashcdg_v4_audio_codec_is_evrc(uint8_t codec_id);
+int dashcdg_v4_audio_codec_is_qcelp13k(uint8_t codec_id);
+int dashcdg_v4_audio_codec_is_bluetooth_sbc(uint8_t codec_id);
 
 #endif

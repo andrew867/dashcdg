@@ -67,19 +67,23 @@ int dashcdg_v4_audio_codec_is_narrowband(uint8_t codec_id) {
 }
 
 int dashcdg_v4_audio_codec_is_nb_ima_payload(uint8_t codec_id) {
-    switch (codec_id) {
-    case DASHCDG_V4_AUDIO_CODEC_SBC_LIKE:
-    case DASHCDG_V4_AUDIO_CODEC_CELP13K:
-    case DASHCDG_V4_AUDIO_CODEC_EVRC:
-    case DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC:
-        return 1;
-    default:
-        return 0;
-    }
+    return codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE ? 1 : 0;
 }
 
 int dashcdg_v4_audio_codec_is_amr(uint8_t codec_id) {
     return codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB || codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB;
+}
+
+int dashcdg_v4_audio_codec_is_evrc(uint8_t codec_id) {
+    return codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ? 1 : 0;
+}
+
+int dashcdg_v4_audio_codec_is_qcelp13k(uint8_t codec_id) {
+    return codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ? 1 : 0;
+}
+
+int dashcdg_v4_audio_codec_is_bluetooth_sbc(uint8_t codec_id) {
+    return codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC ? 1 : 0;
 }
 
 static size_t dashcdg_write_header_version(

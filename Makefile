@@ -92,7 +92,7 @@ ifeq ($(WINDOWS_RETRO_BUNDLE),1)
 LDLIBS_DESKTOP_RETRO := -lportaudio -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 endif
 else
-LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread
+LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread -lm
 NET_LIBS :=
 WINDOWS_GDI_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
@@ -137,7 +137,32 @@ DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_co
 CODEC_AMR_NB_OBJS := $(patsubst audio_modules/amr/vendor/codec-amr/src/nb/%.c,$(OBJ_DIR)/amr_nb_%.o,$(wildcard audio_modules/amr/vendor/codec-amr/src/nb/*.c))
 CODEC_AMR_WB_OBJS := $(patsubst audio_modules/amr/vendor/codec-amr/src/wb/%.c,$(OBJ_DIR)/amr_wb_%.o,$(wildcard audio_modules/amr/vendor/codec-amr/src/wb/*.c))
 CODEC_AMR_DESKTOP_OBJS := $(OBJ_DIR)/desktop_amr_wb_codec.o $(OBJ_DIR)/desktop_amr_nb_codec.o
-DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS)
+
+EVRCC_ROOT := audio_modules/evr/vendor/evrcc
+EVRCC_CODE_EXCLUDE := $(EVRCC_ROOT)/code/main.c $(EVRCC_ROOT)/code/getopt.c
+EVRCC_CODE_SRCS := $(filter-out $(EVRCC_CODE_EXCLUDE),$(wildcard $(EVRCC_ROOT)/code/*.c))
+CODEC_EVRCC_CODE_OBJS := $(patsubst $(EVRCC_ROOT)/code/%.c,$(OBJ_DIR)/evrcc_code_%.o,$(EVRCC_CODE_SRCS))
+CODEC_EVRCC_DSPMATH_OBJS := $(patsubst $(EVRCC_ROOT)/dspmath/%.c,$(OBJ_DIR)/evrcc_dspmath_%.o,$(wildcard $(EVRCC_ROOT)/dspmath/*.c))
+CODEC_EVRCC_OBJS := $(CODEC_EVRCC_CODE_OBJS) $(CODEC_EVRCC_DSPMATH_OBJS) $(OBJ_DIR)/evrcc_dsp_fx_basic_op40.o $(OBJ_DIR)/evrcc_evrcc.o $(OBJ_DIR)/evrcc_evrcpacket.o
+EVRCC_INCLUDES := -I$(EVRCC_ROOT) -I$(EVRCC_ROOT)/include -I$(EVRCC_ROOT)/code -I$(EVRCC_ROOT)/dspmath -I$(EVRCC_ROOT)/dsp_fx -Iaudio_modules/qcelp/vendor/celp13k/dsp_fx
+EVRCC_CFLAGS := -DEVRC_BUILDING_DLL=1 -DDASHCDG_EVRC_USE_HOST_STDINT=1 $(EVRCC_INCLUDES) -Wno-unused-parameter -Wno-sign-compare -Wno-unknown-pragmas -fno-strict-aliasing
+
+QCELP_ROOT := audio_modules/qcelp/vendor/celp13k
+QCELP_CODE_EXCLUDE := code/celp13k.c code/io.c code/io_qcp.c code/fer_sim.c code/rate_dos.c code/ratedec_dos.c
+QCELP_CODE_SRCS := $(filter-out $(addprefix $(QCELP_ROOT)/,$(QCELP_CODE_EXCLUDE)),$(wildcard $(QCELP_ROOT)/code/*.c))
+CODEC_QCELP_CODE_OBJS := $(patsubst $(QCELP_ROOT)/code/%.c,$(OBJ_DIR)/qcelp_code_%.o,$(QCELP_CODE_SRCS))
+CODEC_QCELP_TTY_OBJS := $(patsubst $(QCELP_ROOT)/tty/%.c,$(OBJ_DIR)/qcelp_tty_%.o,$(wildcard $(QCELP_ROOT)/tty/*.c))
+QCELP_DSPFX_EXCLUDE := $(QCELP_ROOT)/dsp_fx/basic_op.c
+CODEC_QCELP_DSP_OBJS := $(patsubst $(QCELP_ROOT)/dsp_fx/%.c,$(OBJ_DIR)/qcelp_dspfx_%.o,$(filter-out $(QCELP_DSPFX_EXCLUDE),$(wildcard $(QCELP_ROOT)/dsp_fx/*.c)))
+CODEC_QCELP_OBJS := $(CODEC_QCELP_CODE_OBJS) $(CODEC_QCELP_TTY_OBJS) $(CODEC_QCELP_DSP_OBJS)
+QCELP_CFLAGS := -I$(QCELP_ROOT)/code -I$(QCELP_ROOT)/tty -I$(QCELP_ROOT)/dsp_fx -Wno-unused-parameter -Wno-sign-compare -Wno-unknown-pragmas -fno-strict-aliasing
+
+SBC_ROOT := audio_modules/bt_sbc/vendor/sbc
+CODEC_SBC_OBJS := $(OBJ_DIR)/bt_sbc_sbc.o $(OBJ_DIR)/bt_sbc_sbc_primitives.o
+
+DESKTOP_NB_CODEC_OBJS := $(OBJ_DIR)/desktop_nb_evrc_codec.o $(OBJ_DIR)/desktop_nb_qcelp_codec.o $(OBJ_DIR)/desktop_nb_sbc_codec.o
+
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
 DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
 DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
 DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
@@ -277,6 +302,45 @@ $(OBJ_DIR)/desktop_amr_wb_codec.o: platform/desktop/src/amr_wb_codec.c
 
 $(OBJ_DIR)/desktop_amr_nb_codec.o: platform/desktop/src/amr_nb_codec.c
 	$(CC) $(CFLAGS) -Iaudio_modules/amr/vendor/codec-amr/src/nb -Iaudio_modules/amr/vendor/codec-amr/src -c -o $@ $<
+
+$(OBJ_DIR)/evrcc_code_%.o: $(EVRCC_ROOT)/code/%.c
+	$(CC) $(CFLAGS) $(EVRCC_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/evrcc_dspmath_%.o: $(EVRCC_ROOT)/dspmath/%.c
+	$(CC) $(CFLAGS) $(EVRCC_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/evrcc_dsp_fx_basic_op40.o: $(EVRCC_ROOT)/dsp_fx/basic_op40.c
+	$(CC) $(CFLAGS) $(EVRCC_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/evrcc_evrcc.o: $(EVRCC_ROOT)/evrcc.c
+	$(CC) $(CFLAGS) $(EVRCC_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/evrcc_evrcpacket.o: $(EVRCC_ROOT)/evrcpacket.c
+	$(CC) $(CFLAGS) $(EVRCC_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/qcelp_code_%.o: $(QCELP_ROOT)/code/%.c
+	$(CC) $(CFLAGS) $(QCELP_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/qcelp_tty_%.o: $(QCELP_ROOT)/tty/%.c
+	$(CC) $(CFLAGS) $(QCELP_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/qcelp_dspfx_%.o: $(QCELP_ROOT)/dsp_fx/%.c
+	$(CC) $(CFLAGS) $(QCELP_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/bt_sbc_sbc.o: $(SBC_ROOT)/sbc/sbc.c
+	$(CC) $(CFLAGS) -include stdint.h -I$(SBC_ROOT) -c -o $@ $<
+
+$(OBJ_DIR)/bt_sbc_sbc_primitives.o: $(SBC_ROOT)/sbc/sbc_primitives.c
+	$(CC) $(CFLAGS) -include stdint.h -I$(SBC_ROOT) -DDASHCDG_SBC_FORCE_GENERIC_PRIMITIVES=1 -c -o $@ $<
+
+$(OBJ_DIR)/desktop_nb_evrc_codec.o: platform/desktop/src/nb_evrc_codec.c
+	$(CC) $(CFLAGS) $(EVRCC_INCLUDES) -DEVRC_BUILDING_DLL=1 -DDASHCDG_EVRC_USE_HOST_STDINT=1 -c -o $@ $<
+
+$(OBJ_DIR)/desktop_nb_qcelp_codec.o: platform/desktop/src/nb_qcelp_codec.c
+	$(CC) $(CFLAGS) $(QCELP_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_nb_sbc_codec.o: platform/desktop/src/nb_sbc_codec.c
+	$(CC) $(CFLAGS) -I$(SBC_ROOT) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_app_tx.o: platform/desktop/src/app_tx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
