@@ -27,7 +27,7 @@ static const char *DASHCDG_FRAGMENT_SHADER =
         "in vec2 vertexCoord;\n"
         "void main() {\n"
         "    float u = (vertexCoord.x + 0.5) / 288.0;\n"
-        "    float v = 1.0 - ((vertexCoord.y + 0.5) / 192.0);\n"
+        "    float v = (vertexCoord.y + 0.5) / 192.0;\n"
         "    gl_FragColor = texture2D(cdgRgba, vec2(u, v));\n"
         "}\n";
 

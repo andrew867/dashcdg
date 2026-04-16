@@ -22,8 +22,24 @@
 #include <unistd.h>
 #endif
 
+#if defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW) && !defined(_WIN32)
+#error "DASHCDG_DESKTOP_TX_GDI_PREVIEW is only supported on Windows desktop builds"
+#endif
+
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+#define DASHCDG_TX_HAVE_GL_PREVIEW 0
+#elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
+#define DASHCDG_TX_HAVE_GL_PREVIEW 0
+#elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
+#define DASHCDG_TX_HAVE_GL_PREVIEW 0
+#else
+#define DASHCDG_TX_HAVE_GL_PREVIEW 1
+#endif
+
+#if DASHCDG_TX_HAVE_GL_PREVIEW
 #include <GL/glew.h>
 #include <GL/glut.h>
+#endif
 
 #include "dashcdg/app_modes.h"
 #include "dashcdg/cdg.h"
@@ -32,13 +48,23 @@
 #include "dashcdg/desktop_audio.h"
 #include "dashcdg/fec.h"
 #include "dashcdg/file_io.h"
+#if DASHCDG_TX_HAVE_GL_PREVIEW
 #include "dashcdg/gl_renderer.h"
+#endif
+#if defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW) || (DASHCDG_TX_HAVE_GL_PREVIEW && defined(_WIN32))
+#include "dashcdg/cdg_raster.h"
+#include "dashcdg/win32_gdi_view.h"
+#endif
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
 #include "dashcdg/sbc_like_codec.h"
 #include "dashcdg/stream_runtime.h"
+
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) && !defined(_WIN32)
+#error "DASHCDG_DESKTOP_RETRO_WINDOWS is only supported on Windows desktop builds"
+#endif
 
 #define DASHCDG_AUDIO_SAMPLE_RATE 48000U
 #define DASHCDG_AUDIO_CHANNELS 1U
@@ -115,7 +141,9 @@ struct dashcdg_tx_state {
     struct dashcdg_cdg_source cdg_source;
     struct dashcdg_cdg_state live_cdg_state;
     struct dashcdg_cdg_state pause_state;
+#if DASHCDG_TX_HAVE_GL_PREVIEW
     struct dashcdg_gl_renderer renderer;
+#endif
     struct dashcdg_tx_playlist playlist;
     pthread_t tx_thread;
     pthread_t control_thread;
@@ -1427,11 +1455,35 @@ static int dashcdg_tx_ipv4_is_broadcast(const struct in_addr *address) {
 }
 
 static void dashcdg_tx_print_usage(const char *argv0) {
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     fprintf(
             stderr,
-            "usage: %s [--display] [--badnet-v4] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--v3] [--audio-profile=resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
+    fprintf(stderr, "  (retro: v4 wire format by default; --v3 for legacy v3 only; SBC-like audio)\n");
+#elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
+    fprintf(
+            stderr,
+            "usage: %s [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            argv0
+    );
+    fprintf(stderr, "  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)\n");
+#elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
+    fprintf(
+            stderr,
+            "usage: %s [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            argv0
+    );
+    fprintf(stderr, "  v4 by default; --v3 for legacy v3. GDI preview on by default; --headless hides the window.\n");
+#else
+    fprintf(
+            stderr,
+            "usage: %s [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            argv0
+    );
+    fprintf(stderr, "  v4 by default; --v3 for legacy v3. OpenGL preview for desktop-player tx; --headless sends without a window.\n");
+#endif
     fprintf(
             stderr,
             "defaults: endpoint-address=%s port=%d\n",
@@ -2032,7 +2084,11 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
             apply_warmup ? " (queued with warmup)" : ""
     );
     fflush(stdout);
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+    if (1) {
+#else
     if (g_tx_state.display_requested || !g_tx_state.transport_v4_enabled) {
+#endif
         if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
             fprintf(stderr, "failed to read CDG asset: %s\n", track->cdg_path);
             return 0;
@@ -2827,6 +2883,11 @@ static int dashcdg_tx_audio_open_source(
     if (path == NULL || out_source == NULL || encoder == NULL || encoder_ready == NULL) {
         return 0;
     }
+#if defined(DASHCDG_DESKTOP_NO_OPUS)
+    if (use_opus) {
+        return 0;
+    }
+#endif
 
     source = dashcdg_desktop_audio_new();
     if (source == NULL) {
@@ -3508,14 +3569,14 @@ static int dashcdg_tx_handle_command(int command) {
                 g_tx_state.preview_hud_visible = !g_tx_state.preview_hud_visible;
                 fprintf(stdout, "[tx] HUD %s\n", g_tx_state.preview_hud_visible ? "enabled" : "hidden");
             } else {
-                fprintf(stdout, "[tx] HUD toggle requires --display\n");
+                fprintf(stdout, "[tx] HUD toggle requires a preview window (omit --headless or use desktop-gdi-tx.exe)\n");
             }
             break;
         case 'v':
             if (g_tx_state.display_requested) {
                 g_tx_state.preview_enabled = !g_tx_state.preview_enabled;
             } else {
-                fprintf(stdout, "[tx] preview toggle requires --display\n");
+                fprintf(stdout, "[tx] preview toggle requires a preview window (omit --headless or use desktop-gdi-tx.exe)\n");
             }
             break;
         case 'q':
@@ -3535,9 +3596,11 @@ static int dashcdg_tx_handle_command(int command) {
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
+#if DASHCDG_TX_HAVE_GL_PREVIEW
     if (tolower(command) == 'q' && g_tx_state.display_requested) {
         exit(0);
     }
+#endif
 
     return handled;
 }
@@ -4030,6 +4093,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
     return NULL;
 }
 
+#if DASHCDG_TX_HAVE_GL_PREVIEW
+
 static void dashcdg_tx_preview_display(void) {
     uint64_t playback_ms;
     uint64_t packet_ts;
@@ -4168,6 +4233,10 @@ struct dashcdg_tx_glut_bootstrap {
     char **argv;
 };
 
+#if defined(_WIN32) && DASHCDG_TX_HAVE_GL_PREVIEW
+static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv);
+#endif
+
 static void *dashcdg_tx_render_thread_main(void *user_data) {
     struct dashcdg_tx_glut_bootstrap *bootstrap = (struct dashcdg_tx_glut_bootstrap *) user_data;
     int argc = bootstrap != NULL ? bootstrap->argc : 0;
@@ -4183,8 +4252,15 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
 
     if (!dashcdg_gl_renderer_init(&g_tx_state.renderer)) {
         fprintf(stderr, "failed to initialize TX preview renderer\n");
+#ifdef _WIN32
+        fprintf(stderr, "[tx] falling back to Win32 GDI preview\n");
+        glutDestroyWindow(glutGetWindow());
+        dashcdg_tx_run_win32_gdi_preview_loop(argc, argv);
+        return NULL;
+#else
         g_tx_state.shutdown_requested = 1;
         return NULL;
+#endif
     }
 
     glutDisplayFunc(dashcdg_tx_preview_display);
@@ -4195,6 +4271,160 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
     glutMainLoop();
     return NULL;
 }
+
+#endif /* DASHCDG_TX_HAVE_GL_PREVIEW */
+
+#if defined(_WIN32) && (defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW) || DASHCDG_TX_HAVE_GL_PREVIEW)
+
+static int dashcdg_tx_win32_vk_to_command(unsigned vk) {
+    if (vk == VK_SPACE) {
+        return ' ';
+    }
+    if (vk == VK_LEFT) {
+        return '[';
+    }
+    if (vk == VK_RIGHT) {
+        return ']';
+    }
+    if (vk >= 'A' && vk <= 'Z') {
+        return (int) (vk - 'A' + 'a');
+    }
+    if (vk >= '0' && vk <= '9') {
+        return (int) vk;
+    }
+    if (vk == VK_OEM_2) {
+        return '?';
+    }
+    return -1;
+}
+
+static void dashcdg_tx_win32_gdi_on_key(void *user, unsigned vk, int down) {
+    struct dashcdg_win32_gdi_view **view_ptr = (struct dashcdg_win32_gdi_view **) user;
+    int cmd;
+
+    (void) view_ptr;
+    if (!down) {
+        return;
+    }
+    cmd = dashcdg_tx_win32_vk_to_command(vk);
+    if (cmd < 0) {
+        return;
+    }
+    dashcdg_tx_handle_command(cmd);
+    if (tolower(cmd) == 'q') {
+        PostQuitMessage(0);
+    }
+}
+
+static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
+    static uint8_t rgba_frame[DASHCDG_CDG_RGBA_BYTES];
+    struct dashcdg_win32_gdi_view *view = NULL;
+    const char *title = "dashcdg transmitter (GDI preview)";
+
+    (void) argc;
+    if (argv != NULL && argv[0] != NULL) {
+        title = argv[0];
+    }
+
+    if (!dashcdg_win32_gdi_view_create(
+                &view,
+                title,
+                DASHCDG_VISIBLE_WIDTH * 4,
+                DASHCDG_VISIBLE_HEIGHT * 4,
+                dashcdg_tx_win32_gdi_on_key,
+                (void *) &view
+        )) {
+        fprintf(stderr, "[tx] failed to create Win32 GDI preview window\n");
+        g_tx_state.shutdown_requested = 1;
+        return;
+    }
+
+    while (dashcdg_win32_gdi_view_poll(view) && !g_tx_state.shutdown_requested) {
+        uint64_t playback_ms;
+        struct dashcdg_cdg_state draw_state;
+        int show_hud;
+        char hud_line_a[256];
+        char hud_line_b[256];
+        int preview_on;
+
+        memset(&draw_state, 0, sizeof(draw_state));
+        pthread_mutex_lock(&g_tx_state.mutex);
+        preview_on = g_tx_state.preview_enabled;
+        playback_ms = dashcdg_tx_current_playback_ms_locked(dashcdg_clock_now_ms());
+        if (preview_on) {
+            if (g_tx_state.paused) {
+                draw_state = g_tx_state.pause_state;
+            } else {
+                uint64_t packet_ts = dashcdg_ms_to_packet_count(playback_ms);
+
+                dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_ts);
+                draw_state = g_tx_state.reader.state;
+            }
+        }
+        show_hud = g_tx_state.preview_hud_visible;
+        if (show_hud) {
+            uint32_t fec_overhead_pct;
+            int64_t audio_lead_ms;
+            int64_t cdg_lead_ms;
+            const struct dashcdg_tx_track *track = dashcdg_tx_current_track();
+            uint32_t available_prefix_bytes = 0;
+
+            fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
+            audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
+            cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(playback_ms);
+            if (g_tx_state.asset_size > 0U && g_tx_state.contiguous_prefix_chunks >= g_tx_state.chunk_count) {
+                available_prefix_bytes = (uint32_t) g_tx_state.asset_size;
+            } else {
+                available_prefix_bytes = (uint32_t) (g_tx_state.contiguous_prefix_chunks * DASHCDG_MAX_ASSET_CHUNK);
+            }
+            snprintf(
+                    hud_line_a,
+                    sizeof(hud_line_a),
+                    "TX dg:%llu fail:%llu live:%llu aud:%llu snap:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
+                    (unsigned long long) g_tx_state.datagrams_sent,
+                    (unsigned long long) g_tx_state.send_failures,
+                    (unsigned long long) g_tx_state.cdg_batch_packets_sent,
+                    (unsigned long long) g_tx_state.audio_packets_sent,
+                    (unsigned long long) g_tx_state.cdg_snapshot_packets_sent,
+                    (unsigned long long) g_tx_state.fec_audio_packets_sent,
+                    (unsigned long long) g_tx_state.fec_cdg_packets_sent,
+                    (unsigned int) fec_overhead_pct,
+                    (unsigned int) available_prefix_bytes,
+                    (unsigned int) g_tx_state.beacon.total_asset_bytes
+            );
+            snprintf(
+                    hud_line_b,
+                    sizeof(hud_line_b),
+                    "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s",
+                    (unsigned long long) g_tx_state.asset_loops_completed,
+                    g_tx_state.next_asset_offset,
+                    g_tx_state.cdg_snapshot_offset,
+                    (long long) audio_lead_ms,
+                    (long long) cdg_lead_ms,
+                    (unsigned int) g_tx_state.announce.audio_fec_group_size,
+                    (unsigned int) g_tx_state.announce.cdg_fec_group_size,
+                    track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
+            );
+        } else {
+            hud_line_a[0] = '\0';
+            hud_line_b[0] = '\0';
+        }
+        pthread_mutex_unlock(&g_tx_state.mutex);
+
+        if (preview_on) {
+            dashcdg_cdg_state_to_rgba8(&draw_state, rgba_frame);
+        } else {
+            memset(rgba_frame, 0, sizeof(rgba_frame));
+        }
+
+        dashcdg_win32_gdi_view_present_rgba(view, rgba_frame, sizeof(rgba_frame), show_hud, hud_line_a, hud_line_b);
+        dashcdg_sleep_ms(DASHCDG_RENDER_FRAME_INTERVAL_MS);
+    }
+
+    dashcdg_win32_gdi_view_destroy(view);
+}
+
+#endif /* _WIN32 && (GDI_PREVIEW || GL preview) */
 
 static void dashcdg_tx_cleanup(void) {
     if (g_tx_state.control_thread_created) {
@@ -4253,7 +4483,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     int remaining_positionals;
     int is_multicast;
     int is_broadcast;
+#if DASHCDG_TX_HAVE_GL_PREVIEW
     struct dashcdg_tx_glut_bootstrap render_bootstrap;
+#endif
     struct dashcdg_multicast_interface multicast_interfaces[DASHCDG_MAX_MULTICAST_INTERFACES];
     size_t multicast_interface_count = 0U;
     size_t joined_interface_count = 0U;
@@ -4268,8 +4500,34 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.preview_enabled = 1;
     g_tx_state.preview_hud_visible = 0;
     g_tx_state.warmup_ms = 1000;
+#if defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
+    g_tx_state.display_requested = 1;
+#elif DASHCDG_TX_HAVE_GL_PREVIEW
+    {
+        const char *exe = argv[0];
+        const char *bn = exe;
+
+        if (exe != NULL) {
+            for (const char *s = exe; *s != '\0'; ++s) {
+                if (*s == '/' || *s == '\\') {
+                    bn = s + 1;
+                }
+            }
+        }
+        if (bn != NULL && strstr(bn, "player") != NULL) {
+            /* desktop-player tx: on-screen preview on by default (all platforms) */
+            g_tx_state.display_requested = 1;
+        }
+    }
+#endif
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
+#else
     g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
     g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+#endif
+    g_tx_state.transport_v4_enabled = 1;
     srand((unsigned int) (time(NULL) ^ (time_t) dashcdg_clock_now_ms() ^ (time_t) (uintptr_t) &g_tx_state));
     pthread_mutex_init(&g_tx_state.mutex, NULL);
     dashcdg_cdg_reader_init(&g_tx_state.reader);
@@ -4287,18 +4545,48 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--headless") == 0) {
+#if DASHCDG_TX_HAVE_GL_PREVIEW || defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
+            g_tx_state.display_requested = 0;
+#endif
+            continue;
+        }
         if (strcmp(argv[i], "--display") == 0) {
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+            continue;
+#elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
+            fprintf(
+                    stderr,
+                    "%s: this build is headless-only; use desktop-gdi-tx.exe or `desktop-player tx` for a preview window\n",
+                    argv[0]
+            );
+            dashcdg_tx_cleanup();
+            return 1;
+#elif DASHCDG_TX_HAVE_GL_PREVIEW || defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
             g_tx_state.display_requested = 1;
             continue;
+#else
+            continue;
+#endif
         }
         if (strcmp(argv[i], "--badnet-v4") == 0) {
             g_tx_state.transport_v4_enabled = 1;
             continue;
         }
+        if (strcmp(argv[i], "--v3") == 0 || strcmp(argv[i], "--protocol=v3") == 0) {
+            g_tx_state.transport_v4_enabled = 0;
+            continue;
+        }
         if (strcmp(argv[i], "--audio-profile=quality") == 0) {
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+            fprintf(stderr, "%s: --audio-profile=quality (Opus) is not available in retro build\n", argv[0]);
+            dashcdg_tx_cleanup();
+            return 1;
+#else
             g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
             g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
             continue;
+#endif
         }
         if (strcmp(argv[i], "--audio-profile=resilience") == 0) {
             g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
@@ -4522,7 +4810,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
-    fprintf(stdout, "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "badnet-v4" : "v3");
+    fprintf(stdout, "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "v4 (default)" : "v3 (--v3)");
     if (g_tx_state.playlist_scan_running) {
         fprintf(
                 stdout,
@@ -4578,6 +4866,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         return 0;
     }
 
+#if DASHCDG_TX_HAVE_GL_PREVIEW
     render_bootstrap.argc = argc;
     render_bootstrap.argv = argv;
     /*
@@ -4596,4 +4885,41 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     pthread_join(g_tx_state.ptp_thread, NULL);
     dashcdg_tx_cleanup();
     return 0;
+#elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
+    dashcdg_tx_run_win32_gdi_preview_loop(argc, argv);
+    g_tx_state.shutdown_requested = 1;
+    pthread_join(g_tx_state.tx_thread, NULL);
+    pthread_join(g_tx_state.audio_thread, NULL);
+    if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_tx_state.ptp_sockfd);
+        g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+    }
+    pthread_join(g_tx_state.ptp_thread, NULL);
+    dashcdg_tx_cleanup();
+    return 0;
+#elif defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+    fprintf(stderr, "[tx] internal error: display path disabled in retro build\n");
+    g_tx_state.shutdown_requested = 1;
+    pthread_join(g_tx_state.tx_thread, NULL);
+    pthread_join(g_tx_state.audio_thread, NULL);
+    if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_tx_state.ptp_sockfd);
+        g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+    }
+    pthread_join(g_tx_state.ptp_thread, NULL);
+    dashcdg_tx_cleanup();
+    return 1;
+#else
+    fprintf(stderr, "[tx] internal error: preview window requested but not available in this build\n");
+    g_tx_state.shutdown_requested = 1;
+    pthread_join(g_tx_state.tx_thread, NULL);
+    pthread_join(g_tx_state.audio_thread, NULL);
+    if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_tx_state.ptp_sockfd);
+        g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
+    }
+    pthread_join(g_tx_state.ptp_thread, NULL);
+    dashcdg_tx_cleanup();
+    return 1;
+#endif
 }

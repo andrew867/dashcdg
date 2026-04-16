@@ -1,169 +1,118 @@
-# Desktop Platform Support Matrix
+# Desktop platform support matrix
 
 ## Purpose
 
-This document defines the desktop portability contract for the current tranche.
-It covers:
+Single contract for **what we build**, **where artifacts land**, and **how we
+talk about OS support**. It supersedes ad-hoc “baseline” docs (see
+[`docs/archive/README.md`](../archive/README.md)).
 
-- Windows `x64` and `x86` release artifacts
-- Linux `amd64`, `x86`, `arm64`, and `arm` source-build targets
-- the current status of Windows 2000/XP/Vista/7/10/11 claims
-- the minimum runtime and packaging dependencies for each platform family
+macOS is still out of scope for this tranche (no build hardware).
 
-macOS is intentionally omitted from this tranche because no build/test hardware
-is currently available.
+## Windows executables (current tree)
 
-## Release Artifacts
+Built from `platform/desktop/src/` with shared core/proto libs.
 
-### Windows
+| Binary | Role | Notes |
+| --- | --- | --- |
+| `desktop-tx.exe` | **Headless** transmitter (Windows build) | No OpenGL/FreeGLUT in this link: server-style TX only. **Protocol v4 by default** (`--v3` for legacy v3 loop). Opus by default; SBC-like with `--audio-profile=resilience`. On Linux/macOS, `desktop-tx` is still the GL-capable object: default **no** window unless `--display` (use `desktop-player tx` for preview-on-by-default). |
+| `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Opus or SBC-like same as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
+| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Opus + SBC-like decode per session. |
+| `desktop-gdi-rx.exe` | GDI-only receiver link | No GL imports. Opus + PortAudio. |
+| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use. |
+| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + PortAudio; **no Opus** (stub). |
+| `desktop-player.exe` | Local player + `tx` / `rx` shims | Full GL + Win32 GDI code paths: `tx` preview on by default (`--headless` to disable); `rx` same GL→GDI fallback as `desktop-rx`. |
 
-The repository now produces two Windows portable zip artifacts:
+Implementation pointers:
 
-- `build/amd64/release/dashcdg-windows-x64-portable.zip`
-- `build/x86/release/dashcdg-windows-x86-portable.zip`
+- GDI window: `platform/desktop/src/win32_gdi_view.c`
+- TX objects: `desktop_app_tx.o` (GL-capable / player), `desktop_app_tx_headless.o` (Windows `desktop-tx`), `desktop_app_tx_gdi.o` (`desktop-gdi-tx`), `desktop_app_tx_retro.o` (retro)
+- GDI RX entry: `desktop_app_rx_gdi.o` from `app_rx.c`
+- Retro RX/TX: `desktop_app_rx_retro_gdi.o`, `desktop_app_tx_retro.o`
 
-After `make dist-windows` or `scripts/build_release.sh all`, the same files are
-also copied next to each other under:
+## Windows portable zips (`make package` / `make dist-windows`)
+
+Per-arch **debug** bundles (EXE + runtime DLLs copied into `build/<arch>/bin/` via `make bundle-runtime`):
+
+| Artifact | Typical path |
+| --- | --- |
+| x64 portable zip | `build/amd64/release/dashcdg-windows-x64-portable.zip` |
+| x86 portable zip | `build/x86/release/dashcdg-windows-x86-portable.zip` |
+
+After `make dist-windows` or `scripts/build_release.sh all`, copies also appear under:
 
 - `build/dist/dashcdg-windows-x64-portable.zip`
 - `build/dist/dashcdg-windows-x86-portable.zip`
 
-See `docs/specs/windows-legacy-mingw-build.md` for PE import / subsystem audit
-and an optional **Windows XP-oriented** MinGW link profile
-(`WINDOWS_LEGACY_TARGET=1` or `DASHCDG_WINDOWS_LEGACY=1`).
+Standard zips on Windows MSYS2 include **`desktop-gdi-rx.exe`**, **`desktop-gdi-tx.exe`**, and headless **`desktop-tx.exe`** alongside GL-linked `desktop-rx` / `desktop-player` (see `Makefile` `debug` / `desktop-apps`).
 
-Each zip contains:
+## Sneakernet tree (`make dist-windows-sneakernet`)
 
-- `desktop-tx.exe`
-- `desktop-rx.exe`
-- `desktop-player.exe`
-- `glew32.dll`
-- `libfreeglut.dll`
-- `libportaudio.dll`
-- `libopus-0.dll`
-- `libwinpthread-1.dll`
-- `libgcc_s_*.dll` (MinGW runtime; name varies by arch, for example `libgcc_s_seh-1.dll` on x64 or `libgcc_s_dw2-1.dll` on x86)
-- `libstdc++-6.dll`
+`scripts/build_windows_sneakernet_dist.sh` performs **four** clean `make debug` passes and lays out:
 
-### Linux
+- `build/dist/dashcdg-windows-sneakernet/windows-x64/`
+- `build/dist/dashcdg-windows-sneakernet/windows-x86/`
+- `build/dist/dashcdg-windows-sneakernet/windows-x86-legacy-p3/` (`WINDOWS_LEGACY_TARGET=1`, Pentium III–oriented objects)
+- `build/dist/dashcdg-windows-sneakernet/windows-x86-retro/` (`WINDOWS_RETRO_BUNDLE=1`: `desktop-retro-*.exe`, minimal DLLs)
 
-Linux is currently a documented source-build target, not a packaged release
-artifact.
+Standard folders ship **`desktop-tx.exe`**, **`desktop-gdi-tx.exe`**, **`desktop-rx.exe`**, a **`desktop-gl-rx.exe`** alias (copy of `desktop-rx.exe`), **`desktop-gdi-rx.exe`**, and **`desktop-player.exe`** (+ legacy `desktop-*-player.exe` copies); see `README.txt` in that tree.
 
-Target CPU families for the current source-build contract:
+Optional zip: `build/dist/dashcdg-windows-sneakernet.zip` (PowerShell `Compress-Archive` when available).
 
-- `amd64`
-- `x86`
-- `arm64`
-- `arm`
+## Makefile targets (Windows-focused)
 
-## Windows Build Contract
+| Target | Meaning |
+| --- | --- |
+| `make debug` | Core + proto + desktop lib + tests + `desktop-player`, `desktop-tx`, `desktop-rx`, **`desktop-gdi-rx.exe`** (Windows), retro pair when `WINDOWS_RETRO_BUNDLE=1`. |
+| `make desktop-apps` | Same product set without `test-core`. |
+| `make desktop-windows-x86-retro` | `clean debug` with `MINGW_ARCH=mingw32` `WINDOWS_RETRO_BUNDLE=1` (Win2000-style PE + Pentium2 tune + retro binaries). |
+| `make package` / `package-x64` / `package-x86` | Zip layout under `build/<arch>/release/`. |
+| `make dist-windows` | `package-all-windows` + copy zips to `build/dist/`. |
+| `make dist-windows-sneakernet` | Runs the sneakernet script above. |
 
-### Toolchains
+Variables (see `Makefile`):
 
-Windows packaging uses MSYS2/MinGW-w64:
+- `MINGW_ARCH=mingw64` | `mingw32`
+- `WINDOWS_LEGACY_TARGET=1` — XP-oriented PE subsystem flags; on i686 adds `-march=pentium3 -mtune=pentium3` when retro bundle is off.
+- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, Pentium2 tune, `LDLIBS_DESKTOP_RETRO` (no OpenGL/Opus DLLs in the copy list).
 
-- `mingw64` for `x64`
-- `mingw32` for `x86`
+## Pixel path (GL vs GDI)
 
-Required MSYS2 packages:
+Both windowed RX paths rasterize with the same CPU contract:
+[`cpu-rgba-raster-contract.md`](cpu-rgba-raster-contract.md) (`dashcdg_cdg_state_to_rgba8`).
+GL uploads RGBA to a texture; GDI swaps to BGRA and blits via DIBSection.
 
-- `mingw-w64-x86_64-gcc`
-- `mingw-w64-x86_64-opus`
-- `mingw-w64-x86_64-portaudio`
-- `mingw-w64-x86_64-freeglut`
-- `mingw-w64-x86_64-glew`
-- `mingw-w64-i686-gcc`
-- `mingw-w64-i686-opus`
-- `mingw-w64-i686-portaudio`
-- `mingw-w64-i686-freeglut`
-- `mingw-w64-i686-glew`
+## Linux
 
-### Windows system libraries
+Linux remains a **documented source-build** target (OpenGL + GLEW + FreeGLUT +
+PortAudio + Opus + pthread + IPv4 multicast/broadcast). Intended CPU families:
+`amd64`, `x86`, `arm64`, `arm`. No release zip is produced in-tree today.
 
-The current desktop apps link against:
+## OS support claims
 
-- `opengl32`
-- `ws2_32`
-- `iphlpapi`
+Aligned with [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md):
 
-The applications also require working GPU/driver support for:
+| OS | Build | Runtime / notes |
+| --- | --- | --- |
+| Windows 10/11 | Proven (host) | Primary baseline. |
+| Windows 7 | Indirectly targeted by MinGW stack | Smoke not proven in tranche. |
+| Windows Vista | Not proven | Research-only. |
+| Windows XP (x86) | i686 packages + optional legacy link flags | GL driver stack still must be validated on real hardware; **GDI RX** reduces GL risk for receive-only scenarios. |
+| Windows 2000 | Retro PE + `GetAdaptersAddresses` story | **Retro** bundle is the intentional minimal stack; still research-grade until hardware-soaked. |
 
-- desktop OpenGL
-- GLSL `#version 130`
+Allowed messaging today:
 
-## Linux Build Contract
+- Windows **x64** and **x86** portable packaging exists and includes GL + GDI RX where built.
+- **Sneakernet** layout documents four Windows variants for field USB copy.
+- Linux multi-arch is an **intent**, not fully soaked.
 
-Linux source builds require:
+Not allowed without new proof:
 
-- C99 compiler
-- pthread-compatible threading
-- desktop OpenGL development/runtime packages
-- GLEW
-- FreeGLUT or a compatible GLUT implementation
-- PortAudio
-- `libopus`
-- standard IPv4 socket support with multicast and broadcast APIs
+- “XP supported” / “2000 supported” as production claims
+- Vista/7 runtime proven
+- All Linux arches smoke-complete
 
-Typical package names vary by distro, but the dependency classes are:
+## Further reading
 
-- OpenGL headers/runtime
-- GLEW headers/runtime
-- GLUT/freeglut headers/runtime
-- PortAudio headers/runtime
-- Opus headers/runtime
-- X11 desktop GL dependencies
-
-## OS Support Status
-
-### Windows 10/11
-
-- package build: proven
-- desktop runtime on the current host: proven
-- current proof status: supported baseline
-
-### Windows 7
-
-- package build: indirectly targeted by current MinGW/OpenGL stack
-- runtime smoke: not yet proven in this tranche
-- current proof status: target, not yet proven
-
-### Windows Vista
-
-- package build: not a proof of runtime viability
-- runtime smoke: not yet proven
-- current proof status: research target only
-
-### Windows XP SP2/SP3
-
-- `x86` package build is now available for test media
-- renderer/runtime viability is still unproven
-- PortAudio/FreeGLUT/GLEW/OpenGL driver behavior must be tested on real XP
-- current proof status: research target only
-
-### Windows 2000
-
-- **IP path:** `GetAdaptersAddresses` (used for multicast interface listing) is
-  **Windows XP+**, not available on Windows 2000 without a code fallback.
-- **Graphics:** Win2K has OpenGL 1.1, but this project’s bundled GLEW/FreeGLUT
-  stack and GLSL `#version 130` path are not validated on 2000.
-- **x64:** there is no 64-bit Windows 2000; “Win2K + x64” is not a meaningful
-  target.
-- current proof status: research target only (see
-  `docs/specs/windows-legacy-mingw-build.md`)
-
-## Claim Discipline
-
-The following statements are allowed today:
-
-- Windows `x64` packaging is proven
-- Windows `x86` packaging is proven
-- Linux `amd64`, `x86`, `arm64`, and `arm` are intended source-build targets
-- Windows XP and Windows 2000 are test targets, not supported/runtime-proven
-
-The following statements are not allowed today:
-
-- Windows XP is supported
-- Windows 2000 is supported
-- Windows Vista/7 runtime compatibility is proven
-- Linux `arm`, `arm64`, `x86`, and `amd64` all have completed smoke proof
+- [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md) — PE audit, DLL lists, retro profile
+- [`win32-gdi-view-backend.md`](win32-gdi-view-backend.md) — GDI backend behavior
+- [`../architecture/desktop-streaming.md`](../architecture/desktop-streaming.md) — end-to-end TX/RX + render paths

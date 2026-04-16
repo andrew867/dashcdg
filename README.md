@@ -8,9 +8,9 @@
 - live on-wire `Opus + timed CDG` playout with late-join bootstrap, bounded FEC, and periodic CDG state keyframes
 
 The current desktop TX already sends audio and CD+G in parallel on the wire.
-The next portability/slimdown tranche focuses on reducing TX-side CD+G memory
-duplication and clearly separating modern desktop support from legacy Windows
-research.
+Ongoing work includes TX-side CD+G memory slimdown; **Windows** packaging now
+includes a **Win32 GDI** receiver (`desktop-gdi-rx.exe`) and an optional
+**retro** bundle without OpenGL/Opus — see `docs/specs/desktop-platform-support.md`.
 
 ## What Exists Today
 
@@ -36,7 +36,7 @@ That means the receiver can:
 - `proto/`: protocol v3 framing, serializers, and parsers
 - `platform/desktop/`: desktop renderer, PortAudio streaming layer, Opus helpers, and TX/RX app logic
 - `apps/desktop-player/`: local player plus entry shim for `tx` and `rx` modes
-- `docs/`: architecture, protocol, proof, hardware, and ops documentation
+- `docs/`: architecture, protocol, proof, hardware, ops, and `docs/archive/` for superseded notes
 - `tests/`: portable core, protocol, and helper tests
 
 ## Build
@@ -94,20 +94,32 @@ Or from the Makefile:
 make dist-windows
 ```
 
+For a **single USB-ready folder** (x64 + x86 + legacy P3 + retro layouts with
+`README.txt`), run `make dist-windows-sneakernet` — output is
+`build/dist/dashcdg-windows-sneakernet/` and `build/dist/dashcdg-windows-sneakernet.zip`
+(see `docs/specs/windows-legacy-mingw-build.md`).
+
 ## Desktop dependencies
 
-The desktop apps require:
+**Full GL stack** (`desktop-tx`, `desktop-rx`, `desktop-player`) requires:
 
 - OpenGL plus GLEW
 - FreeGLUT
 - PortAudio
 - `libopus`
 
+**GDI-only receiver** (`desktop-gdi-rx.exe`, Windows): PortAudio, Opus, Win32
+GDI/user32 — **no** FreeGLUT/GLEW in that link (see
+`docs/specs/win32-gdi-view-backend.md`).
+
+**Retro bundle** (`desktop-retro-*.exe`, `WINDOWS_RETRO_BUNDLE=1`): PortAudio +
+GDI + SBC-like codec path; **no** Opus and **no** OpenGL stack in the shipped DLL set.
+
 On the current Windows/MSYS2 flow:
 
 - `x64` packaging requires `mingw-w64-x86_64-gcc`, `mingw-w64-x86_64-opus`, `mingw-w64-x86_64-portaudio`, `mingw-w64-x86_64-freeglut`, and `mingw-w64-x86_64-glew`
 - `x86` packaging requires `mingw-w64-i686-gcc`, `mingw-w64-i686-opus`, `mingw-w64-i686-portaudio`, `mingw-w64-i686-freeglut`, and `mingw-w64-i686-glew`
-- the packaged Windows zips ship `glew32.dll`, `libfreeglut.dll`, `libportaudio.dll`, `libopus-0.dll`, `libwinpthread-1.dll`, a matching `libgcc_s_*.dll`, and `libstdc++-6.dll`
+- standard portable Windows zips ship `glew32.dll`, `libfreeglut.dll`, `libportaudio.dll`, `libopus-0.dll`, `libwinpthread-1.dll`, a matching `libgcc_s_*.dll`, and `libstdc++-6.dll` (retro omits GL/Opus DLLs; see platform matrix)
 
 ## Desktop App Usage
 
@@ -120,21 +132,25 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Integrated network modes through the player entrypoint:
 
 ```sh
-build/bin/desktop-player tx [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
-build/bin/desktop-player rx [endpoint-address] [port]
+build/bin/desktop-player tx [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-player rx [--headless] [--gdi] [endpoint-address] [port]
 ```
 
-Standalone network transmitter:
+Standalone network transmitter (Windows MSYS2: **headless** `desktop-tx.exe`; use **`desktop-gdi-tx.exe`** for a GDI preview window without GL):
 
 ```sh
-build/bin/desktop-tx [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-tx [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 ```
+
+On Linux/macOS, `desktop-tx` is still the GL-capable binary: add **`--display`** for a FreeGLUT preview, or use **`desktop-player tx`** (preview on by default when the executable name contains `player`).
 
 Standalone network receiver:
 
 ```sh
-build/bin/desktop-rx [--headless] [endpoint-address] [port]
+build/bin/desktop-rx [--headless] [--gdi|--win-gdi] [endpoint-address] [port]
 ```
+
+Windows MSYS2 `make debug` also produces **`desktop-gdi-rx.exe`** and **`desktop-gdi-tx.exe`** (no GL in those links). On Windows, `desktop-rx` tries OpenGL first and **falls back to GDI** if the GL renderer fails to init; `--gdi` forces GDI.
 
 Network defaults:
 
@@ -173,21 +189,21 @@ Network defaults:
 - `r`: restart current track
 - `f`: force late-join asset rebroadcast
 - `s`: print current status
-- `v`: toggle preview visibility when `--display` is active
+- `v`: toggle preview visibility when a preview window is active
 - `h` or `?`: print help
 - `q`: quit
 
-`desktop-tx --display` preview:
+`desktop-player tx` / `desktop-tx --display` (non-Windows) / `desktop-gdi-tx.exe` preview:
 
-- opens a local OpenGL preview window while TX continues broadcasting
+- opens a local preview window (OpenGL or GDI) while TX continues broadcasting
 - `Right Arrow`: next track
 - `Left Arrow`: back through played-track history
 - the same `v` command blanks/unblanks only the local preview; it does not stop network send
 
-`desktop-rx`:
+`desktop-rx` / `desktop-gdi-rx`:
 
 - `--headless` prints status lines to stdout once per second and does not open a window
-- GUI mode shows a HUD in the window
+- GUI mode shows a HUD in the window (OpenGL + GLUT, or Win32 GDI per binary / `--win-gdi`)
 - `S` in the RX window prints the current status line to stdout
 
 ## Desktop Streaming Architecture
@@ -208,7 +224,7 @@ flowchart LR
     cb --> rxjit
     rxjit --> rxaud[Opus decode plus PortAudio queue]
     rxjit --> rxcdg[Live CDG state]
-    rxaud --> render[Renderer follows playout clock]
+    rxaud --> render[OpenGL or GDI follows playout clock]
     rxcdg --> render
 ```
 
@@ -218,9 +234,9 @@ Key runtime rules:
   live send
 - TX now uses a random-access CDG source for wire send paths; headless/default TX
   can stay file-backed, while preview mode still uses an in-memory fallback
-- TX now has an opt-in `--badnet-v4` sender path with bounded startup pacing,
-  loading-screen packets, compact anchor chunks, and structured startup events
-- TX bad-network v4 currently supports `--audio-profile=quality|resilience`
+- TX uses **protocol v4** on the wire by default (session info, loading screens,
+  anchors, bounded startup pacing). Pass **`--v3`** to force the legacy v3-only sender loop.
+- TX v4 supports `--audio-profile=quality|resilience` (Opus vs SBC-like)
   with visible profile/codec reporting in its status and event logs
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
@@ -275,22 +291,22 @@ Implemented and documented:
 - startup, repair, and clock telemetry in both TX and RX
 - measured isolated soak proving steady-state RX playout progression no longer falls back into `wait-preroll` while traffic continues
 - measured forced session restart to a different track proving RX can tear down the old session and lock onto a fresh announce/bootstrap cycle cleanly
+- Win32 **GDI** CDG view (`win32_gdi_view.c`, `desktop-gdi-rx.exe`, optional `--win-gdi` on `desktop-rx`) sharing the CPU RGBA raster with the GL path
 - a separate TX CD+G source/memory slimdown spec now defines how to remove
   duplicated batch storage without changing protocol semantics in place
-- a separate portability baseline now distinguishes modern desktop support from
-  legacy Windows GUI feasibility research
+- desktop docs now center on **`docs/specs/desktop-platform-support.md`**
+  (build matrix, GDI RX, sneakernet, retro bundle); older baseline / GUI
+  feasibility notes live under **`docs/archive/`**
 
 Still rough or incomplete:
 
 - clock discipline is still software timestamped rather than venue-grade hardware-timestamped PTP
-- long impaired-network soak data is still incomplete
+- long impaired-network soak data is still incomplete (including v4-focused runs)
 - current FEC only repairs one missing payload per protected group
 - some desktop proof scenarios can still show a small burst of early decode failures while queues settle after startup
 - TX preview mode still falls back to a whole-memory `.cdg` load for the local
   OpenGL preview path even though default TX wire send is now random-access
   backed
-- bad-network v4 is TX-opt-in right now; RX v4 decode/startup is still the next
-  tranche
 
 ## Important Current Limitations
 
@@ -304,16 +320,20 @@ Still rough or incomplete:
 
 ## Related documentation
 
-- `docs/architecture/desktop-streaming.md`: end-to-end desktop TX/RX architecture and runtime diagrams
+- `docs/README.md`: index of architecture, specs, tests, hardware, and **archive**
+- `docs/specs/desktop-platform-support.md`: **master matrix** — Windows/Linux targets, `desktop-gdi-rx` / retro EXEs, Makefile flags, portable zips, sneakernet layout
+- `docs/specs/win32-gdi-view-backend.md`: Win32 GDI view (`desktop-gdi-rx`, `desktop-gdi-tx`, `desktop-rx --gdi`, GL fallback)
+- `docs/specs/windows-legacy-mingw-build.md`: MinGW PE/subsystem, XP/P3 profile, sneakernet script, DLL notes
+- `docs/architecture/desktop-streaming.md`: end-to-end desktop TX/RX architecture and runtime diagrams (GL + GDI)
 - `docs/architecture/threaded-streaming-runtime.md`: implemented task/queue ownership model for the threaded desktop runtime
 - `docs/specs/transport-protocol.md`: full protocol v3 field-level documentation
 - `docs/specs/tx-cdg-source-model.md`: current TX CD+G duplication and staged slimdown plan
 - `docs/specs/receiver-progress-invariants.md`: receiver rules that prevent long-play ingress-without-playout stalls
 - `docs/test/desktop-proof-plan.md`: what the desktop proof is intended to prove and how to read its status
 - `docs/test/portability-streaming-validation.md`: portability/slimdown validation matrix for live wire behavior and platform smoke coverage
+- `docs/test/win32-gdi-view-validation.md`: manual checklist for the GDI RX path
 - `docs/test/desktop-impairment-validation.md`: repeatable impaired-network proof workflow and expected counters
 - `docs/architecture/portable-core.md`: portable vs desktop-specific boundaries
-- `docs/architecture/modern-desktop-baseline.md`: supported modern Windows/Linux/macOS desktop baseline
-- `docs/architecture/legacy-windows-gui-feasibility.md`: separate legacy full-GUI Windows feasibility tranche
 - `docs/hardware/`: future ESP32 receiver and productization docs
 - `docs/ops/quality-gates.md`: current tranche release criteria
+- `docs/archive/`: superseded specs and research notes (kept for history)

@@ -692,8 +692,10 @@ int main(int argc, char **argv) {
 
     if (!dashcdg_parse_args(&g_playlist, argc, argv)) {
         fprintf(stderr, "usage: %s [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-stem> [file.mp3]]\n", argv[0]);
-        fprintf(stderr, "   or: %s tx [--display] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n", argv[0]);
-        fprintf(stderr, "   or: %s rx [endpoint-address] [port]\n", argv[0]);
+        fprintf(stderr, "   or: %s tx [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n", argv[0]);
+        fprintf(stderr, "        OpenGL preview on by default; on Windows, falls back to GDI if GL init fails. --headless sends without a window.\n");
+        fprintf(stderr, "   or: %s rx [--headless] [--gdi] [endpoint-address] [port]\n", argv[0]);
+        fprintf(stderr, "        --gdi forces GDI on Windows; default tries OpenGL first, then GDI fallback if GL init fails.\n");
         fprintf(
                 stderr,
                 "network defaults: endpoint-address=%s port=%d\n",

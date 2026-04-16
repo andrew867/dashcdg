@@ -10,9 +10,9 @@ This document is the developer handoff for the active desktop TX/RX proof. Read 
 flowchart LR
     lib[Song library<br/>CDG plus optional MP3] --> tx[desktop-tx]
     tx --> net[UDP multicast or IPv4 broadcast]
-    net --> rx[desktop-rx]
+    net --> rx[desktop-rx or<br/>desktop-gdi-rx]
     rx --> aud[PortAudio playout]
-    rx --> vid[OpenGL CDG render]
+    rx --> vid[OpenGL or<br/>Win32 GDI CDG view]
 ```
 
 The sender and receiver share one protocol and one timeline:
@@ -30,7 +30,8 @@ The sender and receiver share one protocol and one timeline:
 - `platform/desktop/src/app_rx.c`: RX session state, jitter queues, FEC recovery, snapshot apply, PTP slave behavior, and render/audio startup gates
 - `platform/desktop/src/desktop_audio.c`: queue-driven PortAudio backend used by RX network playback
 - `platform/desktop/src/opus_codec.c`: Opus encode/decode wrapper for the desktop proof
-- `platform/desktop/src/gl_renderer.c`: desktop CDG rendering path and HUD drawing
+- `platform/desktop/src/gl_renderer.c`: desktop CDG rendering path and HUD drawing (GL RX / TX preview)
+- `platform/desktop/src/win32_gdi_view.c`: Win32 **GDI** window + DIBSection blit for `desktop-gdi-rx.exe` (and retro GDI RX)
 
 ## End-to-End Packet Flow
 
@@ -57,9 +58,15 @@ flowchart LR
     decode --> pa[PortAudio stream]
     jitter2 --> live[Live CDG state]
     pa --> sync[Audio-led playout time]
-    sync --> render[OpenGL renderer]
+    sync --> render[OpenGL or GDI<br/>CDG presentation]
     live --> render
 ```
+
+On **Windows**, `desktop-rx` uses FreeGLUT + OpenGL by default; the same session
+logic can be linked as **`desktop-gdi-rx.exe`**, which always presents through
+GDI (no GL stack). **`desktop-retro-rx.exe`** is a separate minimal link: GDI
+view + SBC-like audio path without Opus (see
+`docs/specs/desktop-platform-support.md`).
 
 ## TX Runtime
 
@@ -83,8 +90,10 @@ Important current behavior:
   thread fills a bounded `audio_ready_queue` during live send.
 - default TX wire send can now use a file-backed random-access CDG source;
   preview mode still uses a whole-memory fallback reader
-- TX also has an explicit `--badnet-v4` path that emits v4 session, loading,
-  anchor, audio, video, and backfill traffic with bounded per-pass pacing
+- TX emits **protocol v4** by default (session info, loading screens, anchors,
+  bounded per-pass pacing for anchors/audio/video/backfill). **`--v3`** selects
+  the legacy v3-only sender loop. **`--badnet-v4`** is still accepted and forces
+  v4 on (redundant when v4 is already the default).
 - Console output now prints a preparation line immediately, but some media
   preparation cost is still on the hot path.
 - Directory playback defaults to the local `cdg/` folder when no TX source path is provided.
@@ -228,8 +237,10 @@ Desktop-specific today:
 ## Suggested Reading Order
 
 1. `README.md`
-2. `docs/architecture/desktop-streaming.md`
-3. `docs/specs/transport-protocol.md`
-4. `docs/test/desktop-proof-plan.md`
-5. `docs/test/desktop-impairment-validation.md`
-6. `docs/architecture/portable-core.md`
+2. `docs/README.md`
+3. `docs/architecture/desktop-streaming.md`
+4. `docs/specs/desktop-platform-support.md`
+5. `docs/specs/transport-protocol.md`
+6. `docs/test/desktop-proof-plan.md`
+7. `docs/test/desktop-impairment-validation.md`
+8. `docs/architecture/portable-core.md`
