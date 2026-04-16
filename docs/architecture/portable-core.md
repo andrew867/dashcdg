@@ -66,7 +66,16 @@ Important boundary note:
 
 The next logical refactor after the current desktop proof tranche is:
 
-1. move desktop TX/RX socket handling into a reusable transport adapter
-2. split a pure playout/jitter-buffer abstraction from the desktop PortAudio implementation
-3. split a pure render-surface abstraction from the desktop OpenGL implementation
-4. add a second renderer backend that rasterizes to a host-side RGBA buffer for golden tests and headless CI
+1. **Transport adapter (RX UDP)** — **In progress / landed:** see
+   [`../specs/transport-udp-boundary.md`](../specs/transport-udp-boundary.md) and
+   [`transport-and-playout-modules.md`](transport-and-playout-modules.md).
+2. **Playout / jitter (audio)** — **In progress / landed:** pure module in core; see
+   [`../specs/audio-jitter-playout-boundary.md`](../specs/audio-jitter-playout-boundary.md).
+   PortAudio remains the device boundary in `desktop_audio.c`; jitter no longer
+   depends on it.
+3. **Render-surface abstraction** — **Partial:** CPU RGBA contract is normative; see
+   [`../specs/cpu-rgba-raster-contract.md`](../specs/cpu-rgba-raster-contract.md).
+   OpenGL path consumes the same buffer (single pixel source of truth). Optional
+   GDI/D3D backends remain future work.
+4. **Golden / headless** — satisfied by `dashcdg_cdg_state_to_rgba8` unit tests in
+   [`../test/cpu-rgba-raster-validation.md`](../test/cpu-rgba-raster-validation.md).
