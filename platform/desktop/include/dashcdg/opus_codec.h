@@ -4,10 +4,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
 #include <opus/opus.h>
+#endif
 
 struct dashcdg_opus_encoder {
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
     OpusEncoder *encoder;
+#else
+    void *encoder;
+#endif
     int sample_rate;
     int channels;
     int frame_size;
@@ -15,7 +21,11 @@ struct dashcdg_opus_encoder {
 };
 
 struct dashcdg_opus_decoder {
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
     OpusDecoder *decoder;
+#else
+    void *decoder;
+#endif
     int sample_rate;
     int channels;
     int frame_size;

@@ -9,8 +9,8 @@ story without deleting the modern GL renderer.
 
 ## Phase 0 — Documentation and contracts (done / in progress)
 
-- Spec: `docs/specs/windows-retro-graphics-backend.md`
-- Tests plan: `docs/test/windows-retro-graphics-validation.md`
+- Spec (archived sketch): `docs/archive/specs/windows-retro-graphics-backend.md`
+- Tests plan (archived): `docs/archive/test/windows-retro-graphics-validation.md`
 - XP launch fix: GLUT on **primary thread** (`app_rx.c`, `app_tx.c`)
 
 ## Phase 1 — Shared CPU RGB generator
@@ -27,7 +27,7 @@ story without deleting the modern GL renderer.
 - Tests plan: [`docs/test/win32-gdi-view-validation.md`](../../docs/test/win32-gdi-view-validation.md)
 - Module: `platform/desktop/src/win32_gdi_view.c` + `platform/desktop/include/dashcdg/win32_gdi_view.h`
   — top-down **32-bpp DIB**, **`StretchDIBits`**, RGBA→BGRA swizzle, **HUD** via `TextOutA`.
-- **RX:** `desktop-rx ... --win-gdi` runs the **primary-thread** message pump (no GLUT/GLEW on
+- **RX:** `desktop-gdi-rx.exe` (dedicated link) or `desktop-rx ... --win-gdi` runs the **primary-thread** message pump (no GLUT/GLEW on
   that path). Same `dashcdg_cdg_state_to_rgba8` as GL.
 - **TX preview:** still GL-only in this phase (optional follow-up).
 - Auto-fallback when `glewInit` fails remains a future enhancement.

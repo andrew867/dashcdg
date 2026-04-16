@@ -6,8 +6,8 @@ This matrix validates the portability/slimdown tranche described by:
 
 - `docs/specs/tx-cdg-source-model.md`
 - `docs/specs/desktop-platform-support.md`
-- `docs/architecture/modern-desktop-baseline.md`
-- `docs/architecture/legacy-windows-gui-feasibility.md`
+- `docs/README.md` (documentation index)
+- superseded baseline / legacy-GUI research (archived under `docs/archive/`)
 
 It is intentionally separate from the bad-network transport validation matrix.
 

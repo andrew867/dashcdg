@@ -6,8 +6,19 @@
 
 #include <pthread.h>
 
+#if defined(DASHCDG_RX_UI_GDI_ONLY)
+#if !defined(_WIN32)
+#error "DASHCDG_RX_UI_GDI_ONLY is only supported on Windows (Win32 GDI receiver)"
+#endif
+#define DASHCDG_RX_HAVE_GLUT 0
+#else
+#define DASHCDG_RX_HAVE_GLUT 1
+#endif
+
+#if DASHCDG_RX_HAVE_GLUT
 #include <GL/glew.h>
 #include <GL/glut.h>
+#endif
 
 #include "dashcdg/app_modes.h"
 #include "dashcdg/audio_jitter.h"
@@ -17,7 +28,9 @@
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
 #include "dashcdg/fec.h"
+#if DASHCDG_RX_HAVE_GLUT
 #include "dashcdg/gl_renderer.h"
+#endif
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
@@ -26,7 +39,11 @@
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
 
+#if DASHCDG_RX_HAVE_GLUT
 #ifdef _WIN32
+#include "dashcdg/win32_gdi_view.h"
+#endif
+#else
 #include "dashcdg/win32_gdi_view.h"
 #endif
 
@@ -190,8 +207,10 @@ struct receiver_state {
 
 static struct receiver_state g_receiver;
 static struct dashcdg_desktop_audio *g_audio;
+#if DASHCDG_RX_HAVE_GLUT
 static struct dashcdg_gl_renderer g_renderer;
 static int g_rx_use_win_gdi;
+#endif
 static struct dashcdg_opus_decoder g_opus_decoder;
 static struct dashcdg_sbc_like_decoder g_sbc_like_decoder;
 static const char *g_endpoint_address;
@@ -495,8 +514,13 @@ static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
 }
 
 static void dashcdg_rx_print_usage(const char *argv0) {
-    fprintf(stderr, "usage: %s [--headless] [--win-gdi] [endpoint-address] [port]\n", argv0);
-    fprintf(stderr, "  --win-gdi   Windows only: GDI window instead of OpenGL/GLUT\n");
+#if DASHCDG_RX_HAVE_GLUT
+    fprintf(stderr, "usage: %s [--headless] [--win-gdi|--gdi] [endpoint-address] [port]\n", argv0);
+    fprintf(stderr, "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
+    fprintf(stderr, "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
+#else
+    fprintf(stderr, "usage: %s [--headless] [endpoint-address] [port]\n", argv0);
+#endif
     fprintf(
             stderr,
             "defaults: endpoint-address=%s port=%d\n",
@@ -729,7 +753,13 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
             state->live_packets_applied > 0 &&
             state->cdg_batch_jitter.initialized &&
             state->active_snapshot_packet_index < state->cdg_batch_jitter.next_packet_index) {
-        if (state->cdg_snapshots_applied > 0 || state->active_snapshot_packet_index == 0U) {
+        /*
+         * Defer only after we have already applied at least one snapshot for this
+         * session. Deferring when cdg_snapshots_applied==0 and packet_index==0
+         * left live_state empty while the reader path seek(audio) overshot the
+         * file timeline, causing a multi-second black screen until the next keyframe.
+         */
+        if (state->cdg_snapshots_applied > 0) {
             return 0;
         }
     }
@@ -1133,7 +1163,13 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
 
     snapshot.valid = 1;
     snapshot.playback_ms = playback_ms;
-    if (g_receiver.reader_ready && !g_receiver.playback_paused) {
+    /*
+     * Prefer live CDG from the network once any batches have been applied. The
+     * local reader+seek(audio) path can overshoot the asset's packet timeline at
+     * song start (audio clock ahead of buffered subchannel), which clears the GL
+     * / GDI framebuffer until a later keyframe.
+     */
+    if (g_receiver.reader_ready && !g_receiver.playback_paused && g_receiver.live_packets_applied == 0U) {
         packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
         dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
         snapshot.state = g_receiver.reader.state;
@@ -1930,12 +1966,14 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
                     view->announce.playout_delay_ms > 0 ? (uint32_t) view->announce.playout_delay_ms * 3U : 1500U
             );
             dashcdg_opus_decoder_free(&g_opus_decoder);
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
             dashcdg_opus_decoder_init(
                     &g_opus_decoder,
                     view->announce.audio_sample_rate,
                     view->announce.audio_channels,
                     view->announce.audio_frame_ms
             );
+#endif
             dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
             g_audio_stream_started = 0;
             g_audio_start_inflight = 0;
@@ -1993,7 +2031,12 @@ static void dashcdg_rx_configure_audio_locked(
     );
     dashcdg_opus_decoder_free(&g_opus_decoder);
     if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
         dashcdg_opus_decoder_init(&g_opus_decoder, sample_rate, channels, frame_ms);
+#else
+        (void) frame_ms;
+        fprintf(stderr, "[rx] sender uses Opus; this build has no Opus decoder (SBC-like only)\n");
+#endif
     } else {
         dashcdg_sbc_like_decoder_init(&g_sbc_like_decoder);
     }
@@ -2610,6 +2653,8 @@ static int dashcdg_rx_claim_audio_start_locked(void) {
     return 1;
 }
 
+#if DASHCDG_RX_HAVE_GLUT
+
 static void display(void) {
     struct dashcdg_rx_render_snapshot render_snapshot;
     struct dashcdg_cdg_state connecting_state;
@@ -2723,6 +2768,8 @@ static void resize_callback(int width, int height) {
     dashcdg_gl_renderer_resize(&g_renderer, width, height);
 }
 
+#endif /* DASHCDG_RX_HAVE_GLUT */
+
 #ifdef _WIN32
 static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
     (void) user;
@@ -2822,19 +2869,21 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
 
     dashcdg_win32_gdi_view_destroy(view);
 }
-#endif
+#endif /* _WIN32 */
 
-struct dashcdg_glut_bootstrap {
-    int argc;
-    char **argv;
-};
+#if DASHCDG_RX_HAVE_GLUT
 
-static void *dashcdg_rx_render_thread_main(void *user_data) {
-    struct dashcdg_glut_bootstrap *bootstrap = (struct dashcdg_glut_bootstrap *) user_data;
-    int argc = bootstrap != NULL ? bootstrap->argc : 0;
-    char **argv = bootstrap != NULL ? bootstrap->argv : NULL;
+static int dashcdg_rx_run_glut_visual_loop(int *argc_ptr, char ***argv_ptr) {
+    int argc = argc_ptr != NULL ? *argc_ptr : 0;
+    char **argv = argv_ptr != NULL ? *argv_ptr : NULL;
 
     glutInit(&argc, argv);
+    if (argc_ptr != NULL) {
+        *argc_ptr = argc;
+    }
+    if (argv_ptr != NULL) {
+        *argv_ptr = argv;
+    }
     glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
     glutInitWindowSize(DASHCDG_VISIBLE_WIDTH * 4, DASHCDG_VISIBLE_HEIGHT * 4);
     glutCreateWindow("dashcdg desktop receiver");
@@ -2843,8 +2892,16 @@ static void *dashcdg_rx_render_thread_main(void *user_data) {
     glewInit();
 
     if (!dashcdg_gl_renderer_init(&g_renderer)) {
-        fprintf(stderr, "failed to initialize renderer\n");
-        return NULL;
+        fprintf(stderr, "failed to initialize OpenGL renderer\n");
+#ifdef _WIN32
+        fprintf(stderr, "[rx] falling back to Win32 GDI window\n");
+        glutDestroyWindow(glutGetWindow());
+        dashcdg_rx_run_win32_gdi_main(argc, argv);
+        return 0;
+#else
+        glutDestroyWindow(glutGetWindow());
+        return 1;
+#endif
     }
 
     glutDisplayFunc(display);
@@ -2852,13 +2909,36 @@ static void *dashcdg_rx_render_thread_main(void *user_data) {
     glutKeyboardFunc(rx_keyboard);
     glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_rx_render_timer, 0);
     glutMainLoop();
-    return NULL;
+    return 0;
 }
+
+#endif /* DASHCDG_RX_HAVE_GLUT */
+
+#if DASHCDG_RX_HAVE_GLUT || defined(_WIN32)
+static int dashcdg_rx_run_windowed_ui(int argc, char **argv) {
+#if DASHCDG_RX_HAVE_GLUT && defined(_WIN32)
+    if (g_rx_use_win_gdi) {
+        dashcdg_rx_run_win32_gdi_main(argc, argv);
+        return 0;
+    }
+#endif
+#if DASHCDG_RX_HAVE_GLUT
+    return dashcdg_rx_run_glut_visual_loop(&argc, &argv);
+#elif defined(_WIN32)
+    dashcdg_rx_run_win32_gdi_main(argc, argv);
+    return 0;
+#else
+    (void) argc;
+    (void) argv;
+    fprintf(stderr, "windowed RX requires Windows or an OpenGL/GLUT build\n");
+    return 1;
+#endif
+}
+#endif /* DASHCDG_RX_HAVE_GLUT || _WIN32 */
 
 int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_t rx_thread;
     pthread_t media_thread;
-    struct dashcdg_glut_bootstrap render_bootstrap;
     const char *positionals[2] = { NULL, NULL };
     int positional_index = 0;
     int positionals_consumed = 0;
@@ -2874,14 +2954,20 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_headless = 1;
             continue;
         }
+#if DASHCDG_RX_HAVE_GLUT
 #ifndef _WIN32
-        if (strcmp(argv[i], "--win-gdi") == 0) {
-            fprintf(stderr, "%s: --win-gdi is only supported on Windows desktop builds\n", argv[0]);
+        if (strcmp(argv[i], "--win-gdi") == 0 || strcmp(argv[i], "--gdi") == 0) {
+            fprintf(stderr, "%s: --win-gdi / --gdi is only supported on Windows desktop builds\n", argv[0]);
             return 1;
         }
 #else
-        if (strcmp(argv[i], "--win-gdi") == 0) {
+        if (strcmp(argv[i], "--win-gdi") == 0 || strcmp(argv[i], "--gdi") == 0) {
             g_rx_use_win_gdi = 1;
+            continue;
+        }
+#endif
+#elif defined(_WIN32)
+        if (strcmp(argv[i], "--win-gdi") == 0 || strcmp(argv[i], "--gdi") == 0) {
             continue;
         }
 #endif
@@ -2909,10 +2995,12 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         return 1;
     }
 
+#if DASHCDG_RX_HAVE_GLUT
     if (g_headless && g_rx_use_win_gdi) {
         fprintf(stderr, "%s: cannot combine --headless and --win-gdi\n", argv[0]);
         return 1;
     }
+#endif
 
     if (!dashcdg_rx_parse_ipv4_address(g_endpoint_address, &g_endpoint_in_addr)) {
         fprintf(stderr, "invalid endpoint address: %s\n", g_endpoint_address);
@@ -2928,9 +3016,13 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_endpoint_address,
             port,
             g_headless ? " (headless stdout stats mode)" :
+#if DASHCDG_RX_HAVE_GLUT
                     (g_rx_use_win_gdi ?
                             " (GDI window; HUD hidden by default, press I/M/S as in GL mode)" :
                             " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, S for stats line to stdout)")
+#else
+                    " (GDI window; HUD hidden by default, press I/M/S as in GL mode)"
+#endif
     );
     fflush(stdout);
 
@@ -2955,21 +3047,32 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         return 0;
     }
 
-#ifdef _WIN32
-    if (g_rx_use_win_gdi) {
-        dashcdg_rx_run_win32_gdi_main(argc, argv);
-    } else
-#endif
-    {
-        render_bootstrap.argc = argc;
-        render_bootstrap.argv = argv;
-        /*
-         * FreeGLUT uses the Win32 message pump; glutInit / glutCreateWindow / glutMainLoop
-         * must run on the process primary thread. Running this in pthread_create reliably
-         * crashes on Windows XP (illegal access / faultrep dump with no useful UI text).
-         */
-        (void) dashcdg_rx_render_thread_main(&render_bootstrap);
+#if DASHCDG_RX_HAVE_GLUT || defined(_WIN32)
+    if (dashcdg_rx_run_windowed_ui(argc, argv) != 0) {
+        dashcdg_net_cleanup();
+        if (g_audio != NULL) {
+            dashcdg_desktop_audio_stop_stream(g_audio);
+            dashcdg_desktop_audio_free(g_audio);
+        }
+        dashcdg_opus_decoder_free(&g_opus_decoder);
+        pthread_mutex_destroy(&g_render_mutex);
+        pthread_mutex_destroy(&g_receiver.mutex);
+        receiver_state_reset(&g_receiver);
+        return 1;
     }
+#else
+    fprintf(stderr, "windowed RX requires a Win32 GDI-only build or OpenGL/GLUT\n");
+    dashcdg_net_cleanup();
+    if (g_audio != NULL) {
+        dashcdg_desktop_audio_stop_stream(g_audio);
+        dashcdg_desktop_audio_free(g_audio);
+    }
+    dashcdg_opus_decoder_free(&g_opus_decoder);
+    pthread_mutex_destroy(&g_render_mutex);
+    pthread_mutex_destroy(&g_receiver.mutex);
+    receiver_state_reset(&g_receiver);
+    return 1;
+#endif
 
     dashcdg_net_cleanup();
     if (g_audio != NULL) {

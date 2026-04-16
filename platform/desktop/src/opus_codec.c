@@ -2,6 +2,93 @@
 
 #include <string.h>
 
+#if defined(DASHCDG_DESKTOP_NO_OPUS)
+
+int dashcdg_opus_encoder_init(
+        struct dashcdg_opus_encoder *encoder,
+        int sample_rate,
+        int channels,
+        int frame_ms,
+        int bitrate_bps
+) {
+    (void) bitrate_bps;
+    if (encoder == NULL || sample_rate <= 0 || channels <= 0 || frame_ms <= 0) {
+        return 0;
+    }
+    memset(encoder, 0, sizeof(*encoder));
+    encoder->frame_size = (sample_rate * frame_ms) / 1000;
+    encoder->sample_rate = sample_rate;
+    encoder->channels = channels;
+    encoder->bitrate_bps = 0;
+    encoder->encoder = NULL;
+    return 0;
+}
+
+void dashcdg_opus_encoder_free(struct dashcdg_opus_encoder *encoder) {
+    if (encoder == NULL) {
+        return;
+    }
+    memset(encoder, 0, sizeof(*encoder));
+}
+
+int dashcdg_opus_encode_frame(
+        struct dashcdg_opus_encoder *encoder,
+        const int16_t *pcm,
+        uint8_t *output,
+        size_t output_size
+) {
+    (void) pcm;
+    (void) output;
+    (void) output_size;
+    if (encoder == NULL) {
+        return -1;
+    }
+    return -1;
+}
+
+int dashcdg_opus_decoder_init(
+        struct dashcdg_opus_decoder *decoder,
+        int sample_rate,
+        int channels,
+        int frame_ms
+) {
+    if (decoder == NULL || sample_rate <= 0 || channels <= 0 || frame_ms <= 0) {
+        return 0;
+    }
+    memset(decoder, 0, sizeof(*decoder));
+    decoder->frame_size = (sample_rate * frame_ms) / 1000;
+    decoder->sample_rate = sample_rate;
+    decoder->channels = channels;
+    decoder->decoder = NULL;
+    return 0;
+}
+
+void dashcdg_opus_decoder_free(struct dashcdg_opus_decoder *decoder) {
+    if (decoder == NULL) {
+        return;
+    }
+    memset(decoder, 0, sizeof(*decoder));
+}
+
+int dashcdg_opus_decode_frame(
+        struct dashcdg_opus_decoder *decoder,
+        const uint8_t *input,
+        size_t input_size,
+        int16_t *pcm_output,
+        size_t pcm_output_samples
+) {
+    (void) input;
+    (void) input_size;
+    (void) pcm_output;
+    (void) pcm_output_samples;
+    if (decoder == NULL) {
+        return -1;
+    }
+    return -1;
+}
+
+#else /* !DASHCDG_DESKTOP_NO_OPUS */
+
 int dashcdg_opus_encoder_init(
         struct dashcdg_opus_encoder *encoder,
         int sample_rate,
@@ -119,3 +206,5 @@ int dashcdg_opus_decode_frame(
             0
     );
 }
+
+#endif /* DASHCDG_DESKTOP_NO_OPUS */

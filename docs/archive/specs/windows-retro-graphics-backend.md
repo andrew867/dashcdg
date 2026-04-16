@@ -98,6 +98,6 @@ the tree.
 
 ## Related documents
 
-- Build and PE notes: [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md)
+- Build and PE notes: [`windows-legacy-mingw-build.md`](../../specs/windows-legacy-mingw-build.md)
 - Validation ideas: [`../test/windows-retro-graphics-validation.md`](../test/windows-retro-graphics-validation.md)
 - Delivery phases: [`.cursor/plans/windows_retro_graphics_backend.plan.md`](../../.cursor/plans/windows_retro_graphics_backend.plan.md)

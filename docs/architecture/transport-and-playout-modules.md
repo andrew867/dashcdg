@@ -74,7 +74,7 @@ flowchart TB
 ## Build coupling
 
 - `libdashcdg_core.a` gains `audio_jitter.o`, `cdg_batch_jitter.o`, and `cdg_raster.o`.
-- `libdashcdg_desktop.a` gains `desktop_transport_udp.o` and `desktop_win32_gdi_view.o` via `DESKTOP_APP_OBJECTS` in the Makefile (GDI links `-lgdi32 -luser32` on Windows targets).
+- `libdashcdg_desktop.a` gains `desktop_transport_udp.o` and `desktop_win32_gdi_view.o` via `DESKTOP_LIB_OBJECTS` in the Makefile (GDI links `-lgdi32 -luser32` on Windows targets). The OpenGL receiver object `desktop_app_rx.o` is linked separately into `desktop-rx` / `desktop-player` / `desktop-tx`; `desktop-gdi-rx.exe` links `desktop_app_rx_gdi.o` instead (no OpenGL imports).
 
 ## File list (normative after implementation)
 

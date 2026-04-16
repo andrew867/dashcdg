@@ -1,4 +1,4 @@
-# Win32 GDI view backend (Phase 2)
+# Win32 GDI view backend (implemented)
 
 ## Goal
 
@@ -16,10 +16,14 @@ require OpenGL 3**, GLEW, or GLSL. It uses **GDI** (`CreateWindow`, top-down
 
 ## Invocation
 
-- CLI: `desktop-rx [...] --win-gdi` forces the GDI path on **Windows builds
-  only**.
-- On non-Windows platforms the flag is rejected with a clear error (no stub
-  window).
+- **Dedicated binary (Windows):** `desktop-gdi-rx.exe` links only the GDI view
+  path (same `app_rx.c` sources with a compile-time backend selection).
+- **GL-linked binary (`desktop-rx.exe`):** on Windows, tries OpenGL first; if
+  `dashcdg_gl_renderer_init` fails, automatically continues with the same GDI
+  path as `desktop-gdi-rx.exe`. **`--gdi`** or **`--win-gdi`** forces GDI from
+  the first frame (no GL attempt).
+- On non-Windows platforms `--win-gdi` / `--gdi` is rejected with a clear error
+  (no stub window).
 
 ## Pixel path
 
@@ -48,6 +52,8 @@ require OpenGL 3**, GLEW, or GLSL. It uses **GDI** (`CreateWindow`, top-down
 
 ## Related
 
-- Retro overview: [`windows-retro-graphics-backend.md`](windows-retro-graphics-backend.md)
-- Validation: [`../test/win32-gdi-view-validation.md`](../test/win32-gdi-view-validation.md)
+- Platform matrix (artifacts, sneakernet, retro): [`desktop-platform-support.md`](desktop-platform-support.md)
+- Manual validation: [`../test/win32-gdi-view-validation.md`](../test/win32-gdi-view-validation.md)
+- Historical “retro graphics backends” sketch (DirectDraw-era ideas, not the
+  shipped path): [`../archive/specs/windows-retro-graphics-backend.md`](../archive/specs/windows-retro-graphics-backend.md)
 - Plan: [`.cursor/plans/windows_retro_graphics_backend.plan.md`](../../.cursor/plans/windows_retro_graphics_backend.plan.md)

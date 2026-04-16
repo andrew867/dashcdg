@@ -19,6 +19,19 @@ WINDOWS_ARCH_LABEL := x64
 WINDOWS_BUILD_SLUG := amd64
 endif
 BUILD_DIR := build/$(WINDOWS_BUILD_SLUG)
+WINDOWS_RETRO_BUNDLE ?= 0
+ifeq ($(WINDOWS_RETRO_BUNDLE),1)
+ifneq ($(MINGW_ARCH),mingw32)
+$(error WINDOWS_RETRO_BUNDLE=1 requires MINGW_ARCH=mingw32)
+endif
+override BUILD_DIR := build/x86-retro
+WINDOWS_ARCH_LABEL := x86-retro
+WINDOWS_BUILD_SLUG := x86-retro
+WINDOWS_LEGACY_WINNT_RETRO := 0x0500
+CFLAGS += -D_WIN32_WINNT=$(WINDOWS_LEGACY_WINNT_RETRO) -DWINVER=$(WINDOWS_LEGACY_WINNT_RETRO)
+EXTRA_LDFLAGS += -Wl,--major-os-version=5 -Wl,--minor-os-version=0 -Wl,--major-subsystem-version=5 -Wl,--minor-subsystem-version=0
+CFLAGS += -march=pentium2 -mtune=pentium2
+endif
 WINDOWS_MINGW_PREFIX := $(shell if [ -d /c/msys64/$(MINGW_ARCH) ]; then echo /c/msys64/$(MINGW_ARCH); elif [ -d /c/ProgramData/mingw64/$(MINGW_ARCH) ]; then echo /c/ProgramData/mingw64/$(MINGW_ARCH); elif [ -d /$(MINGW_ARCH) ]; then echo /$(MINGW_ARCH); fi)
 WINDOWS_MINGW_PREFIX_WIN := $(shell if [ -n "$(WINDOWS_MINGW_PREFIX)" ]; then cygpath -m "$(WINDOWS_MINGW_PREFIX)"; fi)
 ifneq ($(WINDOWS_MINGW_PREFIX),)
@@ -31,35 +44,68 @@ INCLUDES += -I$(WINDOWS_MINGW_PREFIX_WIN)/include
 EXTRA_LDFLAGS += -L$(WINDOWS_MINGW_PREFIX_WIN)/lib
 WINDOWS_LEGACY_TARGET ?= 0
 ifeq ($(WINDOWS_LEGACY_TARGET),1)
+ifeq ($(WINDOWS_RETRO_BUNDLE),0)
 WINDOWS_LEGACY_WINNT := 0x0501
 CFLAGS += -D_WIN32_WINNT=$(WINDOWS_LEGACY_WINNT) -DWINVER=$(WINDOWS_LEGACY_WINNT)
 EXTRA_LDFLAGS += -Wl,--major-os-version=5 -Wl,--minor-os-version=1 -Wl,--major-subsystem-version=5 -Wl,--minor-subsystem-version=1
+endif
 # 64-bit PE only: i686 GNU ld rejects --disable-high-entropy-va (breaks mingw32 link).
 ifneq ($(MINGW_ARCH),mingw32)
+ifeq ($(WINDOWS_RETRO_BUNDLE),0)
 EXTRA_LDFLAGS += -Wl,--disable-high-entropy-va
+endif
 endif
 # Pre-SSE2 CPUs (e.g. Pentium III): default i686 packages often tune for Pentium 4 / SSE2.
 ifeq ($(MINGW_ARCH),mingw32)
+ifeq ($(WINDOWS_RETRO_BUNDLE),0)
 CFLAGS += -march=pentium3 -mtune=pentium3
 endif
 endif
+endif
 WINDOWS_RUNTIME_DLLS := $(shell for pattern in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
+ifeq ($(WINDOWS_RETRO_BUNDLE),1)
+WINDOWS_RUNTIME_DLLS := $(shell for pattern in libportaudio.dll libwinpthread-1.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
+endif
 else
 WINDOWS_RUNTIME_DLLS :=
 endif
 LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lopus -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
 WINDOWS_GDI_LIBS := -lgdi32 -luser32
+ifeq ($(WINDOWS_RETRO_BUNDLE),1)
+LDLIBS_DESKTOP_RETRO := -lportaudio -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+endif
 else
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread
 NET_LIBS :=
 WINDOWS_GDI_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
 WINDOWS_ARCH_LABEL ?= x64
+LDLIBS_DESKTOP_RETRO :=
 endif
 
 OBJ_DIR := $(BUILD_DIR)/obj
 BIN_DIR := $(BUILD_DIR)/bin
+
+ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
+RX_GDI_BIN := $(BIN_DIR)/desktop-gdi-rx.exe
+TX_GDI_BIN := $(BIN_DIR)/desktop-gdi-tx.exe
+LDLIBS_DESKTOP_RX_GDI := -lportaudio -lopus -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_TX_GDI := -lportaudio -lopus -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+RETRO_RX_BIN :=
+RETRO_TX_BIN :=
+ifeq ($(WINDOWS_RETRO_BUNDLE),1)
+RETRO_RX_BIN := $(BIN_DIR)/desktop-retro-rx.exe
+RETRO_TX_BIN := $(BIN_DIR)/desktop-retro-tx.exe
+endif
+else
+RX_GDI_BIN :=
+TX_GDI_BIN :=
+LDLIBS_DESKTOP_RX_GDI :=
+LDLIBS_DESKTOP_TX_GDI :=
+RETRO_RX_BIN :=
+RETRO_TX_BIN :=
+endif
 LIB_DIR := $(BUILD_DIR)/lib
 RELEASE_DIR := $(BUILD_DIR)/release
 WINDOWS_DIST_DIR := build/dist
@@ -72,7 +118,16 @@ PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
 CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o $(OBJ_DIR)/core_cdg_batch_jitter.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o
+DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
+DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
+DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
+DESKTOP_TX_HEADLESS_OBJECT := $(OBJ_DIR)/desktop_app_tx_headless.o
+DESKTOP_TX_GDI_OBJECT := $(OBJ_DIR)/desktop_app_tx_gdi.o
+DESKTOP_TX_RETRO_OBJECT := $(OBJ_DIR)/desktop_app_tx_retro.o
+DESKTOP_RX_GL_OBJECT := $(OBJ_DIR)/desktop_app_rx.o
+DESKTOP_RX_GDI_OBJECT := $(OBJ_DIR)/desktop_app_rx_gdi.o
+DESKTOP_RX_RETRO_GDI_OBJECT := $(OBJ_DIR)/desktop_app_rx_retro_gdi.o
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
@@ -84,15 +139,40 @@ PLAYER_BIN := $(BIN_DIR)/desktop-player
 TX_BIN := $(BIN_DIR)/desktop-tx
 RX_BIN := $(BIN_DIR)/desktop-rx
 
-.PHONY: all debug dirs libs test desktop-apps bundle-runtime package package-x64 package-x86 package-all-windows dist-windows release clean
+DESKTOP_RX_GDI_TARGET :=
+ifneq ($(RX_GDI_BIN),)
+DESKTOP_RX_GDI_TARGET := $(RX_GDI_BIN)
+endif
+
+DESKTOP_TX_GDI_TARGET :=
+ifneq ($(TX_GDI_BIN),)
+DESKTOP_TX_GDI_TARGET := $(TX_GDI_BIN)
+endif
+
+DESKTOP_TX_LINK_OBJ :=
+ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
+DESKTOP_TX_LINK_OBJ := $(DESKTOP_TX_HEADLESS_OBJECT)
+else
+DESKTOP_TX_LINK_OBJ := $(DESKTOP_TX_OBJECT)
+endif
+
+DESKTOP_RETRO_BINS :=
+ifneq ($(RETRO_RX_BIN),)
+DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
+endif
+
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime package package-x64 package-x86 package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
 
 all: CFLAGS += -O2
 all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
 
 debug: CFLAGS += -DDEBUG -g
-debug: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN)
+debug: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
 
-desktop-apps: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(RX_BIN)
+desktop-apps: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(TX_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
+
+desktop-windows-x86-retro:
+	$(MAKE) clean debug MINGW_ARCH=mingw32 WINDOWS_RETRO_BUNDLE=1
 
 dirs:
 	mkdir -p $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR) $(RELEASE_DIR)
@@ -110,7 +190,7 @@ $(CORE_LIB): $(CORE_OBJECTS)
 $(PROTO_LIB): $(PROTO_OBJECTS)
 	$(AR) rcs $@ $^
 
-$(DESKTOP_LIB): $(DESKTOP_APP_OBJECTS)
+$(DESKTOP_LIB): $(DESKTOP_LIB_OBJECTS)
 	$(AR) rcs $@ $^
 
 $(OBJ_DIR)/core_cdg.o: core/src/cdg.c
@@ -146,6 +226,9 @@ $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 $(OBJ_DIR)/desktop_opus_codec.o: platform/desktop/src/opus_codec.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/desktop_opus_codec_stub.o: platform/desktop/src/opus_codec.c
+	$(CC) $(CFLAGS) -DDASHCDG_DESKTOP_NO_OPUS=1 -c -o $@ $<
+
 $(OBJ_DIR)/desktop_sbc_like_codec.o: platform/desktop/src/sbc_like_codec.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -167,8 +250,25 @@ $(OBJ_DIR)/desktop_win32_gdi_view.o: platform/desktop/src/win32_gdi_view.c
 $(OBJ_DIR)/desktop_app_tx.o: platform/desktop/src/app_tx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/desktop_app_tx_headless.o: platform/desktop/src/app_tx.c
+	$(CC) $(CFLAGS) -DDASHCDG_DESKTOP_TX_HEADLESS=1 -c -o $@ $<
+
+ifneq ($(TX_GDI_BIN),)
+$(OBJ_DIR)/desktop_app_tx_gdi.o: platform/desktop/src/app_tx.c
+	$(CC) $(CFLAGS) -DDASHCDG_DESKTOP_TX_GDI_PREVIEW=1 -c -o $@ $<
+endif
+
+$(OBJ_DIR)/desktop_app_tx_retro.o: platform/desktop/src/app_tx.c
+	$(CC) $(CFLAGS) -DDASHCDG_DESKTOP_RETRO_WINDOWS=1 -DDASHCDG_DESKTOP_NO_OPUS=1 -c -o $@ $<
+
 $(OBJ_DIR)/desktop_app_rx.o: platform/desktop/src/app_rx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_app_rx_gdi.o: platform/desktop/src/app_rx.c
+	$(CC) $(CFLAGS) -DDASHCDG_RX_UI_GDI_ONLY=1 -c -o $@ $<
+
+$(OBJ_DIR)/desktop_app_rx_retro_gdi.o: platform/desktop/src/app_rx.c
+	$(CC) $(CFLAGS) -DDASHCDG_RX_UI_GDI_ONLY=1 -DDASHCDG_DESKTOP_NO_OPUS=1 -c -o $@ $<
 
 $(OBJ_DIR)/test_core.o: tests/test_core.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -191,22 +291,56 @@ $(TEST_BIN): $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 $(TEST_TRANSPORT_UDP_BIN): $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o $(NET_LIBS)
 
-$(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+$(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_TX_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_TX_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
-$(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+$(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_LINK_OBJ) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+ifeq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_LINK_OBJ) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+else
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_LINK_OBJ) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RX_GDI)
+endif
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
-$(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+$(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
+
+ifneq ($(RX_GDI_BIN),)
+$(RX_GDI_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RX_GDI)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
+endif
+
+ifneq ($(TX_GDI_BIN),)
+$(TX_GDI_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_TX_GDI)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
+endif
+
+ifneq ($(RETRO_RX_BIN),)
+$(RETRO_RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
+
+$(RETRO_TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
+ifneq ($(WINDOWS_RUNTIME_DLLS),)
+	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
+endif
 endif
 
 test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN) $(TEST_TRANSPORT_UDP_BIN)
@@ -232,6 +366,9 @@ package-all-windows: package-x64 package-x86
 dist-windows: package-all-windows
 	mkdir -p $(WINDOWS_DIST_DIR)
 	cp -f $(WINDOWS_ZIP_X64) $(WINDOWS_ZIP_X86) $(WINDOWS_DIST_DIR)/
+
+dist-windows-sneakernet:
+	bash scripts/build_windows_sneakernet_dist.sh
 
 release: package
 

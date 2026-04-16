@@ -64,7 +64,9 @@ kill_posix_binary_if_running() {
 
 echo "[build-release] stopping running desktop binaries"
 kill_windows_binary_if_running "desktop-tx.exe"
+kill_windows_binary_if_running "desktop-gdi-tx.exe"
 kill_windows_binary_if_running "desktop-rx.exe"
+kill_windows_binary_if_running "desktop-gdi-rx.exe"
 kill_windows_binary_if_running "desktop-player.exe"
 kill_posix_binary_if_running "desktop-tx"
 kill_posix_binary_if_running "desktop-rx"
