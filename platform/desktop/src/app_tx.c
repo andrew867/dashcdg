@@ -59,6 +59,7 @@
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
+#include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
 #include "dashcdg/stream_runtime.h"
 
@@ -1553,7 +1554,7 @@ static void dashcdg_tx_print_usage(const char *argv0) {
     );
     fprintf(
             stderr,
-            "          --badnet-v4 (resilience + celp13k), --badnet-v4-sbc, --badnet-v4-evrc\n"
+            "          --badnet-v4 (resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-evrc\n"
     );
 }
 
@@ -2993,6 +2994,8 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     struct dashcdg_desktop_audio *source = NULL;
     struct dashcdg_opus_encoder encoder;
     struct dashcdg_nb_ima_state nb_ima_encoder;
+    void *amr_wb_encoder;
+    void *amr_nb_encoder;
     int encoder_ready = 0;
     int16_t source_pcm[DASHCDG_TX_AUDIO_CHUNK_FRAMES * 2U];
     int16_t pcm_fifo[DASHCDG_TX_PCM_FIFO_FRAMES * DASHCDG_AUDIO_CHANNELS];
@@ -3006,6 +3009,8 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     (void) unused;
     memset(&encoder, 0, sizeof(encoder));
     memset(pcm_fifo, 0, sizeof(pcm_fifo));
+    amr_wb_encoder = NULL;
+    amr_nb_encoder = NULL;
 
     for (;;) {
         char *mp3_path = NULL;
@@ -3044,6 +3049,14 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
 
         if (generation_changed) {
             if (mp3_path != NULL || source != NULL || encoder_ready) {
+                if (amr_wb_encoder != NULL) {
+                    dashcdg_amr_wb_encoder_destroy(amr_wb_encoder);
+                    amr_wb_encoder = NULL;
+                }
+                if (amr_nb_encoder != NULL) {
+                    dashcdg_amr_nb_encoder_destroy(amr_nb_encoder);
+                    amr_nb_encoder = NULL;
+                }
                 dashcdg_tx_audio_close_source(&source, &encoder, &encoder_ready);
                 fifo_frames = 0U;
                 next_playback_ms = 0U;
@@ -3054,6 +3067,11 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 current_profile_id = configured_profile_id;
                 current_codec_id = configured_codec_id;
                 dashcdg_nb_ima_state_init(&nb_ima_encoder);
+                if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+                    dashcdg_amr_wb_encoder_create(&amr_wb_encoder);
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+                    dashcdg_amr_nb_encoder_create(&amr_nb_encoder);
+                }
                 if (dashcdg_tx_audio_open_source(
                             mp3_path,
                             &source,
@@ -3062,12 +3080,22 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                             current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS
                     )) {
                     reached_eof = 0;
+                } else {
+                    if (amr_wb_encoder != NULL) {
+                        dashcdg_amr_wb_encoder_destroy(amr_wb_encoder);
+                        amr_wb_encoder = NULL;
+                    }
+                    if (amr_nb_encoder != NULL) {
+                        dashcdg_amr_nb_encoder_destroy(amr_nb_encoder);
+                        amr_nb_encoder = NULL;
+                    }
                 }
                 free(mp3_path);
             }
         }
 
-        if (source == NULL || (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS && !encoder_ready)) {
+        if (source == NULL ||
+                (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS && !encoder_ready)) {
             dashcdg_sleep_ms(10);
             continue;
         }
@@ -3150,7 +3178,21 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
                 );
-            } else if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
+            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+                encoded_length = dashcdg_amr_wb_encoder_run(
+                        amr_wb_encoder,
+                        pcm,
+                        frame.encoded_bytes,
+                        sizeof(frame.encoded_bytes)
+                );
+            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+                encoded_length = dashcdg_amr_nb_encoder_run(
+                        amr_nb_encoder,
+                        pcm,
+                        frame.encoded_bytes,
+                        sizeof(frame.encoded_bytes)
+                );
+            } else if (dashcdg_v4_audio_codec_is_nb_ima_payload((uint8_t) current_codec_id)) {
                 encoded_length = dashcdg_nb_ima_encode_pcm48_mono_frame(
                         &nb_ima_encoder,
                         pcm,
@@ -3203,6 +3245,14 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
         }
     }
 
+    if (amr_wb_encoder != NULL) {
+        dashcdg_amr_wb_encoder_destroy(amr_wb_encoder);
+        amr_wb_encoder = NULL;
+    }
+    if (amr_nb_encoder != NULL) {
+        dashcdg_amr_nb_encoder_destroy(amr_nb_encoder);
+        amr_nb_encoder = NULL;
+    }
     dashcdg_tx_audio_close_source(&source, &encoder, &encoder_ready);
     return NULL;
 }
@@ -4596,8 +4646,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
     g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
 #else
-    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
-    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+    /* Default “reliable” path: resilience + AMR-WB (native 3GPP wideband in audio_modules/amr). */
+    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_WB;
 #endif
     g_tx_state.transport_v4_enabled = 1;
     srand((unsigned int) (time(NULL) ^ (time_t) dashcdg_clock_now_ms() ^ (time_t) (uintptr_t) &g_tx_state));
@@ -4644,7 +4695,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         if (strcmp(argv[i], "--badnet-v4") == 0) {
             g_tx_state.transport_v4_enabled = 1;
             g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
-            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_CELP13K;
+            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_WB;
             continue;
         }
         if (strcmp(argv[i], "--badnet-v4-sbc") == 0) {

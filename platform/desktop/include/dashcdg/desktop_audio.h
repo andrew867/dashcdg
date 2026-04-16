@@ -17,6 +17,9 @@ typedef void PaStream;
 #define DASHCDG_HAVE_PORTAUDIO 1
 #endif
 
+#if defined(DASHCDG_CPU_PRE_SSE2_MINIMP3) && !defined(MINIMP3_NO_SIMD)
+#define MINIMP3_NO_SIMD
+#endif
 #include "minimp3_ex.h"
 
 struct dashcdg_pcm_buffer {

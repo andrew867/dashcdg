@@ -35,6 +35,7 @@
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
+#include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
@@ -213,6 +214,20 @@ static int g_rx_use_win_gdi;
 #endif
 static struct dashcdg_opus_decoder g_opus_decoder;
 static struct dashcdg_nb_ima_state g_nb_ima_decoder;
+static void *g_amr_wb_decoder;
+static void *g_amr_nb_decoder;
+
+static void dashcdg_rx_amr_decoders_release(void) {
+    if (g_amr_wb_decoder != NULL) {
+        dashcdg_amr_wb_decoder_destroy(g_amr_wb_decoder);
+        g_amr_wb_decoder = NULL;
+    }
+    if (g_amr_nb_decoder != NULL) {
+        dashcdg_amr_nb_decoder_destroy(g_amr_nb_decoder);
+        g_amr_nb_decoder = NULL;
+    }
+}
+
 static const char *g_endpoint_address;
 static struct in_addr g_endpoint_in_addr;
 static int g_endpoint_is_multicast;
@@ -1608,7 +1623,39 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return 0;
     }
 
-    if (dashcdg_v4_audio_codec_is_narrowband(frame->codec_id)) {
+    if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+        decoded_frames = dashcdg_opus_decode_frame(
+                &g_opus_decoder,
+                frame->encoded_bytes,
+                frame->encoded_length,
+                pcm,
+                sizeof(pcm) / sizeof(pcm[0])
+        );
+    } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+        if (g_amr_wb_decoder == NULL) {
+            decoded_frames = 0;
+        } else {
+            decoded_frames = dashcdg_amr_wb_decoder_run(
+                    g_amr_wb_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    pcm,
+                    sizeof(pcm) / sizeof(pcm[0])
+            );
+        }
+    } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        if (g_amr_nb_decoder == NULL) {
+            decoded_frames = 0;
+        } else {
+            decoded_frames = dashcdg_amr_nb_decoder_run(
+                    g_amr_nb_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    pcm,
+                    sizeof(pcm) / sizeof(pcm[0])
+            );
+        }
+    } else if (dashcdg_v4_audio_codec_is_nb_ima_payload(frame->codec_id)) {
         decoded_frames = dashcdg_nb_ima_decode_to_pcm48_mono_frame(
                 &g_nb_ima_decoder,
                 frame->encoded_bytes,
@@ -1617,13 +1664,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
                 sizeof(pcm) / sizeof(pcm[0])
         );
     } else {
-        decoded_frames = dashcdg_opus_decode_frame(
-                &g_opus_decoder,
-                frame->encoded_bytes,
-                frame->encoded_length,
-                pcm,
-                sizeof(pcm) / sizeof(pcm[0])
-        );
+        decoded_frames = 0;
     }
     if (decoded_frames <= 0) {
         state->audio_decode_failures++;
@@ -1966,6 +2007,7 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
                     view->announce.playout_delay_ms > 0 ? (uint32_t) view->announce.playout_delay_ms * 3U : 1500U
             );
             dashcdg_opus_decoder_free(&g_opus_decoder);
+            dashcdg_rx_amr_decoders_release();
 #if !defined(DASHCDG_DESKTOP_NO_OPUS)
             dashcdg_opus_decoder_init(
                     &g_opus_decoder,
@@ -1983,6 +2025,7 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     if (!has_network_audio && g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
         dashcdg_opus_decoder_free(&g_opus_decoder);
+        dashcdg_rx_amr_decoders_release();
         g_audio_stream_started = 0;
         g_audio_start_inflight = 0;
     }
@@ -2030,6 +2073,7 @@ static void dashcdg_rx_configure_audio_locked(
             buffer_ms
     );
     dashcdg_opus_decoder_free(&g_opus_decoder);
+    dashcdg_rx_amr_decoders_release();
     if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
 #if !defined(DASHCDG_DESKTOP_NO_OPUS)
         dashcdg_opus_decoder_init(&g_opus_decoder, sample_rate, channels, frame_ms);
@@ -2037,6 +2081,12 @@ static void dashcdg_rx_configure_audio_locked(
         (void) frame_ms;
         fprintf(stderr, "[rx] sender uses Opus; this build has no Opus decoder (SBC-like only)\n");
 #endif
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+        dashcdg_amr_wb_decoder_create(&g_amr_wb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        dashcdg_amr_nb_decoder_create(&g_amr_nb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
     } else {
         dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
     }
@@ -2107,6 +2157,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     } else if (!has_network_audio && g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
         dashcdg_opus_decoder_free(&g_opus_decoder);
+        dashcdg_rx_amr_decoders_release();
         g_audio_stream_started = 0;
         g_audio_start_inflight = 0;
     }
@@ -3057,6 +3108,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             dashcdg_desktop_audio_free(g_audio);
         }
         dashcdg_opus_decoder_free(&g_opus_decoder);
+        dashcdg_rx_amr_decoders_release();
         pthread_mutex_destroy(&g_render_mutex);
         pthread_mutex_destroy(&g_receiver.mutex);
         receiver_state_reset(&g_receiver);
@@ -3070,6 +3122,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         dashcdg_desktop_audio_free(g_audio);
     }
     dashcdg_opus_decoder_free(&g_opus_decoder);
+    dashcdg_rx_amr_decoders_release();
     pthread_mutex_destroy(&g_render_mutex);
     pthread_mutex_destroy(&g_receiver.mutex);
     receiver_state_reset(&g_receiver);
@@ -3082,6 +3135,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         dashcdg_desktop_audio_free(g_audio);
     }
     dashcdg_opus_decoder_free(&g_opus_decoder);
+    dashcdg_rx_amr_decoders_release();
     pthread_mutex_destroy(&g_render_mutex);
     pthread_mutex_destroy(&g_receiver.mutex);
     receiver_state_reset(&g_receiver);

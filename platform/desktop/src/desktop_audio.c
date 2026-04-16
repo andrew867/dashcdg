@@ -1,3 +1,8 @@
+/* Makefile sets -DDASHCDG_CPU_PRE_SSE2_MINIMP3 on mingw32 legacy/retro; minimp3 uses SSE2
+ * intrinsics when __SSE2__ is set (common MSYS2 i686 default) which faults on Pentium III. */
+#ifdef DASHCDG_CPU_PRE_SSE2_MINIMP3
+#define MINIMP3_NO_SIMD
+#endif
 #define MINIMP3_IMPLEMENTATION
 
 #include "dashcdg/desktop_audio.h"

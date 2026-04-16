@@ -6,6 +6,6 @@
 *.tar
 build/
 
-# Optional vendored audio upstreams (see scripts/fetch_audio_codec_vendors.sh)
-audio_modules/**/vendor/
+# Local clones / experiments (use scripts/fetch_audio_codec_vendors.sh into audio_modules/*/vendor/)
+third_party/
 

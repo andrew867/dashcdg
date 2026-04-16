@@ -134,7 +134,10 @@ PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
 CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o $(OBJ_DIR)/core_cdg_batch_jitter.o $(OBJ_DIR)/core_nb_ima_codec.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o
+CODEC_AMR_NB_OBJS := $(patsubst audio_modules/amr/vendor/codec-amr/src/nb/%.c,$(OBJ_DIR)/amr_nb_%.o,$(wildcard audio_modules/amr/vendor/codec-amr/src/nb/*.c))
+CODEC_AMR_WB_OBJS := $(patsubst audio_modules/amr/vendor/codec-amr/src/wb/%.c,$(OBJ_DIR)/amr_wb_%.o,$(wildcard audio_modules/amr/vendor/codec-amr/src/wb/*.c))
+CODEC_AMR_DESKTOP_OBJS := $(OBJ_DIR)/desktop_amr_wb_codec.o $(OBJ_DIR)/desktop_amr_nb_codec.o
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS)
 DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
 DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
 DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
@@ -262,6 +265,18 @@ $(OBJ_DIR)/desktop_transport_udp.o: platform/desktop/src/transport_udp.c
 
 $(OBJ_DIR)/desktop_win32_gdi_view.o: platform/desktop/src/win32_gdi_view.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/amr_nb_%.o: audio_modules/amr/vendor/codec-amr/src/nb/%.c
+	$(CC) $(CFLAGS) -Wno-unused-parameter -Wno-sign-compare -Wno-maybe-uninitialized -Wno-unknown-pragmas -fno-strict-aliasing -Iaudio_modules/amr/vendor/codec-amr/src/nb -Iaudio_modules/amr/vendor/codec-amr/src -c -o $@ $<
+
+$(OBJ_DIR)/amr_wb_%.o: audio_modules/amr/vendor/codec-amr/src/wb/%.c
+	$(CC) $(CFLAGS) -Wno-unused-parameter -Wno-sign-compare -Wno-maybe-uninitialized -Wno-unknown-pragmas -fno-strict-aliasing -Iaudio_modules/amr/vendor/codec-amr/src/wb -Iaudio_modules/amr/vendor/codec-amr/src -c -o $@ $<
+
+$(OBJ_DIR)/desktop_amr_wb_codec.o: platform/desktop/src/amr_wb_codec.c
+	$(CC) $(CFLAGS) -Iaudio_modules/amr/vendor/codec-amr/src/wb -Iaudio_modules/amr/vendor/codec-amr/src -c -o $@ $<
+
+$(OBJ_DIR)/desktop_amr_nb_codec.o: platform/desktop/src/amr_nb_codec.c
+	$(CC) $(CFLAGS) -Iaudio_modules/amr/vendor/codec-amr/src/nb -Iaudio_modules/amr/vendor/codec-amr/src -c -o $@ $<
 
 $(OBJ_DIR)/desktop_app_tx.o: platform/desktop/src/app_tx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
