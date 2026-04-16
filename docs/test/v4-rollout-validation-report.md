@@ -26,7 +26,8 @@ Windows build and packaging:
 Local v4 loopback smoke:
 
 - `./build/amd64/bin/desktop-rx --headless 127.0.0.1 34567`
-- `./build/amd64/bin/desktop-tx --badnet-v4 127.0.0.1 34567 smoke "./cdg" 100`
+- `./build/amd64/bin/desktop-tx --badnet-v4 127.0.0.1 34567 smoke "./cdg" 100`  
+  (`--badnet-v4` today: v4 + resilience + default **`celp13k`** wire id **3**; audio bytes are still **NB-IMA** — same codec as id **2** — see `docs/specs/v4-audio-codecs.md`.)
 
 Throughput-clamped relay smoke:
 

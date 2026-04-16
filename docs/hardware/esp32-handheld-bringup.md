@@ -137,7 +137,7 @@ Exit condition:
 
 Add the simplest acceptable audio path for human validation:
 
-- the low-bitrate resilience-oriented codec path first
+- the low-bitrate resilience path first — **NB-IMA** (`core/src/nb_ima_codec.c`, fixed-point; see [`../specs/v4-audio-codecs.md`](../specs/v4-audio-codecs.md))
 - simple audio output through a cheap external digital-audio module if required
 - enough buffering to avoid instant underruns during normal startup
 
@@ -202,8 +202,9 @@ board.
 The first audio target should follow the repo's current direction:
 
 - keep `quality` mode as a higher-cost reference path where appropriate
-- prioritize the simpler low-bitrate `resilience` style path for first embedded
-  bring-up
+- prioritize the simpler low-bitrate **`resilience`** path (**NB-IMA** narrowband)
+  for first embedded bring-up; treat **`quality` / Opus** as optional once NB-IMA
+  is validated on hardware
 
 If local audio fails the feasibility gate:
 

@@ -5,6 +5,7 @@ Manual and automated checks for v4 audio codec selection and session metadata.
 ## Automated (core / protocol)
 
 - `make test` (or CI equivalent): `tests/test_core.c` round-trips **v4 session info** including `song_id` and each **audio_codec_id** value used on the wire (at minimum: `OPUS`, `SBC_LIKE`, `CELP13K`, `EVRC`, `AMR_NB`, `AMR_WB`, `BLUETOOTH_SBC`).
+- **`test_nb_ima_codec_roundtrip()`** — encode/decode one frame with **`dashcdg_nb_ima_*`** (`core/src/nb_ima_codec.c`); asserts fixed-point path stays linked in **`libdashcdg_core`**.
 - Assert **parse → serialize → parse** preserves `song_id` nul-padded field semantics.
 
 ## Manual — TX CLI
@@ -23,8 +24,8 @@ Manual and automated checks for v4 audio codec selection and session metadata.
 4. **`--badnet-v4-sbc` / `--badnet-v4-evrc`**  
    Expect ids **2** and **4** respectively.
 
-5. **AMR / Bluetooth SBC ids**  
-   `--v4-audio-codec=amr-nb`, `amr-wb`, `bluetooth-sbc` — expect **same shim audio** as `sbc-like` until native encoders land; use for **interop testing** of session announce + chunk routing only.
+5. **Reserved-label narrowband ids (3–7)**  
+   `--v4-audio-codec=amr-nb`, `amr-wb`, `bluetooth-sbc`, etc. — expect **identical NB-IMA audio** to `sbc-like` today (first-party `dashcdg_nb_ima_*` only; no external AMR/SBC libs in-tree). Use for **session / routing / tooling** checks; changing payload bytes for these ids is a spec bump.
 
 ## Manual — RX
 

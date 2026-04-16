@@ -35,7 +35,7 @@
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
-#include "dashcdg/sbc_like_codec.h"
+#include "dashcdg/nb_ima_codec.h"
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
 
@@ -212,7 +212,7 @@ static struct dashcdg_gl_renderer g_renderer;
 static int g_rx_use_win_gdi;
 #endif
 static struct dashcdg_opus_decoder g_opus_decoder;
-static struct dashcdg_sbc_like_decoder g_sbc_like_decoder;
+static struct dashcdg_nb_ima_state g_nb_ima_decoder;
 static const char *g_endpoint_address;
 static struct in_addr g_endpoint_in_addr;
 static int g_endpoint_is_multicast;
@@ -1609,8 +1609,8 @@ static int dashcdg_rx_apply_audio_frame_locked(
     }
 
     if (dashcdg_v4_audio_codec_is_narrowband(frame->codec_id)) {
-        decoded_frames = dashcdg_sbc_like_decode_frame(
-                &g_sbc_like_decoder,
+        decoded_frames = dashcdg_nb_ima_decode_to_pcm48_mono_frame(
+                &g_nb_ima_decoder,
                 frame->encoded_bytes,
                 frame->encoded_length,
                 pcm,
@@ -2018,7 +2018,7 @@ static void dashcdg_rx_configure_audio_locked(
     if (buffer_ms < 1500U) {
         buffer_ms = 1500U;
     }
-    if (codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE && buffer_ms < 2000U) {
+    if (dashcdg_v4_audio_codec_is_narrowband(codec_id) && buffer_ms < 2000U) {
         buffer_ms = 2000U;
     }
 
@@ -2038,7 +2038,7 @@ static void dashcdg_rx_configure_audio_locked(
         fprintf(stderr, "[rx] sender uses Opus; this build has no Opus decoder (SBC-like only)\n");
 #endif
     } else {
-        dashcdg_sbc_like_decoder_init(&g_sbc_like_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
     }
     dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
     g_audio_stream_started = 0;

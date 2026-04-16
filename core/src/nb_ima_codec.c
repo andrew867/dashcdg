@@ -1,4 +1,4 @@
-#include "dashcdg/sbc_like_codec.h"
+#include "dashcdg/nb_ima_codec.h"
 
 #include <string.h>
 
@@ -112,100 +112,93 @@ static int16_t dashcdg_ima_decode_nibble(uint8_t delta, int16_t *predictor, uint
     return *predictor;
 }
 
-void dashcdg_sbc_like_encoder_init(struct dashcdg_sbc_like_encoder *encoder) {
-    if (encoder == NULL) {
+void dashcdg_nb_ima_state_init(struct dashcdg_nb_ima_state *state) {
+    if (state == NULL) {
         return;
     }
-    memset(encoder, 0, sizeof(*encoder));
+    memset(state, 0, sizeof(*state));
 }
 
-int dashcdg_sbc_like_encode_frame(
-        struct dashcdg_sbc_like_encoder *encoder,
-        const int16_t *pcm_48k,
+int dashcdg_nb_ima_encode_pcm48_mono_frame(
+        struct dashcdg_nb_ima_state *state,
+        const int16_t *pcm_48k_mono,
         size_t pcm_samples,
         uint8_t *encoded,
         size_t encoded_capacity
 ) {
-    int16_t downsampled[DASHCDG_SBC_LIKE_FRAME_SAMPLES];
+    int16_t downsampled[DASHCDG_NB_IMA_FRAME_SAMPLES];
     int16_t predictor;
     uint8_t step_index;
 
-    if (encoder == NULL || pcm_48k == NULL || encoded == NULL ||
-            pcm_samples < DASHCDG_SBC_LIKE_INPUT_SAMPLES ||
-            encoded_capacity < DASHCDG_SBC_LIKE_ENCODED_BYTES) {
+    if (state == NULL || pcm_48k_mono == NULL || encoded == NULL ||
+            pcm_samples < DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES ||
+            encoded_capacity < DASHCDG_NB_IMA_ENCODED_BYTES) {
         return 0;
     }
 
-    for (size_t i = 0; i < DASHCDG_SBC_LIKE_FRAME_SAMPLES; ++i) {
+    for (size_t i = 0; i < DASHCDG_NB_IMA_FRAME_SAMPLES; ++i) {
         int32_t sum = 0;
         for (size_t j = 0; j < 6U; ++j) {
-            sum += pcm_48k[(i * 6U) + j];
+            sum += pcm_48k_mono[(i * 6U) + j];
         }
         downsampled[i] = (int16_t) (sum / 6);
     }
 
-    predictor = encoder->predictor;
-    step_index = encoder->step_index;
+    predictor = state->predictor;
+    step_index = state->step_index;
     encoded[0] = (uint8_t) ((predictor >> 8) & 0xFF);
     encoded[1] = (uint8_t) (predictor & 0xFF);
     encoded[2] = step_index;
-    encoded[3] = DASHCDG_SBC_LIKE_FRAME_SAMPLES;
-    for (size_t i = 0; i < DASHCDG_SBC_LIKE_FRAME_SAMPLES; i += 2U) {
+    encoded[3] = DASHCDG_NB_IMA_FRAME_SAMPLES;
+    for (size_t i = 0; i < DASHCDG_NB_IMA_FRAME_SAMPLES; i += 2U) {
         uint8_t lo = dashcdg_ima_encode_nibble(downsampled[i], &predictor, &step_index);
         uint8_t hi = dashcdg_ima_encode_nibble(downsampled[i + 1U], &predictor, &step_index);
         encoded[4U + (i / 2U)] = (uint8_t) ((hi << 4U) | lo);
     }
 
-    encoder->predictor = predictor;
-    encoder->step_index = step_index;
-    return (int) DASHCDG_SBC_LIKE_ENCODED_BYTES;
+    state->predictor = predictor;
+    state->step_index = step_index;
+    return (int) DASHCDG_NB_IMA_ENCODED_BYTES;
 }
 
-void dashcdg_sbc_like_decoder_init(struct dashcdg_sbc_like_decoder *decoder) {
-    if (decoder == NULL) {
-        return;
-    }
-    memset(decoder, 0, sizeof(*decoder));
-}
-
-int dashcdg_sbc_like_decode_frame(
-        struct dashcdg_sbc_like_decoder *decoder,
+int dashcdg_nb_ima_decode_to_pcm48_mono_frame(
+        struct dashcdg_nb_ima_state *state,
         const uint8_t *encoded,
         size_t encoded_length,
-        int16_t *pcm_48k,
-        size_t pcm_capacity
+        int16_t *pcm_48k_mono,
+        size_t pcm_capacity_samples
 ) {
     int16_t predictor;
     uint8_t step_index;
-    int16_t decoded[DASHCDG_SBC_LIKE_FRAME_SAMPLES];
+    int16_t decoded[DASHCDG_NB_IMA_FRAME_SAMPLES];
     uint8_t sample_count;
 
-    if (decoder == NULL || encoded == NULL || pcm_48k == NULL ||
-            encoded_length < DASHCDG_SBC_LIKE_ENCODED_BYTES ||
-            pcm_capacity < DASHCDG_SBC_LIKE_INPUT_SAMPLES) {
+    if (state == NULL || encoded == NULL || pcm_48k_mono == NULL ||
+            encoded_length < DASHCDG_NB_IMA_ENCODED_BYTES ||
+            pcm_capacity_samples < DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES) {
         return 0;
     }
 
     predictor = (int16_t) (((int16_t) encoded[0] << 8) | encoded[1]);
     step_index = encoded[2];
     sample_count = encoded[3];
-    if (sample_count != DASHCDG_SBC_LIKE_FRAME_SAMPLES || step_index > 88U) {
+    if (sample_count != DASHCDG_NB_IMA_FRAME_SAMPLES || step_index > 88U) {
         return 0;
     }
 
-    for (size_t i = 0; i < DASHCDG_SBC_LIKE_FRAME_SAMPLES; i += 2U) {
+    for (size_t i = 0; i < DASHCDG_NB_IMA_FRAME_SAMPLES; i += 2U) {
         uint8_t packed = encoded[4U + (i / 2U)];
         decoded[i] = dashcdg_ima_decode_nibble((uint8_t) (packed & 0x0F), &predictor, &step_index);
         decoded[i + 1U] = dashcdg_ima_decode_nibble((uint8_t) ((packed >> 4U) & 0x0F), &predictor, &step_index);
     }
 
-    for (size_t i = 0; i < DASHCDG_SBC_LIKE_FRAME_SAMPLES; ++i) {
+    for (size_t i = 0; i < DASHCDG_NB_IMA_FRAME_SAMPLES; ++i) {
         for (size_t j = 0; j < 6U; ++j) {
-            pcm_48k[(i * 6U) + j] = decoded[i];
+            pcm_48k_mono[(i * 6U) + j] = decoded[i];
         }
     }
 
-    decoder->predictor = predictor;
-    decoder->step_index = step_index;
-    return (int) DASHCDG_SBC_LIKE_INPUT_SAMPLES;
+    state->predictor = predictor;
+    state->step_index = step_index;
+    return (int) DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES;
 }

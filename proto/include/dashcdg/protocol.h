@@ -52,6 +52,10 @@ enum dashcdg_v4_audio_profile_id {
     DASHCDG_V4_AUDIO_PROFILE_RESILIENCE = 2
 };
 
+/*
+ * Narrowband ids 2–7 share the same first-party fixed-point payload (NB-IMA in
+ * core/src/nb_ima_codec.c) until a future spec assigns distinct bytes per id.
+ */
 enum dashcdg_v4_audio_codec_id {
     DASHCDG_V4_AUDIO_CODEC_OPUS = 1,
     DASHCDG_V4_AUDIO_CODEC_SBC_LIKE = 2,

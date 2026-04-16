@@ -59,7 +59,7 @@
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/protocol.h"
-#include "dashcdg/sbc_like_codec.h"
+#include "dashcdg/nb_ima_codec.h"
 #include "dashcdg/stream_runtime.h"
 
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) && !defined(_WIN32)
@@ -2992,7 +2992,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     uint64_t local_generation = UINT64_MAX;
     struct dashcdg_desktop_audio *source = NULL;
     struct dashcdg_opus_encoder encoder;
-    struct dashcdg_sbc_like_encoder sbc_like_encoder;
+    struct dashcdg_nb_ima_state nb_ima_encoder;
     int encoder_ready = 0;
     int16_t source_pcm[DASHCDG_TX_AUDIO_CHUNK_FRAMES * 2U];
     int16_t pcm_fifo[DASHCDG_TX_PCM_FIFO_FRAMES * DASHCDG_AUDIO_CHANNELS];
@@ -3053,7 +3053,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             if (mp3_path != NULL) {
                 current_profile_id = configured_profile_id;
                 current_codec_id = configured_codec_id;
-                dashcdg_sbc_like_encoder_init(&sbc_like_encoder);
+                dashcdg_nb_ima_state_init(&nb_ima_encoder);
                 if (dashcdg_tx_audio_open_source(
                             mp3_path,
                             &source,
@@ -3151,8 +3151,8 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         sizeof(frame.encoded_bytes)
                 );
             } else if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
-                encoded_length = dashcdg_sbc_like_encode_frame(
-                        &sbc_like_encoder,
+                encoded_length = dashcdg_nb_ima_encode_pcm48_mono_frame(
+                        &nb_ima_encoder,
                         pcm,
                         DASHCDG_AUDIO_FRAME_SAMPLES,
                         frame.encoded_bytes,

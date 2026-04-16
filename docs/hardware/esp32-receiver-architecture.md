@@ -19,10 +19,12 @@ First reference device:
 - CD+G decoder
 - keyframe and seek model
 
-That portable set now reflects the desktop proof's protocol v3 direction:
+That portable set should track the desktop proof's **protocol v4** direction:
 
 - bootstrap asset packets for late join
-- live `Opus` audio packet framing
+- v4 session info and narrowband audio chunks
+- live **`Opus`** audio (optional on MCU; requires libopus-class integration)
+- live **NB-IMA** narrowband audio (`dashcdg_nb_ima_*` in `core/` — fixed-point, no external codec libs for ids 2–7 today; see [`../specs/v4-audio-codecs.md`](../specs/v4-audio-codecs.md))
 - live timed `CDG_BATCH` framing
 - bounded `CDG_SNAPSHOT` framing for fast visual bootstrap/recovery
 - software-timestamped `PTP_SYNC` / `PTP_FOLLOW_UP` / `PTP_DELAY_REQ` / `PTP_DELAY_RESP` clock discipline
@@ -32,7 +34,7 @@ That portable set now reflects the desktop proof's protocol v3 direction:
 
 - Wi-Fi transport adapter
 - jitter buffer and playout scheduler
-- Opus decode integration suited to the chosen ESP32 profile
+- NB-IMA decode integration first; optional Opus decode if the board has headroom
 - display driver adapter
 - persistent settings
 - power and battery telemetry

@@ -59,7 +59,7 @@ Target behavior:
 
 First-tranche lock:
 
-- codec family: SBC-like framed low-bitrate mode
+- codec family: **NB-IMA** narrowband framed low-bitrate mode (`dashcdg_nb_ima_*` in `core/`; integer-only)
 - target purpose: weak-link survival and deterministic debugging profile
 - expected properties:
   - materially lower steady-state bitrate than `quality`
@@ -84,7 +84,8 @@ For the first v4 rollout, the metadata should be concrete enough that RX can
 instantiate either decoder immediately:
 
 - `audio_profile_id = quality | resilience`
-- `codec_id = opus | sbc_like`
+- `audio_codec_id` — see [v4-audio-codecs.md](v4-audio-codecs.md): **`1` = Opus**,
+  **`2`–`7` = narrowband family** (same NB-IMA payload today; ids 3–7 are reserved labels for tooling and future codecs)
 - `sample_rate`
 - `channels`
 - `frame_ms`

@@ -9,6 +9,7 @@
 #include "dashcdg/common.h"
 #include "dashcdg/fec.h"
 #include "dashcdg/media_clock.h"
+#include "dashcdg/nb_ima_codec.h"
 #include "dashcdg/protocol.h"
 
 static struct dashcdg_subchannel_packet make_packet(uint8_t instruction) {
@@ -677,6 +678,35 @@ static void test_fec_recovery(void) {
     assert(memcmp(recovered, payload_b, sizeof(payload_b)) == 0);
 }
 
+static void test_nb_ima_codec_roundtrip(void) {
+    struct dashcdg_nb_ima_state enc;
+    struct dashcdg_nb_ima_state dec;
+    int16_t pcm[DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES];
+    int16_t out[DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES];
+    uint8_t pkt[DASHCDG_NB_IMA_ENCODED_BYTES];
+    int enc_len;
+    int dec_len;
+    size_t i;
+    int32_t energy = 0;
+
+    for (i = 0; i < DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES; ++i) {
+        pcm[i] = (int16_t) (400 * (int) ((i / 40) % 3) - 400);
+    }
+    dashcdg_nb_ima_state_init(&enc);
+    enc_len = dashcdg_nb_ima_encode_pcm48_mono_frame(&enc, pcm, DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES, pkt, sizeof(pkt));
+    assert(enc_len == (int) DASHCDG_NB_IMA_ENCODED_BYTES);
+
+    dashcdg_nb_ima_state_init(&dec);
+    dec_len = dashcdg_nb_ima_decode_to_pcm48_mono_frame(&dec, pkt, (size_t) enc_len, out, DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES);
+    assert(dec_len == (int) DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES);
+
+    for (i = 0; i < DASHCDG_NB_IMA_PCM48_INPUT_SAMPLES; ++i) {
+        int32_t d = (int32_t) out[i];
+        energy += d * d;
+    }
+    assert(energy > 1000);
+}
+
 int main(void) {
     test_memory_and_border();
     test_tile_and_scroll_copy();
@@ -695,6 +725,7 @@ int main(void) {
     test_cdg_batch_jitter_apply_note_and_drain_skip();
     test_cdg_batch_jitter_snapshot_seek_purges_old_slots();
     test_fec_recovery();
+    test_nb_ima_codec_roundtrip();
 
     puts("all tests passed");
     return 0;

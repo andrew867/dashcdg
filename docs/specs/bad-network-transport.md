@@ -105,7 +105,7 @@ For the first v4 implementation, session metadata should also expose enough
 state for immediate RX startup decisions:
 
 - `transport_version = 4`
-- `audio_codec_id`
+- `audio_codec_id` (see [v4-audio-codecs.md](v4-audio-codecs.md) — Opus vs fixed-point narrowband family)
 - `audio_frame_ms`
 - `audio_sample_rate`
 - `audio_channels`

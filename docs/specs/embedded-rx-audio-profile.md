@@ -5,8 +5,10 @@
 Define how the first embedded receiver should treat audio while the bad-network
 transport work is moving toward:
 
-- `quality` audio backed by `Opus`
-- `resilience` audio backed by an `SBC-like` framed low-bitrate mode
+- `quality` audio backed by `Opus` (optional on MCU; desktop uses libopus)
+- `resilience` audio backed by the **first-party fixed-point** narrowband codec
+  (**`dashcdg_nb_ima_*`** in `core/`; CLI still exposes this family as `sbc-like`
+  and related v4 wire labels — see [v4-audio-codecs.md](v4-audio-codecs.md))
 
 This note is intentionally implementation-oriented for the first MCU receiver.
 It does not replace `docs/specs/bad-network-audio-profiles.md`. It explains how
@@ -46,7 +48,8 @@ Because of that, the first embedded audio target should optimize for:
 - easier startup recovery
 
 Those are the exact reasons the bad-network profile work defines `resilience`
-around an `SBC-like` low-bitrate mode.
+around the **NB-IMA** low-bitrate mode (historically called “SBC-like” on the wire;
+same codec for ESP32 bring-up without external speech libraries).
 
 ## Embedded audio priorities
 

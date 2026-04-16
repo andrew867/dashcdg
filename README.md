@@ -113,7 +113,7 @@ GDI/user32 — **no** FreeGLUT/GLEW in that link (see
 `docs/specs/win32-gdi-view-backend.md`).
 
 **Retro bundle** (`desktop-retro-*.exe`, `WINDOWS_RETRO_BUNDLE=1`): PortAudio +
-GDI + SBC-like codec path; **no** Opus and **no** OpenGL stack in the shipped DLL set.
+GDI + **NB-IMA** narrowband codec path; **no** Opus and **no** OpenGL stack in the shipped DLL set.
 
 On the current Windows/MSYS2 flow:
 
@@ -132,14 +132,14 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Integrated network modes through the player entrypoint:
 
 ```sh
-build/bin/desktop-player tx [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-player tx [--headless] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 build/bin/desktop-player rx [--headless] [--gdi] [endpoint-address] [port]
 ```
 
 Standalone network transmitter (Windows MSYS2: **headless** `desktop-tx.exe`; use **`desktop-gdi-tx.exe`** for a GDI preview window without GL):
 
 ```sh
-build/bin/desktop-tx [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-tx [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 ```
 
 On Linux/macOS, `desktop-tx` is still the GL-capable binary: add **`--display`** for a FreeGLUT preview, or use **`desktop-player tx`** (preview on by default when the executable name contains `player`).
@@ -236,8 +236,10 @@ Key runtime rules:
   can stay file-backed, while preview mode still uses an in-memory fallback
 - TX uses **protocol v4** on the wire by default (session info, loading screens,
   anchors, bounded startup pacing). Pass **`--v3`** to force the legacy v3-only sender loop.
-- TX v4 supports `--audio-profile=quality|resilience` (Opus vs SBC-like)
-  with visible profile/codec reporting in its status and event logs
+- TX v4 supports `--audio-profile=quality|resilience` (Opus vs **NB-IMA** narrowband,
+  same family as legacy “SBC-like” on the wire) plus **`--v4-audio-codec=`** and
+  **`--badnet-v4*`** (see [`docs/specs/v4-audio-codecs.md`](docs/specs/v4-audio-codecs.md));
+  narrowband codec implementation lives in **`core/src/nb_ima_codec.c`** (fixed-point, MCU-friendly)
 - TX defaults to a `1000 ms` warmup before a new session starts
 - TX network audio currently defaults to mono `48 kHz`, `20 ms` Opus frames, and `80 kbps`
 - RX treats fresh `ANNOUNCE` packets as session re-anchors and rejects stale delayed PTP exchanges after track switches

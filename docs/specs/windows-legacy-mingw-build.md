@@ -211,9 +211,10 @@ Per-arch script invocations copy only the zip that was built. The per-arch
   The same `debug` pass still builds the normal GL/GDI/opus binaries under
   `build/x86-retro/bin/` for side‑by‑side testing.
 
-Use **`desktop-retro-tx.exe` with `--badnet-v4`** and **`--audio-profile=resilience`**
-(already the default codec in that build). Pair with **`desktop-retro-rx.exe`** for
-testing; Opus-only senders will not produce audio on the retro RX.
+Use **`desktop-retro-tx.exe`** with **`--badnet-v4`** (v4 + resilience + default
+`celp13k` id) and/or **`--audio-profile=resilience`** as needed; narrowband audio is
+always **NB-IMA** (`core/src/nb_ima_codec.c`) in this repo. Pair with **`desktop-retro-rx.exe`**
+for testing; Opus-only senders will not produce audio on the retro RX.
 
 ## Sneakernet bundle (`make dist-windows-sneakernet`)
 

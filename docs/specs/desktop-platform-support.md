@@ -14,12 +14,12 @@ Built from `platform/desktop/src/` with shared core/proto libs.
 
 | Binary | Role | Notes |
 | --- | --- | --- |
-| `desktop-tx.exe` | **Headless** transmitter (Windows build) | No OpenGL/FreeGLUT in this link: server-style TX only. **Protocol v4 by default** (`--v3` for legacy v3 loop). Opus by default; SBC-like with `--audio-profile=resilience`. On Linux/macOS, `desktop-tx` is still the GL-capable object: default **no** window unless `--display` (use `desktop-player tx` for preview-on-by-default). |
-| `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Opus or SBC-like same as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
-| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Opus + SBC-like decode per session. |
+| `desktop-tx.exe` | **Headless** transmitter (Windows build) | No OpenGL/FreeGLUT in this link: server-style TX only. **Protocol v4 by default** (`--v3` for legacy v3 loop). Opus by default; narrowband (**NB-IMA**, CLI `sbc-like` / `--v4-audio-codec=…`) with `--audio-profile=resilience` or explicit `--v4-audio-codec`. See [v4-audio-codecs.md](v4-audio-codecs.md). On Linux/macOS, `desktop-tx` is still the GL-capable object: default **no** window unless `--display` (use `desktop-player tx` for preview-on-by-default). |
+| `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Opus or narrowband same as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
+| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Opus + fixed-point narrowband decode per session. |
 | `desktop-gdi-rx.exe` | GDI-only receiver link | No GL imports. Opus + PortAudio. |
-| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use. |
-| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + PortAudio; **no Opus** (stub). |
+| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use; **NB-IMA** narrowband only. |
+| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + PortAudio; **no Opus** (stub); **NB-IMA** narrowband decode. |
 | `desktop-player.exe` | Local player + `tx` / `rx` shims | Full GL + Win32 GDI code paths: `tx` preview on by default (`--headless` to disable); `rx` same GL→GDI fallback as `desktop-rx`. |
 
 Implementation pointers:
@@ -111,8 +111,17 @@ Not allowed without new proof:
 - Vista/7 runtime proven
 - All Linux arches smoke-complete
 
+## V4 TX audio flags (all desktop TX entrypoints)
+
+Documented in detail in [`v4-audio-codecs.md`](v4-audio-codecs.md):
+
+- `--v4-audio-codec=<name>` / `--v4-audio-codec <name>` — select v4 `audio_codec_id` (`opus`, `sbc-like`, `celp13k`, `evrc`, `amr-nb`, `amr-wb`, `bluetooth-sbc`).
+- `--badnet-v4` — v4 + resilience + default id **`celp13k`** (same **NB-IMA** payload as other narrowband ids).
+- `--badnet-v4-sbc`, `--badnet-v4-evrc` — resilience + wire id **2** or **4**.
+
 ## Further reading
 
+- [`v4-audio-codecs.md`](v4-audio-codecs.md) — wire IDs, fixed-point narrowband, MCU portability
 - [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md) — PE audit, DLL lists, retro profile
 - [`win32-gdi-view-backend.md`](win32-gdi-view-backend.md) — GDI backend behavior
 - [`../architecture/desktop-streaming.md`](../architecture/desktop-streaming.md) — end-to-end TX/RX + render paths
