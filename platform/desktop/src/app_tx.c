@@ -1454,6 +1454,62 @@ static int dashcdg_tx_ipv4_is_broadcast(const struct in_addr *address) {
     return host_order == 0xFFFFFFFFU || (host_order & 0xFFU) == 0xFFU;
 }
 
+static int dashcdg_tx_apply_v4_audio_codec_name(const char *name, const char *argv0) {
+    const char *prog = argv0 != NULL ? argv0 : "desktop-tx";
+
+    if (name == NULL || name[0] == '\0') {
+        fprintf(stderr, "%s: --v4-audio-codec requires a codec name\n", prog);
+        return 0;
+    }
+    if (strcmp(name, "opus") == 0) {
+#if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
+        fprintf(stderr, "%s: opus is not available in the retro build\n", prog);
+        return 0;
+#else
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+        return 1;
+#endif
+    }
+    if (strcmp(name, "sbc-like") == 0) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
+        return 1;
+    }
+    if (strcmp(name, "celp13k") == 0) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_CELP13K;
+        return 1;
+    }
+    if (strcmp(name, "evrc") == 0) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+        return 1;
+    }
+    if (strcmp(name, "amr-nb") == 0) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_NB;
+        return 1;
+    }
+    if (strcmp(name, "amr-wb") == 0) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_WB;
+        return 1;
+    }
+    if (strcmp(name, "bluetooth-sbc") == 0) {
+        g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC;
+        return 1;
+    }
+    fprintf(
+            stderr,
+            "%s: unknown v4 audio codec %s (try opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc)\n",
+            prog,
+            name
+    );
+    return 0;
+}
+
 static void dashcdg_tx_print_usage(const char *argv0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     fprintf(
@@ -1491,6 +1547,14 @@ static void dashcdg_tx_print_usage(const char *argv0) {
             DASHCDG_DEFAULT_NETWORK_PORT
     );
     fprintf(stderr, "default TX library: %s (reshuffled each time the playlist wraps)\n", DASHCDG_DEFAULT_LIBRARY_DIR);
+    fprintf(
+            stderr,
+            "v4 audio: --v4-audio-codec=opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc\n"
+    );
+    fprintf(
+            stderr,
+            "          --badnet-v4 (resilience + celp13k), --badnet-v4-sbc, --badnet-v4-evrc\n"
+    );
 }
 
 static const struct dashcdg_tx_track *dashcdg_tx_current_track(void) {
@@ -2375,15 +2439,21 @@ static int dashcdg_tx_send_v4_session_info_locked(uint64_t now_ms, uint8_t *pack
     payload.video_profile_id = 1U;
     payload.audio_codec_id = g_tx_state.v4_audio_codec_id;
     /*
-     * The SBC-like profile encodes a narrowband core, but the current receiver
+     * Narrowband v4 codecs encode a narrowband core, but the current receiver
      * expands it back to the desktop playout rate before queueing audio.
      */
     payload.audio_sample_rate = DASHCDG_AUDIO_SAMPLE_RATE;
     payload.audio_channels = DASHCDG_AUDIO_CHANNELS;
     payload.audio_frame_ms = DASHCDG_AUDIO_FRAME_MS;
-    payload.audio_bitrate_or_mode = g_tx_state.v4_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE ? 24U : DASHCDG_AUDIO_BITRATE_KBPS;
-    payload.startup_preroll_ms = g_tx_state.v4_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE ? 240U : DASHCDG_PAYOUT_DELAY_MS;
-    payload.audio_join_redundancy = g_tx_state.v4_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE ? 2U : 1U;
+    if (dashcdg_v4_audio_codec_is_narrowband(g_tx_state.v4_audio_codec_id)) {
+        payload.audio_bitrate_or_mode = 24U;
+        payload.startup_preroll_ms = 240U;
+        payload.audio_join_redundancy = 2U;
+    } else {
+        payload.audio_bitrate_or_mode = DASHCDG_AUDIO_BITRATE_KBPS;
+        payload.startup_preroll_ms = DASHCDG_PAYOUT_DELAY_MS;
+        payload.audio_join_redundancy = 1U;
+    }
     payload.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
     payload.video_anchor_mode = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
     payload.video_delta_mode = DASHCDG_V4_VIDEO_DELTA_MODE_CDG_PACKETS;
@@ -3080,7 +3150,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
                 );
-            } else {
+            } else if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
                 encoded_length = dashcdg_sbc_like_encode_frame(
                         &sbc_like_encoder,
                         pcm,
@@ -3088,6 +3158,8 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
                 );
+            } else {
+                encoded_length = -1;
             }
             if (encoded_length <= 0) {
                 reached_eof = 1;
@@ -4571,6 +4643,40 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--badnet-v4") == 0) {
             g_tx_state.transport_v4_enabled = 1;
+            g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_CELP13K;
+            continue;
+        }
+        if (strcmp(argv[i], "--badnet-v4-sbc") == 0) {
+            g_tx_state.transport_v4_enabled = 1;
+            g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
+            continue;
+        }
+        if (strcmp(argv[i], "--badnet-v4-evrc") == 0) {
+            g_tx_state.transport_v4_enabled = 1;
+            g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+            continue;
+        }
+        if (strncmp(argv[i], "--v4-audio-codec=", 17) == 0) {
+            if (!dashcdg_tx_apply_v4_audio_codec_name(argv[i] + 17, argv[0])) {
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--v4-audio-codec") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --v4-audio-codec requires a value\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            ++i;
+            if (!dashcdg_tx_apply_v4_audio_codec_name(argv[i], argv[0])) {
+                dashcdg_tx_cleanup();
+                return 1;
+            }
             continue;
         }
         if (strcmp(argv[i], "--v3") == 0 || strcmp(argv[i], "--protocol=v3") == 0) {

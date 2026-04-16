@@ -328,6 +328,45 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_session_info.audio_codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE);
     assert(view.v4_session_info.startup_preroll_ms == 240);
 
+    {
+        const uint8_t codec_ids[] = {
+                DASHCDG_V4_AUDIO_CODEC_CELP13K,
+                DASHCDG_V4_AUDIO_CODEC_EVRC,
+                DASHCDG_V4_AUDIO_CODEC_AMR_NB,
+                DASHCDG_V4_AUDIO_CODEC_AMR_WB,
+                DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC
+        };
+        size_t codec_index;
+
+        for (codec_index = 0; codec_index < sizeof(codec_ids) / sizeof(codec_ids[0]); ++codec_index) {
+            memset(&session_info, 0, sizeof(session_info));
+            strcpy(session_info.song_id, "codec-scan");
+            session_info.transport_version = DASHCDG_PROTOCOL_VERSION_V4;
+            session_info.audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
+            session_info.video_profile_id = 1;
+            session_info.audio_codec_id = codec_ids[codec_index];
+            session_info.audio_sample_rate = 48000;
+            session_info.audio_channels = 1;
+            session_info.audio_frame_ms = 20;
+            session_info.audio_bitrate_or_mode = 24;
+            session_info.startup_preroll_ms = 240;
+            session_info.audio_join_redundancy = 2;
+            session_info.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
+            session_info.video_anchor_mode = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
+            session_info.video_delta_mode = DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN;
+            session_info.startup_backfill_mode = 1;
+            session_info.loading_screen_mode = DASHCDG_V4_LOADING_SCREEN_CONNECTING;
+            session_info.asset_size = 4096;
+            session_info.session_start_ms = 9001;
+            size = dashcdg_protocol_serialize_v4_session_info(buffer, sizeof(buffer), &header, &session_info);
+            assert(size > 0);
+            assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+            assert(strcmp(view.v4_session_info.song_id, "codec-scan") == 0);
+            assert(view.v4_session_info.audio_codec_id == codec_ids[codec_index]);
+            assert(dashcdg_v4_audio_codec_is_narrowband(view.v4_session_info.audio_codec_id) == 1);
+        }
+    }
+
     memset(&loading_screen, 0, sizeof(loading_screen));
     loading_screen.screen_id = 7;
     loading_screen.screen_kind = DASHCDG_V4_LOADING_SCREEN_LATE_JOIN;

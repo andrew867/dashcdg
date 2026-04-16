@@ -52,6 +52,20 @@ static uint64_t dashcdg_read_u64(const uint8_t *src) {
     return value;
 }
 
+int dashcdg_v4_audio_codec_is_narrowband(uint8_t codec_id) {
+    switch (codec_id) {
+    case DASHCDG_V4_AUDIO_CODEC_SBC_LIKE:
+    case DASHCDG_V4_AUDIO_CODEC_CELP13K:
+    case DASHCDG_V4_AUDIO_CODEC_EVRC:
+    case DASHCDG_V4_AUDIO_CODEC_AMR_NB:
+    case DASHCDG_V4_AUDIO_CODEC_AMR_WB:
+    case DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static size_t dashcdg_write_header_version(
         uint8_t *buffer,
         size_t buffer_size,

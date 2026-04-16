@@ -54,7 +54,12 @@ enum dashcdg_v4_audio_profile_id {
 
 enum dashcdg_v4_audio_codec_id {
     DASHCDG_V4_AUDIO_CODEC_OPUS = 1,
-    DASHCDG_V4_AUDIO_CODEC_SBC_LIKE = 2
+    DASHCDG_V4_AUDIO_CODEC_SBC_LIKE = 2,
+    DASHCDG_V4_AUDIO_CODEC_CELP13K = 3,
+    DASHCDG_V4_AUDIO_CODEC_EVRC = 4,
+    DASHCDG_V4_AUDIO_CODEC_AMR_NB = 5,
+    DASHCDG_V4_AUDIO_CODEC_AMR_WB = 6,
+    DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC = 7
 };
 
 enum dashcdg_v4_loading_screen_kind {
@@ -436,5 +441,8 @@ int dashcdg_protocol_parse_packet(
         const uint8_t *buffer,
         size_t buffer_size
 );
+
+/* Narrowband v4 codecs that currently share the SBC-like IMA wire payload until native encoders land. */
+int dashcdg_v4_audio_codec_is_narrowband(uint8_t codec_id);
 
 #endif

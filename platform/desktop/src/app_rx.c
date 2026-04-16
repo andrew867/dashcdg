@@ -1608,7 +1608,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return 0;
     }
 
-    if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_SBC_LIKE) {
+    if (dashcdg_v4_audio_codec_is_narrowband(frame->codec_id)) {
         decoded_frames = dashcdg_sbc_like_decode_frame(
                 &g_sbc_like_decoder,
                 frame->encoded_bytes,
@@ -2076,6 +2076,8 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     }
 
     receiver_state_prepare_asset(state, view->v4_session_info.asset_size, DASHCDG_MAX_V4_BACKFILL_CHUNK);
+    strncpy(state->song_id, view->v4_session_info.song_id, sizeof(state->song_id) - 1U);
+    state->song_id[sizeof(state->song_id) - 1U] = '\0';
     state->session_start_ms = view->v4_session_info.session_start_ms;
     state->announced_transport_version = DASHCDG_PROTOCOL_VERSION_V4;
     state->announced_audio_sample_rate = view->v4_session_info.audio_sample_rate;
