@@ -4,6 +4,7 @@
 
 #include "dashcdg/audio_jitter.h"
 #include "dashcdg/cdg.h"
+#include "dashcdg/cdg_batch_jitter.h"
 #include "dashcdg/cdg_raster.h"
 #include "dashcdg/common.h"
 #include "dashcdg/fec.h"
@@ -533,6 +534,67 @@ static void test_cdg_raster_rgba_matches_memory_preset(void) {
     assert(rgba[3] == 255U);
 }
 
+static void test_cdg_batch_jitter_duplicate_drop(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    uint64_t drops_before;
+
+    memset(one_pkt, 0, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 200U, 1U, one_pkt, 1) == 1);
+    assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 1U);
+    drops_before = jb.pending_drops;
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 200U, 1U, one_pkt, 1) == 0);
+    assert(jb.pending_drops > drops_before);
+}
+
+static void test_cdg_batch_jitter_apply_note_and_drain_skip(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
+    struct dashcdg_cdg_batch_jitter_drain_input din;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    uint64_t miss = 0U;
+    enum dashcdg_cdg_batch_drain_step step;
+
+    memset(one_pkt, 0x55, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 10U, 1U, one_pkt, 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    step = dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss);
+    assert(step == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    assert(batch != NULL && batch->packet_start_index == 10U && batch->packet_count == 1U);
+    dashcdg_cdg_batch_jitter_note_applied(&jb, batch);
+    assert(jb.next_packet_index == 11U);
+
+    miss = 0U;
+    batch = NULL;
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.sender_playback_now_ms = 9000U;
+    din.late_grace_ms = 0U;
+    din.late_gate = 1;
+    step = dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss);
+    assert(step == DASHCDG_CDG_BATCH_DRAIN_SKIP);
+    assert(miss == 1U);
+    assert(jb.next_packet_index == 11U + (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS);
+}
+
+static void test_cdg_batch_jitter_snapshot_seek_purges_old_slots(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+
+    memset(one_pkt, 0x11, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 0U, 1U, one_pkt, 0) == 1);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 24U, 1U, one_pkt, 0) == 1);
+    assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 2U);
+
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 30U);
+    assert(jb.next_packet_index == 30U);
+    assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 0U);
+}
+
 static void test_cdg_raster_alpha_from_transparency(void) {
     struct dashcdg_cdg_state state;
     struct dashcdg_subchannel_packet pkt = make_packet(DASHCDG_INSN_MEMORY_PRESET);
@@ -590,6 +652,9 @@ int main(void) {
     test_audio_jitter_drain_skip_missing();
     test_cdg_raster_rgba_matches_memory_preset();
     test_cdg_raster_alpha_from_transparency();
+    test_cdg_batch_jitter_duplicate_drop();
+    test_cdg_batch_jitter_apply_note_and_drain_skip();
+    test_cdg_batch_jitter_snapshot_seek_purges_old_slots();
     test_fec_recovery();
 
     puts("all tests passed");

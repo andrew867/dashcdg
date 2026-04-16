@@ -49,9 +49,11 @@ WINDOWS_RUNTIME_DLLS :=
 endif
 LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut -lportaudio -lopus -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
+WINDOWS_GDI_LIBS := -lgdi32 -luser32
 else
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio -lopus -lpthread
 NET_LIBS :=
+WINDOWS_GDI_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
 WINDOWS_ARCH_LABEL ?= x64
 endif
@@ -65,12 +67,12 @@ WINDOWS_PACKAGE_ZIP = $(RELEASE_DIR)/dashcdg-windows-$(WINDOWS_ARCH_LABEL)-porta
 WINDOWS_ZIP_X64 := build/amd64/release/dashcdg-windows-x64-portable.zip
 WINDOWS_ZIP_X86 := build/x86/release/dashcdg-windows-x86-portable.zip
 
-CORE_SOURCES := core/src/cdg.c core/src/media_clock.c core/src/cdg_raster.c core/src/audio_jitter.c
+CORE_SOURCES := core/src/cdg.c core/src/media_clock.c core/src/cdg_raster.c core/src/audio_jitter.c core/src/cdg_batch_jitter.c
 PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
-CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o
+CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o $(OBJ_DIR)/core_cdg_batch_jitter.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
+DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
@@ -123,6 +125,9 @@ $(OBJ_DIR)/core_cdg_raster.o: core/src/cdg_raster.c
 $(OBJ_DIR)/core_audio_jitter.o: core/src/audio_jitter.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/core_cdg_batch_jitter.o: core/src/cdg_batch_jitter.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/proto_protocol.o: proto/src/protocol.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -156,6 +161,9 @@ $(OBJ_DIR)/desktop_stream_runtime.o: platform/desktop/src/stream_runtime.c
 $(OBJ_DIR)/desktop_transport_udp.o: platform/desktop/src/transport_udp.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/desktop_win32_gdi_view.o: platform/desktop/src/win32_gdi_view.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/desktop_app_tx.o: platform/desktop/src/app_tx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -184,19 +192,19 @@ $(TEST_TRANSPORT_UDP_BIN): $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_tr
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o $(NET_LIBS)
 
 $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
 $(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
 $(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif

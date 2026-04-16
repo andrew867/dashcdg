@@ -11,7 +11,9 @@
 
 #include "dashcdg/app_modes.h"
 #include "dashcdg/audio_jitter.h"
+#include "dashcdg/cdg_batch_jitter.h"
 #include "dashcdg/cdg.h"
+#include "dashcdg/cdg_raster.h"
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
 #include "dashcdg/fec.h"
@@ -24,10 +26,13 @@
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
 
+#ifdef _WIN32
+#include "dashcdg/win32_gdi_view.h"
+#endif
+
 #define DASHCDG_ATOMIC_GET(value) (__atomic_load_n(&(value), __ATOMIC_RELAXED))
 #define DASHCDG_AUDIO_SAMPLE_RATE 48000U
 #define DASHCDG_AUDIO_CHANNELS 2U
-#define DASHCDG_CDG_JITTER_BUFFER_PACKETS 64U
 #define DASHCDG_AUDIO_LATE_GRACE_MS 80U
 #define DASHCDG_CDG_LATE_GRACE_MS 80U
 #define DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE 16U
@@ -56,13 +61,6 @@ static const struct {
         { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
         { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
         { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } }
-};
-
-struct dashcdg_pending_cdg_batch {
-    int occupied;
-    uint8_t packet_count;
-    uint64_t packet_start_index;
-    uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
 };
 
 struct dashcdg_rx_fec_group {
@@ -126,9 +124,7 @@ struct receiver_state {
     uint64_t audio_decode_failures;
     uint64_t audio_queue_overflows;
     uint64_t audio_missing_skips;
-    uint64_t live_reordered_batches;
     uint64_t live_missing_skips;
-    uint64_t live_pending_drops;
     uint64_t fec_packets;
     uint64_t fec_audio_packets;
     uint64_t fec_cdg_packets;
@@ -146,8 +142,6 @@ struct receiver_state {
     uint8_t announced_audio_codec_id;
     uint8_t announced_audio_fec_group_size;
     uint8_t announced_cdg_fec_group_size;
-    uint64_t next_live_packet_index;
-    uint64_t next_live_playback_ms;
     uint32_t pending_sync_id;
     uint64_t pending_sync_rx_local_ms;
     uint64_t pending_sync_origin_remote_ms;
@@ -169,7 +163,6 @@ struct receiver_state {
     int have_clock;
     int playback_paused;
     int network_audio_enabled;
-    int next_live_packet_initialized;
     int pending_sync_valid;
     int pending_delay_request_valid;
     uint32_t active_snapshot_id;
@@ -190,7 +183,7 @@ struct receiver_state {
     uint8_t v4_loading_screen_phase;
     int v4_loading_screen_active;
     struct dashcdg_audio_jitter_buffer audio_jitter;
-    struct dashcdg_pending_cdg_batch pending_cdg[DASHCDG_CDG_JITTER_BUFFER_PACKETS];
+    struct dashcdg_cdg_batch_jitter_buffer cdg_batch_jitter;
     struct dashcdg_rx_fec_group audio_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
     struct dashcdg_rx_fec_group cdg_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
 };
@@ -198,6 +191,7 @@ struct receiver_state {
 static struct receiver_state g_receiver;
 static struct dashcdg_desktop_audio *g_audio;
 static struct dashcdg_gl_renderer g_renderer;
+static int g_rx_use_win_gdi;
 static struct dashcdg_opus_decoder g_opus_decoder;
 static struct dashcdg_sbc_like_decoder g_sbc_like_decoder;
 static const char *g_endpoint_address;
@@ -501,7 +495,8 @@ static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
 }
 
 static void dashcdg_rx_print_usage(const char *argv0) {
-    fprintf(stderr, "usage: %s [--headless] [endpoint-address] [port]\n", argv0);
+    fprintf(stderr, "usage: %s [--headless] [--win-gdi] [endpoint-address] [port]\n", argv0);
+    fprintf(stderr, "  --win-gdi   Windows only: GDI window instead of OpenGL/GLUT\n");
     fprintf(
             stderr,
             "defaults: endpoint-address=%s port=%d\n",
@@ -545,9 +540,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_decode_failures = 0;
     state->audio_queue_overflows = 0;
     state->audio_missing_skips = 0;
-    state->live_reordered_batches = 0;
     state->live_missing_skips = 0;
-    state->live_pending_drops = 0;
     state->fec_packets = 0;
     state->fec_audio_packets = 0;
     state->fec_cdg_packets = 0;
@@ -565,8 +558,6 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->announced_audio_codec_id = 0;
     state->announced_audio_fec_group_size = 0;
     state->announced_cdg_fec_group_size = 0;
-    state->next_live_packet_index = 0;
-    state->next_live_playback_ms = 0;
     state->pending_sync_id = 0;
     state->pending_sync_rx_local_ms = 0;
     state->pending_sync_origin_remote_ms = 0;
@@ -587,7 +578,6 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->have_clock = 0;
     state->playback_paused = 0;
     state->network_audio_enabled = 0;
-    state->next_live_packet_initialized = 0;
     state->pending_sync_valid = 0;
     state->pending_delay_request_valid = 0;
     state->active_snapshot_id = 0;
@@ -608,7 +598,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->v4_loading_screen_phase = 0;
     state->v4_loading_screen_active = 0;
     dashcdg_audio_jitter_clear(&state->audio_jitter);
-    memset(state->pending_cdg, 0, sizeof(state->pending_cdg));
+    dashcdg_cdg_batch_jitter_clear(&state->cdg_batch_jitter);
     memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
     memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
     memset(state->song_id, 0, sizeof(state->song_id));
@@ -737,8 +727,8 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
     }
     if (!state->playback_paused &&
             state->live_packets_applied > 0 &&
-            state->next_live_packet_initialized &&
-            state->active_snapshot_packet_index < state->next_live_packet_index) {
+            state->cdg_batch_jitter.initialized &&
+            state->active_snapshot_packet_index < state->cdg_batch_jitter.next_packet_index) {
         if (state->cdg_snapshots_applied > 0 || state->active_snapshot_packet_index == 0U) {
             return 0;
         }
@@ -759,15 +749,7 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
             DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT
     );
 
-    state->next_live_packet_index = state->active_snapshot_packet_index;
-    state->next_live_playback_ms = dashcdg_packet_count_to_ms(state->active_snapshot_packet_index);
-    state->next_live_packet_initialized = 1;
-    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
-        if (state->pending_cdg[i].occupied &&
-                state->pending_cdg[i].packet_start_index < state->active_snapshot_packet_index) {
-            state->pending_cdg[i].occupied = 0;
-        }
-    }
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&state->cdg_batch_jitter, state->active_snapshot_packet_index);
     state->cdg_snapshots_applied++;
     state->last_progress_local_ms = dashcdg_clock_now_ms();
     return 1;
@@ -885,7 +867,7 @@ static void dashcdg_rx_apply_loading_screen_locked(
     if (state == NULL) {
         return;
     }
-    if (state->cdg_snapshots_applied > 0 || state->next_live_packet_initialized) {
+    if (state->cdg_snapshots_applied > 0 || state->cdg_batch_jitter.initialized) {
         return;
     }
 
@@ -944,19 +926,11 @@ static void dashcdg_rx_handle_v4_anchor_locked(struct receiver_state *state, con
 }
 
 static size_t dashcdg_rx_pending_cdg_count(const struct receiver_state *state) {
-    size_t count = 0;
-
     if (state == NULL) {
         return 0;
     }
 
-    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
-        if (state->pending_cdg[i].occupied) {
-            count++;
-        }
-    }
-
-    return count;
+    return dashcdg_cdg_batch_jitter_occupied_count(&state->cdg_batch_jitter);
 }
 
 static int64_t dashcdg_abs_i64(int64_t value) {
@@ -1172,42 +1146,6 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
     pthread_mutex_unlock(&g_render_mutex);
 }
 
-static struct dashcdg_pending_cdg_batch *dashcdg_rx_find_cdg_batch_locked(
-        struct receiver_state *state,
-        uint64_t packet_start_index
-) {
-    if (state == NULL) {
-        return NULL;
-    }
-
-    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
-        if (state->pending_cdg[i].occupied && state->pending_cdg[i].packet_start_index == packet_start_index) {
-            return &state->pending_cdg[i];
-        }
-    }
-
-    return NULL;
-}
-
-static struct dashcdg_pending_cdg_batch *dashcdg_rx_oldest_cdg_batch_locked(struct receiver_state *state) {
-    struct dashcdg_pending_cdg_batch *oldest = NULL;
-
-    if (state == NULL) {
-        return NULL;
-    }
-
-    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
-        if (!state->pending_cdg[i].occupied) {
-            continue;
-        }
-        if (oldest == NULL || state->pending_cdg[i].packet_start_index < oldest->packet_start_index) {
-            oldest = &state->pending_cdg[i];
-        }
-    }
-
-    return oldest;
-}
-
 static void dashcdg_rx_clear_fec_group(struct dashcdg_rx_fec_group *group) {
     if (group == NULL) {
         return;
@@ -1285,7 +1223,7 @@ static void dashcdg_rx_purge_audio_fec_locked(struct receiver_state *state) {
 static void dashcdg_rx_purge_cdg_fec_locked(struct receiver_state *state) {
     uint8_t group_span;
 
-    if (state == NULL || !state->next_live_packet_initialized) {
+    if (state == NULL || !state->cdg_batch_jitter.initialized) {
         return;
     }
 
@@ -1305,7 +1243,7 @@ static void dashcdg_rx_purge_cdg_fec_locked(struct receiver_state *state) {
 
         first_batch_index = (uint64_t) group->group_id * (uint64_t) group_span;
         end_packet_index = (first_batch_index + (uint64_t) group->expected_group_size) * DASHCDG_MAX_CDG_BATCH_PACKETS;
-        if (state->next_live_packet_index >= end_packet_index) {
+        if (state->cdg_batch_jitter.next_packet_index >= end_packet_index) {
             dashcdg_rx_clear_fec_group(group);
         }
     }
@@ -1346,52 +1284,17 @@ static int dashcdg_rx_insert_cdg_pending_locked(
         const uint8_t *payload,
         int count_reorder
 ) {
-    struct dashcdg_pending_cdg_batch *slot = NULL;
-    size_t packet_bytes = (size_t) packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
-
     if (state == NULL || payload == NULL || packet_count == 0 || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
         return 0;
     }
 
-    if (!state->next_live_packet_initialized) {
-        state->next_live_packet_index = packet_start_index;
-        state->next_live_playback_ms = dashcdg_packet_count_to_ms(packet_start_index);
-        state->next_live_packet_initialized = 1;
-    } else if (packet_start_index < state->next_live_packet_index) {
-        if (count_reorder) {
-            state->live_pending_drops++;
-        }
-        return 0;
-    } else if (count_reorder && packet_start_index > state->next_live_packet_index) {
-        state->live_reordered_batches++;
-    }
-
-    if (dashcdg_rx_find_cdg_batch_locked(state, packet_start_index) != NULL) {
-        if (count_reorder) {
-            state->live_pending_drops++;
-        }
-        return 0;
-    }
-
-    for (size_t i = 0; i < DASHCDG_CDG_JITTER_BUFFER_PACKETS; ++i) {
-        if (!state->pending_cdg[i].occupied) {
-            slot = &state->pending_cdg[i];
-            break;
-        }
-    }
-    if (slot == NULL) {
-        if (count_reorder) {
-            state->live_pending_drops++;
-        }
-        return 0;
-    }
-
-    memset(slot, 0, sizeof(*slot));
-    slot->occupied = 1;
-    slot->packet_count = packet_count;
-    slot->packet_start_index = packet_start_index;
-    memcpy(slot->packet_bytes, payload, packet_bytes);
-    return 1;
+    return dashcdg_cdg_batch_jitter_insert(
+            &state->cdg_batch_jitter,
+            packet_start_index,
+            packet_count,
+            payload,
+            count_reorder
+    );
 }
 
 static void dashcdg_rx_try_recover_audio_group_locked(
@@ -1707,7 +1610,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
 
 static void dashcdg_rx_apply_cdg_batch_locked(
         struct receiver_state *state,
-        const struct dashcdg_pending_cdg_batch *batch
+        const struct dashcdg_cdg_batch_jitter_frame *batch
 ) {
     const struct dashcdg_subchannel_packet *packets;
 
@@ -1718,7 +1621,6 @@ static void dashcdg_rx_apply_cdg_batch_locked(
     packets = (const struct dashcdg_subchannel_packet *) batch->packet_bytes;
     for (uint8_t i = 0; i < batch->packet_count; ++i) {
         dashcdg_cdg_state_process_packet(&state->live_state, &packets[i]);
-        state->next_live_packet_index++;
         state->live_packets_applied++;
     }
     state->last_progress_local_ms = dashcdg_clock_now_ms();
@@ -1769,45 +1671,32 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
         }
     }
 
-    while (state->next_live_packet_initialized && cdg_steps < DASHCDG_MAX_DRAIN_STEPS_PER_CALL) {
-        struct dashcdg_pending_cdg_batch *batch = dashcdg_rx_find_cdg_batch_locked(state, state->next_live_packet_index);
+    while (state->cdg_batch_jitter.initialized && cdg_steps < DASHCDG_MAX_DRAIN_STEPS_PER_CALL) {
+        struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
+        struct dashcdg_cdg_batch_jitter_drain_input cdg_din;
+        enum dashcdg_cdg_batch_drain_step cdg_step;
+        uint64_t cdg_miss = 0U;
 
-        if (batch != NULL) {
-            uint64_t next_packet_index = batch->packet_start_index + batch->packet_count;
+        memset(&cdg_din, 0, sizeof(cdg_din));
+        cdg_din.have_sender_playback = have_sender_playback;
+        cdg_din.sender_playback_now_ms = sender_playback_now_ms;
+        cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
+        cdg_din.late_gate = (state->cdg_snapshots_applied == 0 || state->live_packets_applied > 0) ? 1 : 0;
 
+        cdg_step = dashcdg_cdg_batch_jitter_drain_step(&state->cdg_batch_jitter, &cdg_din, &batch, &cdg_miss);
+        if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_STOP) {
+            break;
+        }
+        if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
+            state->live_missing_skips += cdg_miss;
+            cdg_steps++;
+            continue;
+        }
+        if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_APPLY && batch != NULL) {
             dashcdg_rx_apply_cdg_batch_locked(state, batch);
-            state->next_live_playback_ms = dashcdg_packet_count_to_ms(next_packet_index);
-            batch->occupied = 0;
+            dashcdg_cdg_batch_jitter_note_applied(&state->cdg_batch_jitter, batch);
             cdg_steps++;
-            continue;
         }
-
-        if (have_sender_playback &&
-                (state->cdg_snapshots_applied == 0 || state->live_packets_applied > 0) &&
-                sender_playback_now_ms > state->next_live_playback_ms + DASHCDG_CDG_LATE_GRACE_MS) {
-            struct dashcdg_pending_cdg_batch *oldest = dashcdg_rx_oldest_cdg_batch_locked(state);
-
-            if (oldest != NULL && oldest->packet_start_index > state->next_live_packet_index) {
-                uint64_t skipped_batches = (oldest->packet_start_index - state->next_live_packet_index) /
-                        DASHCDG_MAX_CDG_BATCH_PACKETS;
-
-                if (skipped_batches == 0U) {
-                    skipped_batches = 1U;
-                }
-                state->live_missing_skips += skipped_batches;
-                state->next_live_packet_index = oldest->packet_start_index;
-                state->next_live_playback_ms = dashcdg_packet_count_to_ms(oldest->packet_start_index);
-            } else {
-                uint64_t skipped_packet_index = state->next_live_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
-
-                state->live_missing_skips++;
-                state->next_live_packet_index = skipped_packet_index;
-                state->next_live_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
-            }
-            cdg_steps++;
-            continue;
-        }
-        break;
     }
 
     dashcdg_rx_purge_audio_fec_locked(state);
@@ -1902,8 +1791,8 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.audio_jitter.reordered_packets,
             pending_cdg,
             (unsigned long long) g_receiver.live_missing_skips,
-            (unsigned long long) g_receiver.live_pending_drops,
-            (unsigned long long) g_receiver.live_reordered_batches,
+            (unsigned long long) g_receiver.cdg_batch_jitter.pending_drops,
+            (unsigned long long) g_receiver.cdg_batch_jitter.reordered_batches,
             (unsigned long long) g_receiver.fec_audio_recovered,
             (unsigned long long) g_receiver.fec_cdg_recovered,
             (unsigned long long) g_receiver.fec_recovery_failures,
@@ -2619,6 +2508,85 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
     return NULL;
 }
 
+static void dashcdg_rx_fill_hud_lines_locked(
+        uint64_t local_now_ms,
+        char *hud_line_a,
+        size_t hud_line_a_size,
+        char *hud_line_b,
+        size_t hud_line_b_size
+) {
+    uint32_t hud_prefix_bytes = 0;
+    uint64_t hud_since_last_dg_ms = 0;
+    uint64_t hud_stall_ms = 0;
+    uint64_t clock_hold_ms = 0;
+    size_t pending_audio = 0;
+    size_t pending_cdg = 0;
+    size_t audio_repairable = 0;
+    size_t cdg_repairable = 0;
+    char audio_gate[64];
+    char render_gate[64];
+    int muted = g_audio != NULL ? dashcdg_desktop_audio_is_muted(g_audio) : g_audio_muted;
+
+    pending_audio = dashcdg_audio_jitter_occupied_count(&g_receiver.audio_jitter);
+    pending_cdg = dashcdg_rx_pending_cdg_count(&g_receiver);
+    dashcdg_rx_collect_fec_group_stats(g_receiver.audio_fec_groups, NULL, NULL, &audio_repairable);
+    dashcdg_rx_collect_fec_group_stats(g_receiver.cdg_fec_groups, NULL, NULL, &cdg_repairable);
+    hud_prefix_bytes = receiver_prefix_bytes_snapshot(&g_receiver);
+    if (g_receiver.last_datagram_local_ms > 0U) {
+        hud_since_last_dg_ms = local_now_ms - g_receiver.last_datagram_local_ms;
+    }
+    if (g_receiver.last_progress_local_ms > 0U) {
+        hud_stall_ms = local_now_ms - g_receiver.last_progress_local_ms;
+    }
+    if (g_receiver.last_clock_update_local_ms > 0U) {
+        clock_hold_ms = local_now_ms - g_receiver.last_clock_update_local_ms;
+    }
+    dashcdg_rx_format_audio_gate_locked(&g_receiver, local_now_ms, audio_gate, sizeof(audio_gate));
+    dashcdg_rx_format_render_gate_locked(&g_receiver, render_gate, sizeof(render_gate));
+
+    snprintf(
+            hud_line_a,
+            hud_line_a_size,
+            "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu snap:%llu/%llu fec:%llu/%llu rec:%llu/%llu ptp:%llu/%llu",
+            (unsigned long long) g_receiver.datagrams_received,
+            (unsigned long long) g_receiver.parse_failures,
+            (unsigned long long) g_receiver.announce_packets,
+            (unsigned long long) g_receiver.asset_chunk_packets,
+            (unsigned long long) g_receiver.clock_beacon_packets,
+            (unsigned long long) g_receiver.audio_packets,
+            (unsigned long long) g_receiver.cdg_batch_packets,
+            (unsigned long long) g_receiver.cdg_snapshot_packets,
+            (unsigned long long) g_receiver.cdg_snapshots_applied,
+            (unsigned long long) g_receiver.fec_audio_packets,
+            (unsigned long long) g_receiver.fec_cdg_packets,
+            (unsigned long long) g_receiver.fec_audio_recovered,
+            (unsigned long long) g_receiver.fec_cdg_recovered,
+            (unsigned long long) g_receiver.ptp_delay_req_packets,
+            (unsigned long long) g_receiver.ptp_delay_resp_packets
+    );
+    snprintf(
+            hud_line_b,
+            hud_line_b_size,
+            "prefix:%u/%u pend:%zu/%zu hot:%zu/%zu mute:%s gate:%s render:%s | off:%lld path:%lld step:%lld/%lld hold:%llums dg:%llums stall:%llums",
+            (unsigned int) hud_prefix_bytes,
+            (unsigned int) g_receiver.asset_size,
+            pending_audio,
+            pending_cdg,
+            audio_repairable,
+            cdg_repairable,
+            muted ? "on" : "off",
+            audio_gate,
+            render_gate,
+            (long long) g_receiver.sender_offset_ms,
+            (long long) g_receiver.sender_path_delay_ms,
+            (long long) g_receiver.sender_offset_step_ms,
+            (long long) g_receiver.sender_path_step_ms,
+            (unsigned long long) clock_hold_ms,
+            (unsigned long long) hud_since_last_dg_ms,
+            (unsigned long long) hud_stall_ms
+    );
+}
+
 static int dashcdg_rx_claim_audio_start_locked(void) {
     uint64_t local_now_ms;
     uint64_t sender_now_ms;
@@ -2682,76 +2650,7 @@ static void display(void) {
     pthread_mutex_lock(&g_receiver.mutex);
     show_hud = g_hud_visible;
     if (show_hud) {
-        uint32_t hud_prefix_bytes = 0;
-        uint64_t hud_since_last_dg_ms = 0;
-        uint64_t hud_stall_ms = 0;
-        uint64_t clock_hold_ms = 0;
-        size_t pending_audio = 0;
-        size_t pending_cdg = 0;
-        size_t audio_repairable = 0;
-        size_t cdg_repairable = 0;
-        char audio_gate[64];
-        char render_gate[64];
-        int muted = g_audio != NULL ? dashcdg_desktop_audio_is_muted(g_audio) : g_audio_muted;
-
-        pending_audio = dashcdg_audio_jitter_occupied_count(&g_receiver.audio_jitter);
-        pending_cdg = dashcdg_rx_pending_cdg_count(&g_receiver);
-        dashcdg_rx_collect_fec_group_stats(g_receiver.audio_fec_groups, NULL, NULL, &audio_repairable);
-        dashcdg_rx_collect_fec_group_stats(g_receiver.cdg_fec_groups, NULL, NULL, &cdg_repairable);
-        hud_prefix_bytes = receiver_prefix_bytes_snapshot(&g_receiver);
-        if (g_receiver.last_datagram_local_ms > 0U) {
-            hud_since_last_dg_ms = local_now_ms - g_receiver.last_datagram_local_ms;
-        }
-        if (g_receiver.last_progress_local_ms > 0U) {
-            hud_stall_ms = local_now_ms - g_receiver.last_progress_local_ms;
-        }
-        if (g_receiver.last_clock_update_local_ms > 0U) {
-            clock_hold_ms = local_now_ms - g_receiver.last_clock_update_local_ms;
-        }
-        dashcdg_rx_format_audio_gate_locked(&g_receiver, local_now_ms, audio_gate, sizeof(audio_gate));
-        dashcdg_rx_format_render_gate_locked(&g_receiver, render_gate, sizeof(render_gate));
-
-        snprintf(
-                hud_line_a,
-                sizeof(hud_line_a),
-                "RX dg:%llu fail:%llu | ann:%llu ch:%llu bc:%llu aud:%llu live:%llu snap:%llu/%llu fec:%llu/%llu rec:%llu/%llu ptp:%llu/%llu",
-                (unsigned long long) g_receiver.datagrams_received,
-                (unsigned long long) g_receiver.parse_failures,
-                (unsigned long long) g_receiver.announce_packets,
-                (unsigned long long) g_receiver.asset_chunk_packets,
-                (unsigned long long) g_receiver.clock_beacon_packets,
-                (unsigned long long) g_receiver.audio_packets,
-                (unsigned long long) g_receiver.cdg_batch_packets,
-                (unsigned long long) g_receiver.cdg_snapshot_packets,
-                (unsigned long long) g_receiver.cdg_snapshots_applied,
-                (unsigned long long) g_receiver.fec_audio_packets,
-                (unsigned long long) g_receiver.fec_cdg_packets,
-                (unsigned long long) g_receiver.fec_audio_recovered,
-                (unsigned long long) g_receiver.fec_cdg_recovered,
-                (unsigned long long) g_receiver.ptp_delay_req_packets,
-                (unsigned long long) g_receiver.ptp_delay_resp_packets
-        );
-        snprintf(
-                hud_line_b,
-                sizeof(hud_line_b),
-                "prefix:%u/%u pend:%zu/%zu hot:%zu/%zu mute:%s gate:%s render:%s | off:%lld path:%lld step:%lld/%lld hold:%llums dg:%llums stall:%llums",
-                (unsigned int) hud_prefix_bytes,
-                (unsigned int) g_receiver.asset_size,
-                pending_audio,
-                pending_cdg,
-                audio_repairable,
-                cdg_repairable,
-                muted ? "on" : "off",
-                audio_gate,
-                render_gate,
-                (long long) g_receiver.sender_offset_ms,
-                (long long) g_receiver.sender_path_delay_ms,
-                (long long) g_receiver.sender_offset_step_ms,
-                (long long) g_receiver.sender_path_step_ms,
-                (unsigned long long) clock_hold_ms,
-                (unsigned long long) hud_since_last_dg_ms,
-                (unsigned long long) hud_stall_ms
-        );
+        dashcdg_rx_fill_hud_lines_locked(local_now_ms, hud_line_a, sizeof(hud_line_a), hud_line_b, sizeof(hud_line_b));
     }
     pthread_mutex_unlock(&g_receiver.mutex);
 
@@ -2824,6 +2723,107 @@ static void resize_callback(int width, int height) {
     dashcdg_gl_renderer_resize(&g_renderer, width, height);
 }
 
+#ifdef _WIN32
+static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
+    (void) user;
+
+    if (!down) {
+        return;
+    }
+    if (vk == 'I' || vk == 'i' || vk == 0x49) {
+        pthread_mutex_lock(&g_receiver.mutex);
+        g_hud_visible = !g_hud_visible;
+        fprintf(stdout, "[rx] HUD %s\n", g_hud_visible ? "enabled" : "hidden");
+        fflush(stdout);
+        pthread_mutex_unlock(&g_receiver.mutex);
+    } else if (vk == 'M' || vk == 'm' || vk == 0x4D) {
+        pthread_mutex_lock(&g_receiver.mutex);
+        g_audio_muted = !g_audio_muted;
+        if (g_audio != NULL) {
+            dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+        }
+        fprintf(stdout, "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
+        fflush(stdout);
+        pthread_mutex_unlock(&g_receiver.mutex);
+    } else if (vk == 'S' || vk == 's' || vk == 0x53) {
+        pthread_mutex_lock(&g_receiver.mutex);
+        dashcdg_rx_print_status_locked();
+        pthread_mutex_unlock(&g_receiver.mutex);
+    }
+}
+
+static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
+    static uint8_t rgba_frame[DASHCDG_CDG_RGBA_BYTES];
+    struct dashcdg_win32_gdi_view *view = NULL;
+    const char *title = "dashcdg desktop receiver (GDI)";
+
+    (void) argc;
+    if (argv != NULL && argv[0] != NULL) {
+        title = argv[0];
+    }
+
+    if (!dashcdg_win32_gdi_view_create(
+                &view,
+                title,
+                DASHCDG_VISIBLE_WIDTH * 4,
+                DASHCDG_VISIBLE_HEIGHT * 4,
+                dashcdg_rx_win32_gdi_on_key,
+                NULL
+        )) {
+        fprintf(stderr, "[rx] failed to create Win32 GDI window\n");
+        return;
+    }
+    while (dashcdg_win32_gdi_view_poll(view)) {
+        struct dashcdg_rx_render_snapshot render_snapshot;
+        struct dashcdg_cdg_state connecting_state;
+        int have_render_snapshot = 0;
+        int show_connecting = 0;
+        int reconnecting = 0;
+        uint64_t local_now_ms = dashcdg_clock_now_ms();
+        char hud_line_a[256];
+        char hud_line_b[256];
+        int show_hud = 0;
+
+        pthread_mutex_lock(&g_render_mutex);
+        if (g_render_snapshot.valid) {
+            render_snapshot = g_render_snapshot;
+            have_render_snapshot = 1;
+        }
+        pthread_mutex_unlock(&g_render_mutex);
+
+        pthread_mutex_lock(&g_receiver.mutex);
+        if (g_receiver.last_datagram_local_ms == 0U) {
+            show_connecting = 1;
+        } else if (local_now_ms - g_receiver.last_datagram_local_ms >= DASHCDG_STREAM_LOSS_CONNECTING_MS) {
+            show_connecting = 1;
+            reconnecting = 1;
+        }
+        show_hud = g_hud_visible;
+        if (show_hud) {
+            dashcdg_rx_fill_hud_lines_locked(local_now_ms, hud_line_a, sizeof(hud_line_a), hud_line_b, sizeof(hud_line_b));
+        } else {
+            hud_line_a[0] = '\0';
+            hud_line_b[0] = '\0';
+        }
+        pthread_mutex_unlock(&g_receiver.mutex);
+
+        if (show_connecting) {
+            dashcdg_rx_render_connecting_state(&connecting_state, local_now_ms, reconnecting);
+            dashcdg_cdg_state_to_rgba8(&connecting_state, rgba_frame);
+        } else if (have_render_snapshot) {
+            dashcdg_cdg_state_to_rgba8(&render_snapshot.state, rgba_frame);
+        } else {
+            memset(rgba_frame, 0, sizeof(rgba_frame));
+        }
+
+        dashcdg_win32_gdi_view_present_rgba(view, rgba_frame, sizeof(rgba_frame), show_hud, hud_line_a, hud_line_b);
+        dashcdg_sleep_ms(DASHCDG_RENDER_FRAME_INTERVAL_MS);
+    }
+
+    dashcdg_win32_gdi_view_destroy(view);
+}
+#endif
+
 struct dashcdg_glut_bootstrap {
     int argc;
     char **argv;
@@ -2874,6 +2874,17 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_headless = 1;
             continue;
         }
+#ifndef _WIN32
+        if (strcmp(argv[i], "--win-gdi") == 0) {
+            fprintf(stderr, "%s: --win-gdi is only supported on Windows desktop builds\n", argv[0]);
+            return 1;
+        }
+#else
+        if (strcmp(argv[i], "--win-gdi") == 0) {
+            g_rx_use_win_gdi = 1;
+            continue;
+        }
+#endif
 
         if (positional_index >= 2) {
             dashcdg_rx_print_usage(argv[0]);
@@ -2898,6 +2909,11 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         return 1;
     }
 
+    if (g_headless && g_rx_use_win_gdi) {
+        fprintf(stderr, "%s: cannot combine --headless and --win-gdi\n", argv[0]);
+        return 1;
+    }
+
     if (!dashcdg_rx_parse_ipv4_address(g_endpoint_address, &g_endpoint_in_addr)) {
         fprintf(stderr, "invalid endpoint address: %s\n", g_endpoint_address);
         return 1;
@@ -2912,7 +2928,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_endpoint_address,
             port,
             g_headless ? " (headless stdout stats mode)" :
-                    " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, S for stats line to stdout)"
+                    (g_rx_use_win_gdi ?
+                            " (GDI window; HUD hidden by default, press I/M/S as in GL mode)" :
+                            " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, S for stats line to stdout)")
     );
     fflush(stdout);
 
@@ -2937,14 +2955,21 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         return 0;
     }
 
-    render_bootstrap.argc = argc;
-    render_bootstrap.argv = argv;
-    /*
-     * FreeGLUT uses the Win32 message pump; glutInit / glutCreateWindow / glutMainLoop
-     * must run on the process primary thread. Running this in pthread_create reliably
-     * crashes on Windows XP (illegal access / faultrep dump with no useful UI text).
-     */
-    (void) dashcdg_rx_render_thread_main(&render_bootstrap);
+#ifdef _WIN32
+    if (g_rx_use_win_gdi) {
+        dashcdg_rx_run_win32_gdi_main(argc, argv);
+    } else
+#endif
+    {
+        render_bootstrap.argc = argc;
+        render_bootstrap.argv = argv;
+        /*
+         * FreeGLUT uses the Win32 message pump; glutInit / glutCreateWindow / glutMainLoop
+         * must run on the process primary thread. Running this in pthread_create reliably
+         * crashes on Windows XP (illegal access / faultrep dump with no useful UI text).
+         */
+        (void) dashcdg_rx_render_thread_main(&render_bootstrap);
+    }
 
     dashcdg_net_cleanup();
     if (g_audio != NULL) {

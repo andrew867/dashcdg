@@ -1,0 +1,73 @@
+#ifndef DASHCDG_CDG_BATCH_JITTER_H
+#define DASHCDG_CDG_BATCH_JITTER_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "dashcdg/protocol.h"
+
+enum {
+    DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT = 64
+};
+
+struct dashcdg_cdg_batch_jitter_frame {
+    int occupied;
+    uint64_t packet_start_index;
+    uint8_t packet_count;
+    uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+};
+
+struct dashcdg_cdg_batch_jitter_buffer {
+    struct dashcdg_cdg_batch_jitter_frame slots[DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT];
+    int initialized;
+    uint64_t next_packet_index;
+    uint64_t next_playback_ms;
+    uint64_t reordered_batches;
+    uint64_t pending_drops;
+};
+
+struct dashcdg_cdg_batch_jitter_drain_input {
+    int have_sender_playback;
+    uint64_t sender_playback_now_ms;
+    uint32_t late_grace_ms;
+    int late_gate;
+};
+
+enum dashcdg_cdg_batch_drain_step {
+    DASHCDG_CDG_BATCH_DRAIN_STOP = 0,
+    DASHCDG_CDG_BATCH_DRAIN_APPLY,
+    DASHCDG_CDG_BATCH_DRAIN_SKIP
+};
+
+void dashcdg_cdg_batch_jitter_init(struct dashcdg_cdg_batch_jitter_buffer *jb);
+void dashcdg_cdg_batch_jitter_clear(struct dashcdg_cdg_batch_jitter_buffer *jb);
+
+int dashcdg_cdg_batch_jitter_insert(
+        struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_start_index,
+        uint8_t packet_count,
+        const uint8_t *payload,
+        int count_stats
+);
+
+struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_find(
+        const struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_start_index
+);
+
+struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_oldest(const struct dashcdg_cdg_batch_jitter_buffer *jb);
+
+size_t dashcdg_cdg_batch_jitter_occupied_count(const struct dashcdg_cdg_batch_jitter_buffer *jb);
+
+enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
+        struct dashcdg_cdg_batch_jitter_buffer *jb,
+        const struct dashcdg_cdg_batch_jitter_drain_input *in,
+        struct dashcdg_cdg_batch_jitter_frame **out_frame,
+        uint64_t *out_missing_skips_delta
+);
+
+void dashcdg_cdg_batch_jitter_note_applied(struct dashcdg_cdg_batch_jitter_buffer *jb, struct dashcdg_cdg_batch_jitter_frame *slot);
+
+void dashcdg_cdg_batch_jitter_apply_snapshot_seek(struct dashcdg_cdg_batch_jitter_buffer *jb, uint64_t packet_index);
+
+#endif
