@@ -23,15 +23,25 @@ WINDOWS_MINGW_PREFIX := $(shell if [ -d /c/msys64/$(MINGW_ARCH) ]; then echo /c/
 WINDOWS_MINGW_PREFIX_WIN := $(shell if [ -n "$(WINDOWS_MINGW_PREFIX)" ]; then cygpath -m "$(WINDOWS_MINGW_PREFIX)"; fi)
 ifneq ($(WINDOWS_MINGW_PREFIX),)
 export PATH := $(WINDOWS_MINGW_PREFIX)/bin:$(PATH)
-override CC := gcc
-override AR := ar
+# Use the prefix’s driver explicitly so MINGW_ARCH=mingw32 never picks up mingw64’s gcc
+# from PATH (would reject -march=pentium3: “does not support x86-64 instruction set”).
+override CC := $(WINDOWS_MINGW_PREFIX)/bin/gcc
+override AR := $(WINDOWS_MINGW_PREFIX)/bin/ar
 INCLUDES += -I$(WINDOWS_MINGW_PREFIX_WIN)/include
 EXTRA_LDFLAGS += -L$(WINDOWS_MINGW_PREFIX_WIN)/lib
 WINDOWS_LEGACY_TARGET ?= 0
 ifeq ($(WINDOWS_LEGACY_TARGET),1)
 WINDOWS_LEGACY_WINNT := 0x0501
 CFLAGS += -D_WIN32_WINNT=$(WINDOWS_LEGACY_WINNT) -DWINVER=$(WINDOWS_LEGACY_WINNT)
-EXTRA_LDFLAGS += -Wl,--major-os-version=5 -Wl,--minor-os-version=1 -Wl,--major-subsystem-version=5 -Wl,--minor-subsystem-version=1 -Wl,--disable-high-entropy-va
+EXTRA_LDFLAGS += -Wl,--major-os-version=5 -Wl,--minor-os-version=1 -Wl,--major-subsystem-version=5 -Wl,--minor-subsystem-version=1
+# 64-bit PE only: i686 GNU ld rejects --disable-high-entropy-va (breaks mingw32 link).
+ifneq ($(MINGW_ARCH),mingw32)
+EXTRA_LDFLAGS += -Wl,--disable-high-entropy-va
+endif
+# Pre-SSE2 CPUs (e.g. Pentium III): default i686 packages often tune for Pentium 4 / SSE2.
+ifeq ($(MINGW_ARCH),mingw32)
+CFLAGS += -march=pentium3 -mtune=pentium3
+endif
 endif
 WINDOWS_RUNTIME_DLLS := $(shell for pattern in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
 else
@@ -55,18 +65,19 @@ WINDOWS_PACKAGE_ZIP = $(RELEASE_DIR)/dashcdg-windows-$(WINDOWS_ARCH_LABEL)-porta
 WINDOWS_ZIP_X64 := build/amd64/release/dashcdg-windows-x64-portable.zip
 WINDOWS_ZIP_X86 := build/x86/release/dashcdg-windows-x86-portable.zip
 
-CORE_SOURCES := core/src/cdg.c core/src/media_clock.c
+CORE_SOURCES := core/src/cdg.c core/src/media_clock.c core/src/cdg_raster.c core/src/audio_jitter.c
 PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
-CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o
+CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
-DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
+DESKTOP_APP_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_opus_codec.o $(OBJ_DIR)/desktop_sbc_like_codec.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_app_tx.o $(OBJ_DIR)/desktop_app_rx.o
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
 DESKTOP_LIB := $(LIB_DIR)/libdashcdg_desktop.a
 
 TEST_BIN := $(BIN_DIR)/test-core
+TEST_TRANSPORT_UDP_BIN := $(BIN_DIR)/test-transport-udp
 PLAYER_BIN := $(BIN_DIR)/desktop-player
 TX_BIN := $(BIN_DIR)/desktop-tx
 RX_BIN := $(BIN_DIR)/desktop-rx
@@ -106,6 +117,12 @@ $(OBJ_DIR)/core_cdg.o: core/src/cdg.c
 $(OBJ_DIR)/core_media_clock.o: core/src/media_clock.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/core_cdg_raster.o: core/src/cdg_raster.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/core_audio_jitter.o: core/src/audio_jitter.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/proto_protocol.o: proto/src/protocol.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -136,6 +153,9 @@ $(OBJ_DIR)/desktop_gl_renderer.o: platform/desktop/src/gl_renderer.c
 $(OBJ_DIR)/desktop_stream_runtime.o: platform/desktop/src/stream_runtime.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/desktop_transport_udp.o: platform/desktop/src/transport_udp.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/desktop_app_tx.o: platform/desktop/src/app_tx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -143,6 +163,9 @@ $(OBJ_DIR)/desktop_app_rx.o: platform/desktop/src/app_rx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/test_core.o: tests/test_core.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/test_transport_udp.o: tests/test_transport_udp.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/app_desktop_player.o: apps/desktop-player/main.c
@@ -156,6 +179,9 @@ $(OBJ_DIR)/app_desktop_rx.o: apps/desktop-rx/main.c
 
 $(TEST_BIN): $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
+
+$(TEST_TRANSPORT_UDP_BIN): $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o $(NET_LIBS)
 
 $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS)
@@ -175,8 +201,9 @@ ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
-test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN)
+test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN) $(TEST_TRANSPORT_UDP_BIN)
 	$(TEST_BIN)
+	$(TEST_TRANSPORT_UDP_BIN)
 
 package: debug
 ifneq ($(WINDOWS_RUNTIME_DLLS),)

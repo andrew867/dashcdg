@@ -4253,7 +4253,6 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     int remaining_positionals;
     int is_multicast;
     int is_broadcast;
-    pthread_t render_thread;
     struct dashcdg_tx_glut_bootstrap render_bootstrap;
     struct dashcdg_multicast_interface multicast_interfaces[DASHCDG_MAX_MULTICAST_INTERFACES];
     size_t multicast_interface_count = 0U;
@@ -4581,8 +4580,11 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 
     render_bootstrap.argc = argc;
     render_bootstrap.argv = argv;
-    pthread_create(&render_thread, NULL, dashcdg_tx_render_thread_main, &render_bootstrap);
-    pthread_join(render_thread, NULL);
+    /*
+     * Same Win32 primary-thread requirement as RX: GLUT must not run on a pthread
+     * worker (breaks Windows XP; see dashcdg_desktop_rx_main).
+     */
+    (void) dashcdg_tx_render_thread_main(&render_bootstrap);
 
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);

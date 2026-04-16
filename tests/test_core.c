@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "dashcdg/audio_jitter.h"
 #include "dashcdg/cdg.h"
+#include "dashcdg/cdg_raster.h"
 #include "dashcdg/common.h"
 #include "dashcdg/fec.h"
 #include "dashcdg/media_clock.h"
@@ -446,6 +448,110 @@ static void test_media_clock(void) {
     assert(clock_state.path_delay_ms == 12);
 }
 
+static void test_audio_jitter_duplicate_drop(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    const uint8_t pl[] = {0xab, 0xcd};
+    uint64_t drops_before;
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 100U, 5000U, 20U, 0U, 0U, pl, (uint16_t) sizeof(pl), 1) == 1);
+    assert(dashcdg_audio_jitter_occupied_count(&jb) == 1U);
+    drops_before = jb.pending_drops;
+    assert(dashcdg_audio_jitter_insert(&jb, 100U, 5000U, 20U, 0U, 0U, pl, (uint16_t) sizeof(pl), 1) == 0);
+    assert(jb.pending_drops > drops_before);
+}
+
+static void test_audio_jitter_drain_apply_and_note(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    struct dashcdg_audio_jitter_frame *frame = NULL;
+    struct dashcdg_audio_jitter_drain_input din;
+    uint64_t miss = 0U;
+    const uint8_t pl[] = {0x77};
+    enum dashcdg_audio_drain_step step;
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 1U, 100U, 20U, 3U, 2U, pl, sizeof(pl), 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    step = dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss);
+    assert(step == DASHCDG_AUDIO_DRAIN_APPLY);
+    assert(frame != NULL);
+    assert(frame->media_sequence == 1U);
+    assert(frame->encoded_length == 1U);
+    assert(frame->encoded_bytes[0] == 0x77U);
+
+    dashcdg_audio_jitter_note_applied(&jb, frame, 20U);
+    assert(jb.next_media_sequence == 2U);
+    assert(dashcdg_audio_jitter_occupied_count(&jb) == 0U);
+}
+
+static void test_audio_jitter_drain_skip_missing(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    struct dashcdg_audio_jitter_frame *frame = NULL;
+    struct dashcdg_audio_jitter_drain_input din;
+    uint64_t miss = 0U;
+    const uint8_t one[] = {0x31};
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 10U, 2000U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.sender_playback_now_ms = 9000U;
+    din.announced_audio_frame_ms = 20U;
+    din.announced_playout_delay_ms = 80U;
+    din.late_grace_ms = 0U;
+    din.audio_stream_started = 1;
+    din.audio_buffered_ms = 100U;
+
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_APPLY);
+    dashcdg_audio_jitter_note_applied(&jb, frame, 20U);
+
+    miss = 0U;
+    frame = NULL;
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_SKIP);
+    assert(miss == 1U);
+    assert(jb.next_media_sequence == 12U);
+}
+
+static void test_cdg_raster_rgba_matches_memory_preset(void) {
+    struct dashcdg_cdg_state state;
+    struct dashcdg_subchannel_packet pkt = make_packet(DASHCDG_INSN_MEMORY_PRESET);
+    uint8_t rgba[DASHCDG_CDG_RGBA_BYTES];
+
+    dashcdg_cdg_state_init(&state);
+    state.color_table[4] = 0x102030;
+    state.transparency[4] = 0U;
+    ((struct dashcdg_insn_memory_preset *) pkt.data)->color = 4;
+    ((struct dashcdg_insn_memory_preset *) pkt.data)->repeat = 0;
+    assert(dashcdg_cdg_state_process_packet(&state, &pkt) == 1);
+
+    dashcdg_cdg_state_to_rgba8(&state, rgba);
+    assert(rgba[0] == 0x10U);
+    assert(rgba[1] == 0x20U);
+    assert(rgba[2] == 0x30U);
+    assert(rgba[3] == 255U);
+}
+
+static void test_cdg_raster_alpha_from_transparency(void) {
+    struct dashcdg_cdg_state state;
+    struct dashcdg_subchannel_packet pkt = make_packet(DASHCDG_INSN_MEMORY_PRESET);
+    uint8_t rgba[DASHCDG_CDG_RGBA_BYTES];
+
+    dashcdg_cdg_state_init(&state);
+    state.color_table[6] = 0x00aabb;
+    state.transparency[6] = 63U;
+    ((struct dashcdg_insn_memory_preset *) pkt.data)->color = 6;
+    ((struct dashcdg_insn_memory_preset *) pkt.data)->repeat = 0;
+    assert(dashcdg_cdg_state_process_packet(&state, &pkt) == 1);
+
+    dashcdg_cdg_state_to_rgba8(&state, rgba);
+    assert(rgba[0] == 0x00U);
+    assert(rgba[1] == 0xaaU);
+    assert(rgba[2] == 0xbbU);
+    assert(rgba[3] == 0U);
+}
+
 static void test_fec_recovery(void) {
     struct dashcdg_fec_parity_state parity;
     const uint8_t *known_payloads[2];
@@ -479,6 +585,11 @@ int main(void) {
     test_protocol_roundtrip();
     test_protocol_v4_roundtrip();
     test_media_clock();
+    test_audio_jitter_duplicate_drop();
+    test_audio_jitter_drain_apply_and_note();
+    test_audio_jitter_drain_skip_missing();
+    test_cdg_raster_rgba_matches_memory_preset();
+    test_cdg_raster_alpha_from_transparency();
     test_fec_recovery();
 
     puts("all tests passed");

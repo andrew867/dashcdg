@@ -5,6 +5,14 @@
 
 #include <GL/glut.h>
 
+#include "dashcdg/cdg_raster.h"
+#include "dashcdg/common.h"
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(DASHCDG_VISIBLE_WIDTH == 288, "gl_renderer fragment shader u-scale must match DASHCDG_VISIBLE_WIDTH");
+_Static_assert(DASHCDG_VISIBLE_HEIGHT == 192, "gl_renderer fragment shader v-scale must match DASHCDG_VISIBLE_HEIGHT");
+#endif
+
 static const char *DASHCDG_VERTEX_SHADER =
         "#version 130\n"
         "out vec2 vertexCoord;\n"
@@ -15,29 +23,12 @@ static const char *DASHCDG_VERTEX_SHADER =
 
 static const char *DASHCDG_FRAGMENT_SHADER =
         "#version 130\n"
-        "#extension GL_EXT_gpu_shader4 : enable\n"
-        "uniform int cdgColorMap[16];\n"
-        "uniform int cdgTransparencyMap[16];\n"
-        "uniform sampler2D cdgFramebuffer;\n"
-        "uniform int cdgViewportX;\n"
-        "uniform int cdgViewportY;\n"
-        "uniform int cdgOffsetX;\n"
-        "uniform int cdgOffsetY;\n"
+        "uniform sampler2D cdgRgba;\n"
         "in vec2 vertexCoord;\n"
         "void main() {\n"
-        "    int x = int(vertexCoord.x) + cdgViewportX + cdgOffsetX;\n"
-        "    int y = int(vertexCoord.y) + cdgViewportY + cdgOffsetY;\n"
-        "    x = clamp(x, 0, 299);\n"
-        "    y = clamp(y, 0, 215);\n"
-        "    int colorIndex = int(texelFetch(cdgFramebuffer, ivec2(x, y), 0).r * 255.0 + 0.5);\n"
-        "    int rgb = cdgColorMap[colorIndex];\n"
-        "    float alpha = 1.0 - (float(cdgTransparencyMap[colorIndex]) / 63.0);\n"
-        "    gl_FragColor = vec4(\n"
-        "        float((rgb >> 16) & 0xFF) / 255.0,\n"
-        "        float((rgb >> 8) & 0xFF) / 255.0,\n"
-        "        float(rgb & 0xFF) / 255.0,\n"
-        "        alpha\n"
-        "    );\n"
+        "    float u = (vertexCoord.x + 0.5) / 288.0;\n"
+        "    float v = 1.0 - ((vertexCoord.y + 0.5) / 192.0);\n"
+        "    gl_FragColor = texture2D(cdgRgba, vec2(u, v));\n"
         "}\n";
 
 static GLuint dashcdg_compile_shader(GLenum type, const char *source) {
@@ -95,22 +86,12 @@ int dashcdg_gl_renderer_init(struct dashcdg_gl_renderer *renderer) {
     glDeleteShader(vertex_shader);
     glDeleteShader(fragment_shader);
 
-    renderer->color_table_location = glGetUniformLocation(renderer->program, "cdgColorMap");
-    renderer->transparency_location = glGetUniformLocation(renderer->program, "cdgTransparencyMap");
-    renderer->framebuffer_location = glGetUniformLocation(renderer->program, "cdgFramebuffer");
-    renderer->offset_x_location = glGetUniformLocation(renderer->program, "cdgOffsetX");
-    renderer->offset_y_location = glGetUniformLocation(renderer->program, "cdgOffsetY");
-    {
-        GLint viewport_x_location = glGetUniformLocation(renderer->program, "cdgViewportX");
-        GLint viewport_y_location = glGetUniformLocation(renderer->program, "cdgViewportY");
-        if (viewport_x_location == -1 || viewport_y_location == -1) {
-            fprintf(stderr, "failed to get viewport uniform locations\n");
-            return 0;
-        }
-        glUseProgram(renderer->program);
-        glUniform1i(viewport_x_location, DASHCDG_VISIBLE_X);
-        glUniform1i(viewport_y_location, DASHCDG_VISIBLE_Y);
-        glUseProgram(0);
+    renderer->rgba_sampler_location = glGetUniformLocation(renderer->program, "cdgRgba");
+    if (renderer->rgba_sampler_location == -1) {
+        fprintf(stderr, "failed to get cdgRgba uniform location\n");
+        glDeleteProgram(renderer->program);
+        renderer->program = 0;
+        return 0;
     }
 
     glGenTextures(1, &renderer->texture_id);
@@ -130,15 +111,13 @@ void dashcdg_gl_renderer_resize(struct dashcdg_gl_renderer *renderer, int width,
 }
 
 void dashcdg_gl_renderer_render(struct dashcdg_gl_renderer *renderer, const struct dashcdg_cdg_state *state) {
-    int transparency[DASHCDG_COLORS];
+    static uint8_t rgba_scratch[DASHCDG_CDG_RGBA_BYTES];
 
     if (renderer == NULL || state == NULL) {
         return;
     }
 
-    for (int i = 0; i < DASHCDG_COLORS; ++i) {
-        transparency[i] = state->transparency[i];
-    }
+    dashcdg_cdg_state_to_rgba8(state, rgba_scratch);
 
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -147,34 +126,24 @@ void dashcdg_gl_renderer_render(struct dashcdg_gl_renderer *renderer, const stru
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, renderer->texture_id);
     glEnable(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexImage2D(
             GL_TEXTURE_2D,
             0,
-            GL_R8,
-            DASHCDG_SCREEN_WIDTH,
-            DASHCDG_SCREEN_HEIGHT,
+            GL_RGBA,
+            DASHCDG_VISIBLE_WIDTH,
+            DASHCDG_VISIBLE_HEIGHT,
             0,
-            GL_RED,
+            GL_RGBA,
             GL_UNSIGNED_BYTE,
-            state->framebuffer
+            rgba_scratch
     );
 
-    glUniform1i(renderer->framebuffer_location, 0);
-    glUniform1iv(renderer->color_table_location, DASHCDG_COLORS, state->color_table);
-    glUniform1iv(renderer->transparency_location, DASHCDG_COLORS, transparency);
-    glUniform1i(
-            renderer->offset_x_location,
-            state->display_h_offset >= DASHCDG_TILE_WIDTH ? DASHCDG_TILE_WIDTH - 1 : state->display_h_offset
-    );
-    glUniform1i(
-            renderer->offset_y_location,
-            state->display_v_offset >= DASHCDG_TILE_HEIGHT ? DASHCDG_TILE_HEIGHT - 1 : state->display_v_offset
-    );
+    glUniform1i(renderer->rgba_sampler_location, 0);
 
     glBegin(GL_QUADS);
     glVertex2f(0.0f, 0.0f);

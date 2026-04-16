@@ -8,11 +8,7 @@
 struct dashcdg_gl_renderer {
     GLuint program;
     GLuint texture_id;
-    GLint color_table_location;
-    GLint transparency_location;
-    GLint framebuffer_location;
-    GLint offset_x_location;
-    GLint offset_y_location;
+    GLint rgba_sampler_location;
 };
 
 int dashcdg_gl_renderer_init(struct dashcdg_gl_renderer *renderer);

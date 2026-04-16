@@ -1,0 +1,188 @@
+#include "dashcdg/audio_jitter.h"
+
+#include <string.h>
+
+void dashcdg_audio_jitter_init(struct dashcdg_audio_jitter_buffer *jb) {
+    if (jb == NULL) {
+        return;
+    }
+    memset(jb, 0, sizeof(*jb));
+}
+
+void dashcdg_audio_jitter_clear(struct dashcdg_audio_jitter_buffer *jb) {
+    dashcdg_audio_jitter_init(jb);
+}
+
+struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_find(
+        const struct dashcdg_audio_jitter_buffer *jb,
+        uint32_t media_sequence
+) {
+    if (jb == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+        if (jb->slots[i].occupied && jb->slots[i].media_sequence == media_sequence) {
+            return (struct dashcdg_audio_jitter_frame *) &jb->slots[i];
+        }
+    }
+
+    return NULL;
+}
+
+struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_oldest(const struct dashcdg_audio_jitter_buffer *jb) {
+    struct dashcdg_audio_jitter_frame *oldest = NULL;
+
+    if (jb == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+        if (!jb->slots[i].occupied) {
+            continue;
+        }
+        if (oldest == NULL || jb->slots[i].media_sequence < oldest->media_sequence) {
+            oldest = (struct dashcdg_audio_jitter_frame *) &jb->slots[i];
+        }
+    }
+
+    return oldest;
+}
+
+size_t dashcdg_audio_jitter_occupied_count(const struct dashcdg_audio_jitter_buffer *jb) {
+    size_t n = 0U;
+
+    if (jb == NULL) {
+        return 0U;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+        if (jb->slots[i].occupied) {
+            ++n;
+        }
+    }
+
+    return n;
+}
+
+int dashcdg_audio_jitter_insert(
+        struct dashcdg_audio_jitter_buffer *jb,
+        uint32_t media_sequence,
+        uint64_t playback_ms,
+        uint8_t frame_ms,
+        uint8_t audio_profile_id,
+        uint8_t codec_id,
+        const uint8_t *payload,
+        uint16_t payload_length,
+        int count_stats
+) {
+    struct dashcdg_audio_jitter_frame *slot = NULL;
+
+    if (jb == NULL || payload == NULL || payload_length == 0 || payload_length > DASHCDG_AUDIO_JITTER_MAX_PAYLOAD) {
+        return 0;
+    }
+
+    if (!jb->initialized) {
+        jb->next_media_sequence = media_sequence;
+        jb->next_playback_ms = playback_ms;
+        jb->initialized = 1;
+    } else if (media_sequence < jb->next_media_sequence) {
+        if (count_stats) {
+            jb->pending_drops++;
+        }
+        return 0;
+    } else if (count_stats && media_sequence > jb->next_media_sequence) {
+        jb->reordered_packets++;
+    }
+
+    if (dashcdg_audio_jitter_find(jb, media_sequence) != NULL) {
+        if (count_stats) {
+            jb->pending_drops++;
+        }
+        return 0;
+    }
+
+    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+        if (!jb->slots[i].occupied) {
+            slot = &jb->slots[i];
+            break;
+        }
+    }
+    if (slot == NULL) {
+        if (count_stats) {
+            jb->pending_drops++;
+        }
+        return 0;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->occupied = 1;
+    slot->media_sequence = media_sequence;
+    slot->frame_ms = frame_ms;
+    slot->audio_profile_id = audio_profile_id;
+    slot->codec_id = codec_id;
+    slot->encoded_length = payload_length;
+    slot->playback_ms = playback_ms;
+    memcpy(slot->encoded_bytes, payload, payload_length);
+    return 1;
+}
+
+enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
+        struct dashcdg_audio_jitter_buffer *jb,
+        const struct dashcdg_audio_jitter_drain_input *in,
+        struct dashcdg_audio_jitter_frame **out_frame,
+        uint64_t *out_missing_skips_delta
+) {
+    struct dashcdg_audio_jitter_frame *frame;
+
+    if (jb == NULL || in == NULL || out_frame == NULL || out_missing_skips_delta == NULL) {
+        return DASHCDG_AUDIO_DRAIN_STOP;
+    }
+
+    *out_frame = NULL;
+    *out_missing_skips_delta = 0U;
+
+    if (!jb->initialized) {
+        return DASHCDG_AUDIO_DRAIN_STOP;
+    }
+
+    frame = dashcdg_audio_jitter_find(jb, jb->next_media_sequence);
+    if (frame != NULL) {
+        *out_frame = frame;
+        return DASHCDG_AUDIO_DRAIN_APPLY;
+    }
+
+    if (in->have_sender_playback && in->announced_audio_frame_ms > 0 &&
+            (in->audio_stream_started || in->audio_device_null != 0 ||
+                    in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
+            in->sender_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
+        struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
+
+        if (oldest != NULL && oldest->media_sequence > jb->next_media_sequence) {
+            *out_missing_skips_delta = (uint64_t) (oldest->media_sequence - jb->next_media_sequence);
+            jb->next_media_sequence = oldest->media_sequence;
+            jb->next_playback_ms = oldest->playback_ms;
+        } else {
+            *out_missing_skips_delta = 1U;
+            jb->next_media_sequence++;
+            jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+        }
+        return DASHCDG_AUDIO_DRAIN_SKIP;
+    }
+
+    return DASHCDG_AUDIO_DRAIN_STOP;
+}
+
+void dashcdg_audio_jitter_note_applied(
+        struct dashcdg_audio_jitter_buffer *jb,
+        struct dashcdg_audio_jitter_frame *slot,
+        uint8_t effective_frame_ms
+) {
+    if (jb == NULL || slot == NULL || !slot->occupied) {
+        return;
+    }
+
+    jb->next_media_sequence++;
+    jb->next_playback_ms = slot->playback_ms + (uint64_t) effective_frame_ms;
+    memset(slot, 0, sizeof(*slot));
+}
