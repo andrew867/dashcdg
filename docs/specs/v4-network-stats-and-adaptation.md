@@ -8,7 +8,9 @@ Observability and future control loops for multicast/unicast quality: loss, jitt
 
 **Packet type:** `DASHCDG_PACKET_V4_RX_STATS` (21), **version** `DASHCDG_PROTOCOL_VERSION_V4`.
 
-**Payload:** `struct dashcdg_v4_rx_stats_payload` in `proto/include/dashcdg/protocol.h` (52-byte body, big-endian on the wire).
+**Payload:** `struct dashcdg_v4_rx_stats_payload` in `proto/include/dashcdg/protocol.h`, big-endian on the wire. **v1** body is **52** bytes; **v2** body is **88** bytes (constants `DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE` / `_V2_SIZE`). Parsers accept **v1 or v2**; emitters use **v2** (`DASHCDG_V4_RX_STATS_PAYLOAD_SIZE`).
+
+**v1 fields (52 bytes)**
 
 | Field | Notes |
 | --- | --- |
@@ -23,11 +25,25 @@ Observability and future control loops for multicast/unicast quality: loss, jitt
 | `jitter_rms_ms` | EMA of \(\| \Delta t_{\mathrm{dg}} - 25\,\mathrm{ms} \|\) between consecutive datagrams (coarse inter-arrival spread). |
 | `loss_pct_x100` | Reserved (0 until a loss estimator exists). |
 | `v4_codec_id` | Announced decode path. |
-| `opus_bitrate_bps` | Reserved (0 on RX today). |
+| `opus_bitrate_bps` | Live decoder bitrate when populated; else 0. |
+
+**v2 extension (bytes 52–87, 36 bytes)**
+
+| Field | Notes |
+| --- | --- |
+| `fec_decode_attempts` | FEC repair paths exercised (audio path). |
+| `fec_recovery_failed` | FEC could not recover (count). |
+| `media_datagrams_lost_estimated` | Sequence-gap loss estimate (audio path). |
+| `cdg_fec_recovered` / `cdg_fec_failed` | CDG / subchannel repair counters when tracked. |
+| `jitter_p95_ms` / `jitter_max_ms` | Windowed jitter tail (optional; 0 if unused). |
+| `reorder_events` | Out-of-order datagrams before playout (optional). |
+| `receiver_instance_id` | Opaque id for de-duplication (0 = unset). |
+| `fec_group_size_observed` | Group size seen on wire (sanity vs session). |
+| `reserved2[3]` | Reserved; send zero. |
 
 **Serialization:** `dashcdg_protocol_serialize_v4_rx_stats()` — `proto/src/protocol.c`.
 
-**Receiver behaviour:** `desktop-rx` / `desktop-player rx` — `--rx-stats-ms <ms>` (**default off**; e.g. **2000** for periodic reports). **0** disables. Sends to the **same** IP + port as the session (`g_rx_stats_dest`). Opens a dedicated UDP socket in `dashcdg_rx_init_stats_sender()`.
+**Receiver behaviour:** `desktop-rx` / `desktop-player rx` — `--rx-stats-ms <ms>` (**default 2000** ms for periodic reports). **0** disables (no stats socket traffic). Sends to the **same** IP + port as the session (`g_rx_stats_dest`). Opens a dedicated UDP socket in `dashcdg_rx_init_stats_sender()`.
 
 **Transmitter behaviour:** The **PTP listener socket** (`g_tx_state.ptp_sockfd`) is bound to the media port and joins multicast; it receives **both** PTP delay requests and **v4 rx-stats** datagrams. `dashcdg_tx_ptp_thread_main` increments `g_tx_state.v4_rx_stats_packets_received` for each parsed stats packet.
 
@@ -35,7 +51,7 @@ Observability and future control loops for multicast/unicast quality: loss, jitt
 
 ## Minimum client → server (or controller) report fields (extended)
 
-The struct above matches the **minimal** column list from earlier design reviews. Additional fields (receiver id, song hash, rolling loss) can be added in a **v2** payload with a new packet type or a version byte inside the payload — not implemented yet.
+Wire **v2** includes FEC/error and tail-jitter fields above. Desktop RX still **zeros** most v2 counters until instrumentation lands; see [`v4-receiver-stats-aggregation-and-adaptation.md`](v4-receiver-stats-aggregation-and-adaptation.md) for aggregation policy. Future work: populate counters from runtime and optional `receiver_instance_id`.
 
 ## Server / TX → client (optional)
 
@@ -59,6 +75,7 @@ Outputs (future): Opus bitrate, FEC group size, `playout_delay_ms` via session u
 
 ## Related documents
 
+- [`v4-receiver-stats-aggregation-and-adaptation.md`](v4-receiver-stats-aggregation-and-adaptation.md) — multi-client aggregation, planned FEC/error metrics, adaptation policy notes
 - [`v4-display-audio-sync.md`](v4-display-audio-sync.md)
 - [`v4-audio-codecs.md`](v4-audio-codecs.md)
 - [`../architecture/desktop-streaming.md`](../architecture/desktop-streaming.md)

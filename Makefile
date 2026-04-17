@@ -290,7 +290,7 @@ $(OBJ_DIR)/core_cdg_batch_jitter.o: core/src/cdg_batch_jitter.c
 $(OBJ_DIR)/core_nb_ima_codec.o: core/src/nb_ima_codec.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJ_DIR)/proto_protocol.o: proto/src/protocol.c
+$(OBJ_DIR)/proto_protocol.o: proto/src/protocol.c proto/include/dashcdg/protocol.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/proto_fec.o: proto/src/fec.c

@@ -21,6 +21,8 @@
 #define DASHCDG_MAX_V4_VIDEO_DELTA_BYTES 1024U
 #define DASHCDG_MAX_V4_BACKFILL_CHUNK 1024U
 
+#define DASHCDG_PACKET_HEADER_SIZE 24U
+
 #define DASHCDG_STREAM_TYPE_AUDIO 1U
 #define DASHCDG_STREAM_TYPE_CDG 2U
 
@@ -297,7 +299,15 @@ struct dashcdg_v4_clock_sync_payload {
 /*
  * Receiver → network observability (low rate). Big-endian fields on the wire.
  * TX listens on the same UDP port as media (PTP socket) and counts/log these.
+ *
+ * v1 body = 52 bytes; v2 adds 36 bytes (FEC/error + jitter tails + identity).
+ * Parsers accept v1 or v2; emitters use v2 (DASHCDG_V4_RX_STATS_PAYLOAD_SIZE).
  */
+#define DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE 52U
+#define DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE 88U
+#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE
+
+#pragma pack(push, 1)
 struct dashcdg_v4_rx_stats_payload {
     uint32_t report_seq;
     uint64_t wall_now_ms;
@@ -313,7 +323,19 @@ struct dashcdg_v4_rx_stats_payload {
     uint8_t v4_codec_id;
     uint8_t reserved1[3];
     uint32_t opus_bitrate_bps;
+    uint32_t fec_decode_attempts;
+    uint32_t fec_recovery_failed;
+    uint32_t media_datagrams_lost_estimated;
+    uint32_t cdg_fec_recovered;
+    uint32_t cdg_fec_failed;
+    uint16_t jitter_p95_ms;
+    uint16_t jitter_max_ms;
+    uint32_t reorder_events;
+    uint32_t receiver_instance_id;
+    uint8_t fec_group_size_observed;
+    uint8_t reserved2[3];
 };
+#pragma pack(pop)
 
 struct dashcdg_packet_view {
     struct dashcdg_packet_header header;

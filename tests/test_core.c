@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -471,6 +472,8 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_clock_sync.playback_ms == 1234);
     assert(view.v4_clock_sync.startup_state == 2);
 
+    assert(sizeof(struct dashcdg_v4_rx_stats_payload) == DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE);
+
     memset(&rx_stats, 0, sizeof(rx_stats));
     rx_stats.report_seq = 3;
     rx_stats.wall_now_ms = 10002;
@@ -484,10 +487,21 @@ static void test_protocol_v4_roundtrip(void) {
     rx_stats.loss_pct_x100 = 150;
     rx_stats.v4_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
     rx_stats.opus_bitrate_bps = 96000;
+    rx_stats.fec_decode_attempts = 100;
+    rx_stats.fec_recovery_failed = 7;
+    rx_stats.media_datagrams_lost_estimated = 3;
+    rx_stats.cdg_fec_recovered = 11;
+    rx_stats.cdg_fec_failed = 1;
+    rx_stats.jitter_p95_ms = 42;
+    rx_stats.jitter_max_ms = 99;
+    rx_stats.reorder_events = 5;
+    rx_stats.receiver_instance_id = 0xDEADBEEFU;
+    rx_stats.fec_group_size_observed = 8;
     size = dashcdg_protocol_serialize_v4_rx_stats(buffer, sizeof(buffer), &header, &rx_stats);
-    assert(size > 0);
+    assert(size == DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE);
     assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
     assert(view.header.type == DASHCDG_PACKET_V4_RX_STATS);
+    assert(view.header.payload_length == DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE);
     assert(view.v4_rx_stats.report_seq == 3);
     assert(view.v4_rx_stats.wall_now_ms == 10002);
     assert(view.v4_rx_stats.sender_time_observed_ms == 10050);
@@ -500,6 +514,36 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_rx_stats.loss_pct_x100 == 150);
     assert(view.v4_rx_stats.v4_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS);
     assert(view.v4_rx_stats.opus_bitrate_bps == 96000);
+    assert(view.v4_rx_stats.fec_decode_attempts == 100);
+    assert(view.v4_rx_stats.fec_recovery_failed == 7);
+    assert(view.v4_rx_stats.media_datagrams_lost_estimated == 3);
+    assert(view.v4_rx_stats.cdg_fec_recovered == 11);
+    assert(view.v4_rx_stats.cdg_fec_failed == 1);
+    assert(view.v4_rx_stats.jitter_p95_ms == 42);
+    assert(view.v4_rx_stats.jitter_max_ms == 99);
+    assert(view.v4_rx_stats.reorder_events == 5);
+    assert(view.v4_rx_stats.receiver_instance_id == 0xDEADBEEFU);
+    assert(view.v4_rx_stats.fec_group_size_observed == 8);
+
+    /* v1 wire (52-byte body): truncate v2 packet and fix header payload_length. */
+    {
+        uint8_t v1buf[256];
+
+        memcpy(v1buf, buffer, DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE);
+        v1buf[20] = (uint8_t) ((DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE >> 8U) & 0xFFU);
+        v1buf[21] = (uint8_t) (DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE & 0xFFU);
+        memset(&view, 0, sizeof(view));
+        assert(
+                dashcdg_protocol_parse_packet(
+                        &view,
+                        v1buf,
+                        DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE
+                ) == 1
+        );
+        assert(view.v4_rx_stats.opus_bitrate_bps == 96000);
+        assert(view.v4_rx_stats.fec_decode_attempts == 0);
+        assert(view.v4_rx_stats.receiver_instance_id == 0);
+    }
 }
 
 static void test_media_clock(void) {

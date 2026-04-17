@@ -2,7 +2,7 @@
 
 ## Scope
 
-Validate **v4 rx-stats** reporting, **timing consistency** between TX preview and RX, and (when built) **safe adaptation** policies.
+Validate **v4 rx-stats** reporting (default **2000 ms** interval; **0** disables), **timing consistency** between TX preview and RX, and (when built) **safe adaptation** policies. Multi-receiver **aggregation** behaviour is specified in [`../specs/v4-receiver-stats-aggregation-and-adaptation.md`](../specs/v4-receiver-stats-aggregation-and-adaptation.md) and validated here once counters and controller logic exist.
 
 ## Preconditions
 
@@ -18,7 +18,7 @@ Validate **v4 rx-stats** reporting, **timing consistency** between TX preview an
 
 ### 1. Stats channel health
 
-- Start TX, then RX with `--rx-stats-ms 2000` (or a short interval, e.g. 500) for testing.
+- Start TX, then RX (default sends stats every **2000 ms**); use `--rx-stats-ms 500` for faster manual iteration when needed.
 - Confirm TX process does **not** glitch audio when stats are enabled (compare with `--rx-stats-ms 0`).
 - On TX, observe `v4_rx_stats_packets_received` increasing (debugger) or add temporary logging — counter increments in `dashcdg_tx_ptp_thread_main`.
 
@@ -32,9 +32,11 @@ Validate **v4 rx-stats** reporting, **timing consistency** between TX preview an
 
 - On stable LAN, `clock_offset_estimate_ms` should stay within a **few ms** of steady-state (platform-dependent); document per-release if publishing SLOs.
 
-### 4. Adaptation (future)
+### 4. Adaptation and aggregation (future)
 
-- When automated FEC/bitrate/playout control lands, re-run: loss injection → bounded-time response → no oscillation (hysteresis).
+- When **v2** FEC/error fields and a controller exist: loss injection → verify **per-receiver** stats, then **median/p95** aggregates move in the documented direction (see aggregation spec).
+- Re-run: loss injection → bounded-time response → **no oscillation** (hysteresis and minimum dwell).
+- **Multi-RX:** three clients (clean / lossy / bursty) — controller inputs stable; no thrash when one outlier flaps.
 
 ### 5. Display–audio
 
@@ -43,7 +45,7 @@ Validate **v4 rx-stats** reporting, **timing consistency** between TX preview an
 
 ### 6. Retro / MCU
 
-- Stats optional; `--rx-stats-ms 0` must not touch the stats socket path (no extra sockets).
+- Stats optional; `--rx-stats-ms 0` must not touch the stats socket path (no extra sockets). Default **2000 ms** is acceptable to disable on very constrained builds if product policy changes.
 
 ## Exit criteria (baseline)
 

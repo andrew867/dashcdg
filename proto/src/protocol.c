@@ -2,7 +2,6 @@
 
 #include <string.h>
 
-#define DASHCDG_PACKET_HEADER_SIZE 24U
 #define DASHCDG_ANNOUNCE_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 4U + 4U + 2U + 2U + 1U + 1U + 2U + 2U + 1U + 1U + 8U)
 #define DASHCDG_CLOCK_BEACON_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 8U + 8U + 4U + 4U)
 #define DASHCDG_PTP_SYNC_PAYLOAD_SIZE 8U
@@ -12,7 +11,6 @@
 #define DASHCDG_V4_SESSION_INFO_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 1U + 1U + 1U + 1U + 2U + 1U + 1U + 2U + 2U + 1U + 1U + 1U + 1U + 1U + 1U + 4U + 8U)
 #define DASHCDG_V4_LOADING_SCREEN_PAYLOAD_SIZE (4U + 1U + 1U + 1U + 1U + 8U + DASHCDG_MAX_V4_LOADING_TEXT)
 #define DASHCDG_V4_CLOCK_SYNC_PAYLOAD_SIZE 24U
-#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE 52U
 
 static void dashcdg_write_u16(uint8_t *dst, uint16_t value) {
     dst[0] = (uint8_t) ((value >> 8U) & 0xFFU);
@@ -817,6 +815,28 @@ size_t dashcdg_protocol_serialize_v4_rx_stats(
     buffer[offset++] = payload->reserved1[2];
     dashcdg_write_u32(buffer + offset, payload->opus_bitrate_bps);
     offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->fec_decode_attempts);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->fec_recovery_failed);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->media_datagrams_lost_estimated);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->cdg_fec_recovered);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->cdg_fec_failed);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->jitter_p95_ms);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->jitter_max_ms);
+    offset += 2U;
+    dashcdg_write_u32(buffer + offset, payload->reorder_events);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->receiver_instance_id);
+    offset += 4U;
+    buffer[offset++] = payload->fec_group_size_observed;
+    buffer[offset++] = payload->reserved2[0];
+    buffer[offset++] = payload->reserved2[1];
+    buffer[offset++] = payload->reserved2[2];
     return offset;
 }
 
@@ -1225,7 +1245,8 @@ int dashcdg_protocol_parse_packet(
 
         case DASHCDG_PACKET_V4_RX_STATS:
             if (view->header.version != DASHCDG_PROTOCOL_VERSION_V4 ||
-                    payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_SIZE) {
+                    (payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE &&
+                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE)) {
                 return 0;
             }
             view->v4_rx_stats.report_seq = dashcdg_read_u32(buffer + offset);
@@ -1255,6 +1276,31 @@ int dashcdg_protocol_parse_packet(
             view->v4_rx_stats.reserved1[1] = buffer[offset++];
             view->v4_rx_stats.reserved1[2] = buffer[offset++];
             view->v4_rx_stats.opus_bitrate_bps = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            if (payload_length == DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE) {
+                view->v4_rx_stats.fec_decode_attempts = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.fec_recovery_failed = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.media_datagrams_lost_estimated = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.cdg_fec_recovered = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.cdg_fec_failed = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.jitter_p95_ms = dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.jitter_max_ms = dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.reorder_events = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.receiver_instance_id = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.fec_group_size_observed = buffer[offset++];
+                view->v4_rx_stats.reserved2[0] = buffer[offset++];
+                view->v4_rx_stats.reserved2[1] = buffer[offset++];
+                view->v4_rx_stats.reserved2[2] = buffer[offset++];
+            }
             return 1;
 
         default:
