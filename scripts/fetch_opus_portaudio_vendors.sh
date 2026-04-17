@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Optional: shallow-clone libopus and PortAudio into audio_modules/*/vendor/
-# (see docs/build/vendored-opus-portaudio-windows.md).
+# (see docs/specs/vendored-opus-portaudio-windows.md).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -24,4 +24,4 @@ clone_ref "opus (xiph)" "https://github.com/xiph/opus.git" \
 clone_ref "portaudio" "https://github.com/PortAudio/portaudio.git" \
   "$ROOT/audio_modules/portaudio/vendor/portaudio"
 
-echo "Done. Next: see scripts/build_opus_mingw32_static.sh and docs/build/vendored-opus-portaudio-windows.md"
+echo "Done. Next: scripts/build_opus_mingw32_static.sh, scripts/build_portaudio_mingw32_no_sse2.sh, docs/specs/vendored-opus-portaudio-windows.md"

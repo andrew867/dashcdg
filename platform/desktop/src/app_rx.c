@@ -75,6 +75,7 @@
 #define DASHCDG_MAX_PTP_EXCHANGE_AGE_MS 500U
 #define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
 #define DASHCDG_STREAM_LOSS_CONNECTING_MS 30000U
+#define DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS 2000U
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
@@ -271,7 +272,7 @@ static const char *g_endpoint_address;
 static struct in_addr g_endpoint_in_addr;
 static int g_endpoint_is_multicast;
 static int g_endpoint_is_broadcast;
-static uint32_t g_rx_stats_interval_ms = 0U;
+static uint32_t g_rx_stats_interval_ms = DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS;
 static dashcdg_socket_t g_rx_stats_sockfd = DASHCDG_INVALID_SOCKET;
 static struct sockaddr_in g_rx_stats_dest;
 static int g_headless = 0;
@@ -623,8 +624,9 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
     );
     fprintf(
             stdout,
-            "\n--rx-stats-ms <ms>: v4 only; send periodic observability packets to the session endpoint "
-            "(default off; try 2000 ms). Transmitters listen on the same UDP port (PTP path) and count them.\n"
+            "\n--rx-stats-ms <ms>: v4 only; send periodic observability to the session endpoint "
+            "(default %u ms; 0 disables). Transmitters listen on the same UDP port (PTP path) and count them.\n",
+            (unsigned) DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS
     );
 }
 
