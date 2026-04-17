@@ -9,29 +9,13 @@ EXTRA_LDFLAGS :=
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
 UNAME_S := $(shell uname -s 2>/dev/null)
 
-# Optional vendored libopus (all platforms): DASHCDG_OPUS_VENDOR=1 OPUS_VENDOR_PREFIX=build/x86-retro/prefix-opus make debug
-DASHCDG_OPUS_VENDOR ?= 0
+# Opus / PortAudio link flags (expanded after MINGW_ARCH is known on Windows). Linux: set DASHCDG_OPUS_VENDOR=1 and prefixes if needed.
 OPUS_VENDOR_PREFIX ?=
+PORTAUDIO_VENDOR_PREFIX ?=
 OPUS_CPPFLAGS :=
 OPUS_LINK := -lopus
-ifeq ($(DASHCDG_OPUS_VENDOR),1)
-ifneq ($(OPUS_VENDOR_PREFIX),)
-OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
-OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
-endif
-endif
-# Optional vendored PortAudio (paths that link -lportaudio; not used with WinMM-only retro)
-DASHCDG_PORTAUDIO_VENDOR ?= 0
-PORTAUDIO_VENDOR_PREFIX ?=
 PORTAUDIO_CPPFLAGS :=
 DESKTOP_PORTAUDIO_LINK := -lportaudio
-ifeq ($(DASHCDG_PORTAUDIO_VENDOR),1)
-ifneq ($(PORTAUDIO_VENDOR_PREFIX),)
-PORTAUDIO_CPPFLAGS := -I$(PORTAUDIO_VENDOR_PREFIX)/include -DDASHCDG_PORTAUDIO_VENDOR_BUILD=1
-DESKTOP_PORTAUDIO_LINK := -L$(PORTAUDIO_VENDOR_PREFIX)/lib -lportaudio
-endif
-endif
-CFLAGS += $(OPUS_CPPFLAGS) $(PORTAUDIO_CPPFLAGS)
 
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
 MINGW_ARCH ?= mingw64
@@ -55,6 +39,30 @@ WINDOWS_LEGACY_WINNT_RETRO := 0x0500
 CFLAGS += -D_WIN32_WINNT=$(WINDOWS_LEGACY_WINNT_RETRO) -DWINVER=$(WINDOWS_LEGACY_WINNT_RETRO)
 EXTRA_LDFLAGS += -Wl,--major-os-version=5 -Wl,--minor-os-version=0 -Wl,--major-subsystem-version=5 -Wl,--minor-subsystem-version=0
 endif
+# MinGW i686: default vendored PIII-safe shared Opus + PortAudio (scripts/build_mingw32_p3_opus_portaudio_shared.sh). Set DASHCDG_OPUS_VENDOR=0 to use MSYS2 DLLs.
+ifeq ($(MINGW_ARCH),mingw32)
+OPUS_VENDOR_PREFIX ?= build/mingw32-p3-vendor/opus
+PORTAUDIO_VENDOR_PREFIX ?= build/mingw32-p3-vendor/portaudio
+DASHCDG_OPUS_VENDOR ?= 1
+DASHCDG_PORTAUDIO_VENDOR ?= 1
+endif
+ifeq ($(DASHCDG_OPUS_VENDOR),1)
+ifneq ($(OPUS_VENDOR_PREFIX),)
+ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/lib/libopus.dll.a),)
+OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
+OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
+endif
+endif
+endif
+ifeq ($(DASHCDG_PORTAUDIO_VENDOR),1)
+ifneq ($(PORTAUDIO_VENDOR_PREFIX),)
+ifneq ($(wildcard $(PORTAUDIO_VENDOR_PREFIX)/lib/libportaudio.dll.a),)
+PORTAUDIO_CPPFLAGS := -I$(PORTAUDIO_VENDOR_PREFIX)/include -DDASHCDG_PORTAUDIO_VENDOR_BUILD=1
+DESKTOP_PORTAUDIO_LINK := -L$(PORTAUDIO_VENDOR_PREFIX)/lib -lportaudio
+endif
+endif
+endif
+CFLAGS += $(OPUS_CPPFLAGS) $(PORTAUDIO_CPPFLAGS)
 WINDOWS_MINGW_PREFIX := $(shell if [ -d /c/msys64/$(MINGW_ARCH) ]; then echo /c/msys64/$(MINGW_ARCH); elif [ -d /c/ProgramData/mingw64/$(MINGW_ARCH) ]; then echo /c/ProgramData/mingw64/$(MINGW_ARCH); elif [ -d /$(MINGW_ARCH) ]; then echo /$(MINGW_ARCH); fi)
 WINDOWS_MINGW_PREFIX_WIN := $(shell if [ -n "$(WINDOWS_MINGW_PREFIX)" ]; then cygpath -m "$(WINDOWS_MINGW_PREFIX)"; fi)
 ifneq ($(WINDOWS_MINGW_PREFIX),)
@@ -103,18 +111,27 @@ CFLAGS += -D__USE_MINGW_ANSI_STDIO=0
 CFLAGS += -Wno-format
 endif
 endif
+# Opus/PortAudio: prefer scripts/build_mingw32_p3_opus_portaudio_shared.sh outputs when present.
+WINDOWS_OPUS_PORTAUDIO_DLLS :=
+ifeq ($(MINGW_ARCH),mingw32)
+ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/bin/libopus-0.dll),)
+WINDOWS_OPUS_PORTAUDIO_DLLS := $(OPUS_VENDOR_PREFIX)/bin/libopus-0.dll $(PORTAUDIO_VENDOR_PREFIX)/bin/libportaudio.dll
+else
+WINDOWS_OPUS_PORTAUDIO_DLLS := $(shell for pattern in libportaudio.dll libopus-0.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
+endif
+endif
+ifeq ($(MINGW_ARCH),mingw64)
 WINDOWS_RUNTIME_DLLS := $(shell for pattern in libfreeglut.dll glew32.dll libportaudio.dll libwinpthread-1.dll libopus-0.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
+else
+WINDOWS_RUNTIME_DLLS := $(shell for pattern in libfreeglut.dll glew32.dll libwinpthread-1.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done) $(WINDOWS_OPUS_PORTAUDIO_DLLS)
+endif
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-WINDOWS_RUNTIME_DLLS := $(shell for pattern in libwinpthread-1.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
+WINDOWS_RUNTIME_DLLS := $(shell for pattern in libwinpthread-1.dll libgcc_s_*.dll libstdc++-6.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done) $(WINDOWS_OPUS_PORTAUDIO_DLLS)
 endif
 else
 WINDOWS_RUNTIME_DLLS :=
 endif
-ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-LDLIBS_DESKTOP_AUDIO := -lwinmm
-else
 LDLIBS_DESKTOP_AUDIO := $(DESKTOP_PORTAUDIO_LINK)
-endif
 
 # MMCSS (Avrt) + 1 ms timer resolution (WinMM) for desktop/stream threads; see win32_timing_boost.c
 WINDOWS_STREAMING_TIMING_LIBS := -lavrt -lwinmm
@@ -122,10 +139,27 @@ LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(WINDO
 NET_LIBS := -lws2_32 -liphlpapi
 WINDOWS_GDI_LIBS := -lgdi32 -luser32
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-LDLIBS_DESKTOP_RETRO := $(WINDOWS_STREAMING_TIMING_LIBS) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
-DESKTOP_AUDIO_CPPFLAGS := -DDASHCDG_DESKTOP_WIN32_WAVEOUT=1
+LDLIBS_DESKTOP_RETRO := $(WINDOWS_STREAMING_TIMING_LIBS) $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 endif
 else
+# Linux / non-Windows: optional manual vendored codecs
+ifeq ($(DASHCDG_OPUS_VENDOR),1)
+ifneq ($(OPUS_VENDOR_PREFIX),)
+ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/lib/libopus.a),)
+OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
+OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
+endif
+endif
+endif
+ifeq ($(DASHCDG_PORTAUDIO_VENDOR),1)
+ifneq ($(PORTAUDIO_VENDOR_PREFIX),)
+ifneq ($(wildcard $(PORTAUDIO_VENDOR_PREFIX)/lib/libportaudio.a),)
+PORTAUDIO_CPPFLAGS := -I$(PORTAUDIO_VENDOR_PREFIX)/include -DDASHCDG_PORTAUDIO_VENDOR_BUILD=1
+DESKTOP_PORTAUDIO_LINK := -L$(PORTAUDIO_VENDOR_PREFIX)/lib -lportaudio
+endif
+endif
+endif
+CFLAGS += $(OPUS_CPPFLAGS) $(PORTAUDIO_CPPFLAGS)
 LDLIBS_DESKTOP := -lGL -lGLEW -lglut $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) -lpthread -lm
 NET_LIBS :=
 WINDOWS_GDI_LIBS :=
@@ -239,7 +273,7 @@ ifneq ($(RETRO_RX_BIN),)
 DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
 endif
 
-.PHONY: all debug dirs libs test desktop-apps bundle-runtime package package-x64 package-x86 package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime vendor-mingw32-p3-runtime package package-x64 package-x86 package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
 
 all: CFLAGS += -O2
 all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
@@ -399,7 +433,7 @@ $(OBJ_DIR)/desktop_app_tx_gdi.o: platform/desktop/src/app_tx.c
 endif
 
 $(OBJ_DIR)/desktop_app_tx_retro.o: platform/desktop/src/app_tx.c
-	$(CC) $(CFLAGS) -DDASHCDG_DESKTOP_RETRO_WINDOWS=1 -DDASHCDG_DESKTOP_NO_OPUS=1 -c -o $@ $<
+	$(CC) $(CFLAGS) -DDASHCDG_DESKTOP_RETRO_WINDOWS=1 -c -o $@ $<
 
 $(OBJ_DIR)/desktop_app_rx.o: platform/desktop/src/app_rx.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -408,7 +442,7 @@ $(OBJ_DIR)/desktop_app_rx_gdi.o: platform/desktop/src/app_rx.c
 	$(CC) $(CFLAGS) -DDASHCDG_RX_UI_GDI_ONLY=1 -c -o $@ $<
 
 $(OBJ_DIR)/desktop_app_rx_retro_gdi.o: platform/desktop/src/app_rx.c
-	$(CC) $(CFLAGS) -DDASHCDG_RX_UI_GDI_ONLY=1 -DDASHCDG_DESKTOP_NO_OPUS=1 -c -o $@ $<
+	$(CC) $(CFLAGS) -DDASHCDG_RX_UI_GDI_ONLY=1 -c -o $@ $<
 
 $(OBJ_DIR)/test_core.o: tests/test_core.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -470,14 +504,14 @@ endif
 endif
 
 ifneq ($(RETRO_RX_BIN),)
-$(RETRO_RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
+$(RETRO_RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
 
-$(RETRO_TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_STUB_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
+$(RETRO_TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
@@ -515,8 +549,12 @@ vendor-audio-sources:
 	bash scripts/fetch_opus_portaudio_vendors.sh
 	bash scripts/fetch_audio_codec_vendors.sh
 
-# Full sneakernet matrix after fetching sources (same as CI-style local prep).
-dist-windows-sneakernet-with-sources: vendor-audio-sources dist-windows-sneakernet
+# Build Pentium III–safe shared libopus-0.dll + libportaudio.dll into build/mingw32-p3-vendor/ (run vendor-audio-sources first if trees are missing).
+vendor-mingw32-p3-runtime:
+	bash scripts/build_mingw32_p3_opus_portaudio_shared.sh
+
+# Full sneakernet matrix after fetching sources and building PIII-safe codecs.
+dist-windows-sneakernet-with-sources: vendor-audio-sources vendor-mingw32-p3-runtime dist-windows-sneakernet
 
 release: package
 

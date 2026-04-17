@@ -74,6 +74,15 @@ kill_posix_binary_if_running "desktop-player"
 
 cd "${REPO_ROOT}"
 
+build_mingw32_p3_codecs() {
+  if [[ "${SKIP_MINGW32_P3_VENDOR:-}" == "1" ]]; then
+    echo "[build-release] SKIP_MINGW32_P3_VENDOR=1 — reuse build/mingw32-p3-vendor (if present)"
+    return 0
+  fi
+  echo "[build-release] building PIII-safe shared libopus-0.dll + libportaudio.dll"
+  bash "${REPO_ROOT}/scripts/build_mingw32_p3_opus_portaudio_shared.sh"
+}
+
 case "${TARGET_ARCH}" in
   x64)
     echo "[build-release] building x64 package"
@@ -84,6 +93,7 @@ case "${TARGET_ARCH}" in
     ;;
   x86)
     echo "[build-release] building x86 package"
+    build_mingw32_p3_codecs
     run_make_for_arch mingw32
     copy_zip_to_dist "${REPO_ROOT}/build/x86/release/dashcdg-windows-x86-portable.zip"
     echo "[build-release] release package ready:"
@@ -92,6 +102,7 @@ case "${TARGET_ARCH}" in
   all)
     echo "[build-release] building x64 and x86 packages"
     run_make_for_arch mingw64
+    build_mingw32_p3_codecs
     run_make_for_arch mingw32
     copy_zip_to_dist "${REPO_ROOT}/build/amd64/release/dashcdg-windows-x64-portable.zip"
     copy_zip_to_dist "${REPO_ROOT}/build/x86/release/dashcdg-windows-x86-portable.zip"

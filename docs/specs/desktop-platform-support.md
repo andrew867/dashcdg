@@ -18,8 +18,8 @@ Built from `platform/desktop/src/` with shared core/proto libs.
 | `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Same v4 codec defaults as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
 | `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Decodes Opus, AMR-WB/NB, NB-IMA, EVRC, QCELP-13k, or SBC per **`v4_session_info`** / chunk `codec_id`; **`--help`** documents behaviour. |
 | `desktop-gdi-rx.exe` | GDI-only receiver link | No GL imports. Opus + PortAudio. |
-| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, **no Opus**, no GL; default no preview / headless-style use; default v4 codec **sbc-like** (NB-IMA). |
-| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + **WinMM** (`waveOut`); **no Opus** (stub); NB-IMA + other narrowband ids when linked. |
+| `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, no GL; links **Opus + PortAudio** (PIII-safe DLLs); default v4 codec **Opus** (change with `c` / flags). |
+| `desktop-retro-rx.exe` | Retro GDI receiver | GDI + **PortAudio** output; **Opus** decode + other v4 codecs per session. |
 | `desktop-player.exe` | Local player + `tx` / `rx` shims | Full GL + Win32 GDI code paths: `tx` preview on by default (`--headless` to disable); `rx` same GL→GDI fallback as `desktop-rx`. |
 
 Implementation pointers:

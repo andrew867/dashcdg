@@ -113,18 +113,17 @@ windows-x64/
   desktop-rx (GL default, GDI fallback on GL init failure) + desktop-gdi-rx + desktop-player.
 
 windows-x86/
-  32-bit MSYS2 mingw32 (typical i686/SSE2-era runtime DLLs from the prefix).
+  32-bit mingw32. libopus-0.dll and libportaudio.dll come from build/mingw32-p3-vendor/
+  (PIII / no-SSE2–safe; see scripts/build_mingw32_p3_opus_portaudio_shared.sh).
 
 windows-x86-legacy-p3/
-  Same as windows-x86 but dashcdg objects built with -march=pentium3 and XP-oriented
-  PE flags (see docs/specs/windows-legacy-mingw-build.md). Third-party DLLs may still
-  need a custom libopus build for real P3 machines.
+  Same codecs as windows-x86; dashcdg objects use -march=pentium3 + XP PE (WINDOWS_LEGACY_TARGET=1).
+  Includes desktop-legacy-rx.exe (copy of desktop-gdi-rx.exe) for muscle memory.
 
 windows-x86-retro/
-  “Retro” bundle: Win2000-style PE targets, -march=pentium3 on dashcdg objects, no Opus, no OpenGL.
-  desktop-retro-rx.exe = GDI receiver; desktop-retro-tx.exe = transmitter (no --display).
-  Audio output uses WinMM (waveOut), not bundled libportaudio. AVRT/WINMM are system DLLs for MMCSS + timer boost.
-  Use --badnet-v4 and SBC-like audio with matching sender/receiver.
+  Win2000-style PE, -march=pentium3, no OpenGL. desktop-retro-rx.exe / desktop-retro-tx.exe use real
+  Opus decode/encode + PortAudio with the same PIII-safe libopus-0.dll and libportaudio.dll as other
+  mingw32 folders (not WinMM-only). Default TX audio is Opus; use TTY `c` or flags to change codec.
 
 Executables (standard folders)
 ------------------------------
@@ -133,6 +132,7 @@ Executables (standard folders)
   desktop-rx.exe         Receiver: OpenGL by default; --gdi forces GDI; Windows auto-fallback if GL fails
   desktop-gl-rx.exe      Same bits as desktop-rx.exe (alias)
   desktop-gdi-rx.exe     GDI-only receiver link (no GL DLL dependency for this EXE)
+  desktop-legacy-rx.exe  Same bits as desktop-gdi-rx.exe (alias; x86 + legacy-p3 folders)
   desktop-player.exe     Local player + `tx` / `rx` subcommands (full GL + GDI code paths)
   desktop-*-player.exe   Copies of desktop-player.exe (legacy filenames)
 
@@ -144,6 +144,13 @@ kill_running
 rm -rf "${DIST_ROOT}"
 mkdir -p "${DIST_ROOT}"
 
+if [[ "${SKIP_MINGW32_P3_VENDOR:-}" == "1" ]]; then
+  echo "[sneakernet-dist] SKIP_MINGW32_P3_VENDOR=1 — not rebuilding build/mingw32-p3-vendor DLLs"
+else
+  echo "[sneakernet-dist] building PIII-safe libopus-0.dll + libportaudio.dll (mingw32)"
+  bash "${SCRIPT_DIR}/build_mingw32_p3_opus_portaudio_shared.sh"
+fi
+
 echo "[sneakernet-dist] (1/4) windows-x64 — mingw64"
 run_make_debug mingw64
 layout_standard_variant "${REPO_ROOT}/build/amd64/bin" "${DIST_ROOT}/windows-x64"
@@ -151,10 +158,12 @@ layout_standard_variant "${REPO_ROOT}/build/amd64/bin" "${DIST_ROOT}/windows-x64
 echo "[sneakernet-dist] (2/4) windows-x86 — mingw32"
 run_make_debug mingw32
 layout_standard_variant "${REPO_ROOT}/build/x86/bin" "${DIST_ROOT}/windows-x86"
+cp -f "${DIST_ROOT}/windows-x86/desktop-gdi-rx.exe" "${DIST_ROOT}/windows-x86/desktop-legacy-rx.exe"
 
 echo "[sneakernet-dist] (3/4) windows-x86-legacy-p3 — mingw32 WINDOWS_LEGACY_TARGET=1"
 run_make_debug mingw32 WINDOWS_LEGACY_TARGET=1
 layout_standard_variant "${REPO_ROOT}/build/x86/bin" "${DIST_ROOT}/windows-x86-legacy-p3"
+cp -f "${DIST_ROOT}/windows-x86-legacy-p3/desktop-gdi-rx.exe" "${DIST_ROOT}/windows-x86-legacy-p3/desktop-legacy-rx.exe"
 
 echo "[sneakernet-dist] (4/4) windows-x86-retro — mingw32 WINDOWS_RETRO_BUNDLE=1"
 run_make_debug mingw32 WINDOWS_RETRO_BUNDLE=1

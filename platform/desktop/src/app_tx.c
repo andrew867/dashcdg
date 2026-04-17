@@ -5061,8 +5061,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 #endif
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
-    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
-    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
+    /* Retro TX now links real Opus + PortAudio (PIII-safe DLLs); default to Opus wideband. */
+    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
 #else
     /* Default “reliable” path: resilience + AMR-WB (native 3GPP wideband in audio_modules/amr). */
     g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;

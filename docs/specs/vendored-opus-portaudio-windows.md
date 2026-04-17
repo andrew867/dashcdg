@@ -4,9 +4,9 @@
 
 0. **System DLLs:** all Windows desktop binaries also import **`AVRT.dll`** / **`WINMM.dll`** for streaming thread timing (`win32_timing_boost.c`); those are OS components, not vendored.
 1. **Pin upstream sources** under `audio_modules/` (same pattern as AMR/EVRC/SBC), reproducible via scripts.
-2. **Build libopus** with **Pentium II/III–safe** flags for `MINGW_ARCH=mingw32` **retro** bundles when avoiding MSYS2 `libopus-0.dll` that may assume SSE2 beyond the target CPU.
-3. **Optional:** link a **static** `libopus.a` from a prefix under `build/` instead of the MSYS2 shared stub path.
-4. **PortAudio:** vendored tree for reproducible amd64/x86 desktop builds. **Retro bundles** often use **direct WinMM** (`DASHCDG_DESKTOP_WIN32_WAVEOUT=1`) to avoid an extra dependency; when product policy prefers **PortAudio** (unified API, device selection, future host APIs), build a **static** `libportaudio.a` with **pre-SSE2-safe** flags (see below) for **i686 / Pentium II–III** targets.
+2. **MinGW i686 default (current):** `Makefile` sets `DASHCDG_OPUS_VENDOR` / `DASHCDG_PORTAUDIO_VENDOR` to **on** for `MINGW_ARCH=mingw32` with prefixes under **`build/mingw32-p3-vendor/{opus,portaudio}`**. **`scripts/build_mingw32_p3_opus_portaudio_shared.sh`** builds **shared** `libopus-0.dll` and `libportaudio.dll` with **`-march=pentium3 -mno-sse2`** so Pentium III / pre-SSE2 laptops do not fault on MSYS2 SSE2-assuming codec DLLs. **`scripts/build_release.sh`** / **`scripts/build_windows_sneakernet_dist.sh`** run this script before `mingw32` packages (skip with **`SKIP_MINGW32_P3_VENDOR=1`** if DLLs are already built).
+3. **Retro (`WINDOWS_RETRO_BUNDLE=1`):** `desktop-retro-rx.exe` / `desktop-retro-tx.exe` now link **real Opus + PortAudio** (same PIII-safe DLLs) instead of the Opus stub + WinMM-only path.
+4. **Fallback:** if `lib/libopus.dll.a` is missing under the vendor prefix, the Makefile falls back to **`-lopus`** / **`-lportaudio`** from the MSYS2 tree (may not be PIII-safe). Run the build script after **`make vendor-audio-sources`** (or `bash scripts/fetch_opus_portaudio_vendors.sh`).
 
 ## Layout
 

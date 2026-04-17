@@ -24,4 +24,4 @@ clone_ref "opus (xiph)" "https://github.com/xiph/opus.git" \
 clone_ref "portaudio" "https://github.com/PortAudio/portaudio.git" \
   "$ROOT/audio_modules/portaudio/vendor/portaudio"
 
-echo "Done. Next: scripts/build_opus_mingw32_static.sh, scripts/build_portaudio_mingw32_no_sse2.sh, docs/specs/vendored-opus-portaudio-windows.md"
+echo "Done. Next: bash scripts/build_mingw32_p3_opus_portaudio_shared.sh (default for mingw32 zips), or legacy static-only scripts in docs/specs/vendored-opus-portaudio-windows.md"
