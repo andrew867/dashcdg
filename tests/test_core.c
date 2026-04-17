@@ -291,6 +291,7 @@ static void test_protocol_v4_roundtrip(void) {
     struct dashcdg_v4_repair_window_payload repair_window;
     struct dashcdg_v4_backfill_chunk_payload backfill_chunk;
     struct dashcdg_v4_clock_sync_payload clock_sync;
+    struct dashcdg_v4_rx_stats_payload rx_stats;
     uint8_t anchor_bytes[] = { 0x01, 0x02, 0x03, 0x04 };
     uint8_t audio_bytes[] = { 0x11, 0x22, 0x33, 0x44 };
     uint8_t delta_bytes[] = { 0x21, 0x22, 0x23, 0x24, 0x25 };
@@ -469,6 +470,36 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_clock_sync.session_start_ms == 4567);
     assert(view.v4_clock_sync.playback_ms == 1234);
     assert(view.v4_clock_sync.startup_state == 2);
+
+    memset(&rx_stats, 0, sizeof(rx_stats));
+    rx_stats.report_seq = 3;
+    rx_stats.wall_now_ms = 10002;
+    rx_stats.sender_time_observed_ms = 10050;
+    rx_stats.clock_offset_estimate_ms = -12;
+    rx_stats.playout_delay_ms_config = 500;
+    rx_stats.audio_buffer_ms = 120;
+    rx_stats.audio_queue_pressure_events = 2;
+    rx_stats.fec_audio_recovered = 9;
+    rx_stats.jitter_rms_ms = 18;
+    rx_stats.loss_pct_x100 = 150;
+    rx_stats.v4_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+    rx_stats.opus_bitrate_bps = 96000;
+    size = dashcdg_protocol_serialize_v4_rx_stats(buffer, sizeof(buffer), &header, &rx_stats);
+    assert(size > 0);
+    assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
+    assert(view.header.type == DASHCDG_PACKET_V4_RX_STATS);
+    assert(view.v4_rx_stats.report_seq == 3);
+    assert(view.v4_rx_stats.wall_now_ms == 10002);
+    assert(view.v4_rx_stats.sender_time_observed_ms == 10050);
+    assert(view.v4_rx_stats.clock_offset_estimate_ms == -12);
+    assert(view.v4_rx_stats.playout_delay_ms_config == 500);
+    assert(view.v4_rx_stats.audio_buffer_ms == 120);
+    assert(view.v4_rx_stats.audio_queue_pressure_events == 2);
+    assert(view.v4_rx_stats.fec_audio_recovered == 9);
+    assert(view.v4_rx_stats.jitter_rms_ms == 18);
+    assert(view.v4_rx_stats.loss_pct_x100 == 150);
+    assert(view.v4_rx_stats.v4_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS);
+    assert(view.v4_rx_stats.opus_bitrate_bps == 96000);
 }
 
 static void test_media_clock(void) {

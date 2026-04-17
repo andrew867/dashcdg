@@ -1,44 +1,51 @@
-# Test plan: V4 network observability and sync (future)
+# Test plan: V4 network observability and sync
 
 ## Scope
 
-Validate **reporting**, **timing consistency**, and **safe adaptation** once the stats/adaptation features from [`v4-network-stats-and-adaptation.md`](../specs/v4-network-stats-and-adaptation.md) and [`v4-display-audio-sync.md`](../specs/v4-display-audio-sync.md) are implemented.
-
-Until then, this checklist is a **placeholder** for QA and automation.
+Validate **v4 rx-stats** reporting, **timing consistency** between TX preview and RX, and (when built) **safe adaptation** policies.
 
 ## Preconditions
 
-- Two or more hosts on the same L2/L3 segment (or routed multicast where supported).  
-- Known **v4** session: Opus (and optionally one narrowband codec).  
-- Ability to inject **loss** (netem, switch ACL, Wi‑Fi distance) and **delay** (tc / Clumsy / WAN emulator).
+- Two hosts on the same L2/L3 segment (or routed multicast).
+- **v4** session with Opus or another codec; TX and RX built from the same tree.
+- Optional: **Clumsy**, **netem**, or Wi‑Fi distance to inject loss/delay.
 
-## Cases (draft)
+## Automated / build-time
 
-1. **Stats channel health**  
-   - Receiver emits reports at configured interval; no media glitches attributable to stats traffic alone.
+- `make test` — includes `dashcdg_protocol_serialize_v4_rx_stats` round-trip in `tests/test_core.c`.
 
-2. **Field sanity**  
-   - `audio_buffer_ms` correlates with intentional buffer size changes.  
-   - `jitter_*` rise under synthetic jitter; `loss_pct` tracks injected loss.
+## Manual QA checklist
 
-3. **Clock offset**  
-   - `clock_offset_estimate_ms` stable within ±X ms on LAN; document X per platform.
+### 1. Stats channel health
 
-4. **Adaptation (when implemented)**  
-   - Increasing loss triggers **FEC** or **bitrate** change within bounded time.  
-   - No **feedback oscillation** (hysteresis verified).
+- Start TX, then RX with `--rx-stats-ms 2000` (or a short interval, e.g. 500) for testing.
+- Confirm TX process does **not** glitch audio when stats are enabled (compare with `--rx-stats-ms 0`).
+- On TX, observe `v4_rx_stats_packets_received` increasing (debugger) or add temporary logging — counter increments in `dashcdg_tx_ptp_thread_main`.
 
-5. **Display–audio**  
-   - RX: CDG frame index vs audio PTS within **one subcode frame** + buffer slack.  
-   - TX preview: offset vs RX matches configured **preview delay** within tolerance.
+### 2. Field sanity
 
-6. **Retro / MCU**  
-   - Stats path optional; **no crash** when disabled; minimal RAM/CPU when enabled.
+- **audio_buffer_ms** moves when RX ring sizing or load changes (see `dashcdg_rx_network_stream_ring_ms`).
+- **jitter_rms_ms** rises under bursty scheduling (CPU load) or synthetic delay variation.
+- **clock_offset_estimate_ms** tracks HUD “off” / sender offset over time.
 
-## Automation
+### 3. Clock offset
 
-- Prefer **scripted** sender/receiver with golden thresholds; optional **CI** smoke without real multicast (loopback UDP).
+- On stable LAN, `clock_offset_estimate_ms` should stay within a **few ms** of steady-state (platform-dependent); document per-release if publishing SLOs.
 
-## Exit criteria (TBD per release)
+### 4. Adaptation (future)
 
-- Documented thresholds pass on **Windows amd64** baseline; optional **i686 retro** smoke.
+- When automated FEC/bitrate/playout control lands, re-run: loss injection → bounded-time response → no oscillation (hysteresis).
+
+### 5. Display–audio
+
+- **RX:** CDG must not lead audio after drain-order + ring fixes; spot-check lyrics vs vocal.
+- **TX:** With `--tx-preview-delay-ms auto`, preview should sit closer to **remote** experience than with `0`; with explicit **N**, verify seek lag ≈ **N** ms vs encoder timeline.
+
+### 6. Retro / MCU
+
+- Stats optional; `--rx-stats-ms 0` must not touch the stats socket path (no extra sockets).
+
+## Exit criteria (baseline)
+
+- `make test` passes on **Windows amd64** CI/local.
+- Manual smoke: TX + RX, stats enabled, no parse errors, TX counter increases.

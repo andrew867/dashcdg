@@ -1,73 +1,64 @@
-# V4 network statistics, client–server reporting, and adaptation (design)
+# V4 network statistics, client–server reporting, and adaptation
 
 ## Purpose
 
-Specify **minimal observability** and **future control loops** so deployments can:
+Observability and future control loops for multicast/unicast quality: loss, jitter, buffers, clock skew — **without** bloating every media datagram.
 
-- Measure **multicast/unicast quality** (loss, jitter, one-way delay estimates),
-- Compare **receiver playout** vs **sender timeline** and **wall clocks**,
-- Eventually **tune** FEC strength, Opus bitrate (including VBR caps), and possibly `playout_delay_ms` / announce parameters — **without** bloating the hot media path.
+## Implemented: v4 RX stats packet (in-band UDP)
 
-**Status:** design and field list only. **No wire implementation** is implied until a separate protocol slice is agreed (may be **out-of-band** UDP, HTTP, or side channel).
+**Packet type:** `DASHCDG_PACKET_V4_RX_STATS` (21), **version** `DASHCDG_PROTOCOL_VERSION_V4`.
 
-## Design principles
+**Payload:** `struct dashcdg_v4_rx_stats_payload` in `proto/include/dashcdg/protocol.h` (52-byte body, big-endian on the wire).
 
-1. **Separation of concerns** — Do not piggyback large stats blobs on every audio/CDG media datagram; use a **low-rate** stats channel or periodic **aggregated** reports.  
-2. **Privacy / safety** — No raw PCM; no unnecessary host identifiers; configurable sampling interval.  
-3. **Scalability** — One TX to many RX: either **receiver reports to a controller** or **lightweight aggregation**; avoid O(N²) chatter unless a dedicated service exists.  
-4. **Monotonic time** — Prefer **session-relative ms** + **optional** offset vs Unix/wall time for cross-machine comparison; document clock skew assumptions.
+| Field | Notes |
+| --- | --- |
+| `report_seq` | Monotonic per receiver process (session-scoped counter). |
+| `wall_now_ms` | Local `dashcdg_clock_now_ms()` at send. |
+| `sender_time_observed_ms` | `dashcdg_media_clock_remote_now()` when `have_clock`, else 0. |
+| `clock_offset_estimate_ms` | `sender_offset_ms` from the media clock (HUD “off”). |
+| `playout_delay_ms_config` | Announced preroll / playout. |
+| `audio_buffer_ms` | `dashcdg_desktop_audio_buffered_ms`. |
+| `audio_queue_pressure_events` | `audio_queue_overflows` (PCM ring back-pressure). |
+| `fec_audio_recovered` | Running FEC recovery count. |
+| `jitter_rms_ms` | EMA of \(\| \Delta t_{\mathrm{dg}} - 25\,\mathrm{ms} \|\) between consecutive datagrams (coarse inter-arrival spread). |
+| `loss_pct_x100` | Reserved (0 until a loss estimator exists). |
+| `v4_codec_id` | Announced decode path. |
+| `opus_bitrate_bps` | Reserved (0 on RX today). |
 
-## Minimum client → server (or controller) report fields
+**Serialization:** `dashcdg_protocol_serialize_v4_rx_stats()` — `proto/src/protocol.c`.
 
-Suggested **single struct** (conceptual; encoding TBD — JSON, CBOR, or binary):
+**Receiver behaviour:** `desktop-rx` / `desktop-player rx` — `--rx-stats-ms <ms>` (**default off**; e.g. **2000** for periodic reports). **0** disables. Sends to the **same** IP + port as the session (`g_rx_stats_dest`). Opens a dedicated UDP socket in `dashcdg_rx_init_stats_sender()`.
 
-| Field | Type (idea) | Notes |
-| --- | --- | --- |
-| `session_id` / `song_id` | string or hash | Tie to existing announce / session. |
-| `receiver_instance_id` | opaque | Per-process or per-device id (not required globally unique). |
-| `report_seq` | uint32 | Monotonic per sender. |
-| `wall_now_ms` | uint64 | Local monotonic or epoch ms; document which. |
-| `sender_time_observed_ms` | uint64 | Last seen `header.sender_time_ms` or smoothed. |
-| `clock_offset_estimate_ms` | int32 | `sender_time - local_receive_time` filtered (crude skew). |
-| `playout_delay_ms_config` | uint16 | As announced / local override. |
-| `audio_buffer_ms` | uint32 | From `dashcdg_desktop_audio_buffered_ms` or equivalent. |
-| `audio_underrun_count` | uint32 | Optional; if detectable from host API. |
-| `jitter_rms_ms` | uint16 | Rolling RMS of packet arrival spacing vs expected. |
-| `jitter_p95_ms` | uint16 | Optional percentile. |
-| `loss_pct_x100` | uint16 | Recent window loss % × 100. |
-| `fec_decode_ok` / `fec_recovered_frames` | uint32 | If FEC in use; optional. |
-| `v4_codec_id` | uint8 | Current decode path. |
-| `opus_bitrate_bps` | uint32 | If Opus; actual or target. |
+**Transmitter behaviour:** The **PTP listener socket** (`g_tx_state.ptp_sockfd`) is bound to the media port and joins multicast; it receives **both** PTP delay requests and **v4 rx-stats** datagrams. `dashcdg_tx_ptp_thread_main` increments `g_tx_state.v4_rx_stats_packets_received` for each parsed stats packet.
+
+**Other receivers:** If multiple RX units are on the segment, each emits its own `report_seq` stream; TX counts all stats packets seen.
+
+## Minimum client → server (or controller) report fields (extended)
+
+The struct above matches the **minimal** column list from earlier design reviews. Additional fields (receiver id, song hash, rolling loss) can be added in a **v2** payload with a new packet type or a version byte inside the payload — not implemented yet.
 
 ## Server / TX → client (optional)
 
-- **Announced parameters** already include `playout_delay_ms`, codec, FEC group sizes.  
-- Future: **explicit bitrate bounds**, **FEC level**, or **“congestion level”** enum for receivers to adapt decode effort (not required for v1 stats).
+Announced `playout_delay_ms`, codec, FEC — unchanged. Future: explicit bitrate bounds or congestion enum.
 
-## Adaptation policy (non-normative algorithm sketch)
+## Adaptation policy (non-normative)
 
 Inputs: rolling **loss**, **jitter**, **buffer headroom**, **clock offset drift**.
 
-Outputs (future):
+Outputs (future): Opus bitrate, FEC group size, `playout_delay_ms` via session update.
 
-- **Opus:** target bitrate within min/max; enable/disable VBR cap; possibly frame size / complexity (if exposed).  
-- **FEC:** increase redundancy group size when loss high; decrease when stable and bandwidth constrained.  
-- **Playout:** increase `playout_delay_ms` (via re-announce or session update) when jitter spikes; decrease cautiously when stable.
-
-**Hysteresis** and **minimum dwell time** between changes are required to avoid oscillation.
+**Hysteresis** and minimum dwell time remain required when automation is added.
 
 ## Transport options
 
-| Option | Pros | Cons |
-| --- | --- | --- |
-| Dedicated UDP port (multicast or unicast) | Low overhead | Firewall / NAT |
-| HTTP POST to TX or sidecar | Easy to debug | Higher latency |
-| In-band control packets (new `dashcdg` type) | One port | Must not starve media |
-
-Decision: **document first**, implement one path with feature flag.
+| Option | Status |
+| --- | --- |
+| Same UDP port as media + PTP | **Used** for v4 rx-stats (low rate). |
+| Dedicated stats port | Possible later to isolate from PTP. |
+| HTTP sidecar | Out of tree. |
 
 ## Related documents
 
-- [`v4-display-audio-sync.md`](v4-display-audio-sync.md) — display delay vs audio.  
-- [`../architecture/desktop-streaming.md`](../architecture/desktop-streaming.md) — end-to-end path.  
-- [`v4-audio-codecs.md`](v4-audio-codecs.md) — codec ids and MCU notes.
+- [`v4-display-audio-sync.md`](v4-display-audio-sync.md)
+- [`v4-audio-codecs.md`](v4-audio-codecs.md)
+- [`../architecture/desktop-streaming.md`](../architecture/desktop-streaming.md)

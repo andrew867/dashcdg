@@ -245,6 +245,12 @@ struct dashcdg_tx_state {
     int audio_producer_finished;
     int preview_enabled;
     int preview_hud_visible;
+    /*
+     * UINT32_MAX: auto — match announce playout_delay_ms when set, else DASHCDG_PAYOUT_DELAY_MS.
+     * 0: preview seeks CDG to the encoder timeline (no network delay compensation).
+     */
+    uint32_t tx_preview_delay_ms;
+    uint64_t v4_rx_stats_packets_received;
     int display_requested;
     int transport_v4_enabled;
     int playlist_scan_running;
@@ -1694,6 +1700,12 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
             "When stdin is a TTY, interactive keys apply (see startup banner). "
             "Press c to cycle the v4 audio codec in order; the sender re-issues session_info so receivers "
             "reconfigure decoders on the fly.\n"
+    );
+    fprintf(
+            stdout,
+            "\nPreview sync: --tx-preview-delay-ms <ms>|auto (default auto). "
+            "Auto delays local CDG preview by about the announced playout/preroll so it tracks what clients hear. "
+            "The transmitter PTP listener also counts v4 rx-stats packets from receivers (same UDP port).\n"
     );
 }
 
@@ -3617,6 +3629,10 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
                 g_tx_state.send_failures++;
             }
             pthread_mutex_unlock(&g_tx_state.mutex);
+        } else if (view.header.type == DASHCDG_PACKET_V4_RX_STATS) {
+            pthread_mutex_lock(&g_tx_state.mutex);
+            g_tx_state.v4_rx_stats_packets_received++;
+            pthread_mutex_unlock(&g_tx_state.mutex);
         }
     }
 
@@ -4558,6 +4574,21 @@ static void *dashcdg_tx_thread_main(void *unused) {
     return NULL;
 }
 
+#if DASHCDG_TX_HAVE_GL_PREVIEW || defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
+static uint64_t dashcdg_tx_preview_delay_effective_ms_locked(void) {
+    uint32_t d = g_tx_state.tx_preview_delay_ms;
+    uint16_t ad = g_tx_state.announce.playout_delay_ms;
+
+    if (d != UINT32_MAX) {
+        return (uint64_t) d;
+    }
+    if (ad > 0U) {
+        return (uint64_t) ad;
+    }
+    return (uint64_t) DASHCDG_PAYOUT_DELAY_MS;
+}
+#endif
+
 #if DASHCDG_TX_HAVE_GL_PREVIEW
 
 static void dashcdg_tx_preview_display(void) {
@@ -4580,7 +4611,15 @@ static void dashcdg_tx_preview_display(void) {
     if (g_tx_state.paused) {
         dashcdg_gl_renderer_render(&g_tx_state.renderer, &g_tx_state.pause_state);
     } else {
-        packet_ts = dashcdg_ms_to_packet_count(playback_ms);
+        uint64_t raster_ms = playback_ms;
+        uint64_t lag_ms = dashcdg_tx_preview_delay_effective_ms_locked();
+
+        if (playback_ms > lag_ms) {
+            raster_ms = playback_ms - lag_ms;
+        } else {
+            raster_ms = 0U;
+        }
+        packet_ts = dashcdg_ms_to_packet_count(raster_ms);
         dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_ts);
         dashcdg_gl_renderer_render(&g_tx_state.renderer, &g_tx_state.reader.state);
     }
@@ -4820,9 +4859,15 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
             if (g_tx_state.paused) {
                 draw_state = g_tx_state.pause_state;
             } else {
-                uint64_t packet_ts = dashcdg_ms_to_packet_count(playback_ms);
+                uint64_t raster_ms = playback_ms;
+                uint64_t lag_ms = dashcdg_tx_preview_delay_effective_ms_locked();
 
-                dashcdg_cdg_reader_seek(&g_tx_state.reader, packet_ts);
+                if (playback_ms > lag_ms) {
+                    raster_ms = playback_ms - lag_ms;
+                } else {
+                    raster_ms = 0U;
+                }
+                dashcdg_cdg_reader_seek(&g_tx_state.reader, dashcdg_ms_to_packet_count(raster_ms));
                 draw_state = g_tx_state.reader.state;
             }
         }
@@ -4972,6 +5017,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
     g_tx_state.preview_hud_visible = 0;
+    g_tx_state.tx_preview_delay_ms = UINT32_MAX;
     g_tx_state.warmup_ms = 1000;
 #if defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
     g_tx_state.display_requested = 1;
@@ -5059,6 +5105,25 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             g_tx_state.transport_v4_enabled = 1;
             g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
             g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+            continue;
+        }
+        if (strcmp(argv[i], "--tx-preview-delay-ms") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --tx-preview-delay-ms requires auto|<milliseconds>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            ++i;
+            if (strcmp(argv[i], "auto") == 0) {
+                g_tx_state.tx_preview_delay_ms = UINT32_MAX;
+            } else {
+                if (!dashcdg_tx_is_number(argv[i])) {
+                    fprintf(stderr, "%s: --tx-preview-delay-ms expects auto or a non-negative integer\n", argv[0]);
+                    dashcdg_tx_cleanup();
+                    return 1;
+                }
+                g_tx_state.tx_preview_delay_ms = (uint32_t) strtoul(argv[i], NULL, 10);
+            }
             continue;
         }
         if (strncmp(argv[i], "--v4-audio-codec=", 17) == 0) {

@@ -2,62 +2,59 @@
 
 ## Purpose
 
-Define a **single timing contract** so **TX preview (server)**, **RX display**, and **played audio** stay visually coherent across:
+Define the **timing contract** so **TX preview (server)**, **RX display**, and **played audio** stay coherent across:
 
 - Modern Windows (GL/GDI + PortAudio / WASAPI),
 - Retro Windows (GDI + WinMM),
 - Future MCUs / FreeRTOS (no desktop assumptions).
 
-This document is **normative for future work**; today’s behaviour is described as **baseline**, not as fully verified against these numbers everywhere.
-
-## Clocks and references
+## Shared timing model
 
 | Concept | Meaning |
 | --- | --- |
-| **Sender media timeline** | Logical playback position derived from encoded audio frames (`playback_ms`, `media_sequence`). |
-| **Sender wall clock** | `dashcdg_clock_now_ms()` (monotonic wall-ish time used for pacing and HUD). |
-| **Receiver playout clock** | Jitter-buffered schedule: audio presented no earlier than `playback_ms` relative to session anchor + `playout_delay_ms` (see announce / v4 session). |
-| **Display raster time** | Which CDG subcode frame / line index is shown for “now” on screen. |
+| **Sender media timeline** | Logical playback from encoded audio (`playback_ms`, `media_sequence`) and CDG batches keyed to the same clock. |
+| **Sender wall clock** | `dashcdg_clock_now_ms()` — used for pacing, HUD, and packet `header.sender_time_ms`. |
+| **Receiver playout clock** | `dashcdg_media_clock` + announced `playout_delay_ms` / v4 `startup_preroll_ms`; PCM is queued into `dashcdg_desktop_audio` and drained by the host (PortAudio / WinMM). |
+| **Display raster time** | RX: CDG state from **live** path or asset reader; must not advance ahead of queued PCM for the same timeline. |
+| **TX preview raster time** | Local CDG reader seek target ≈ **encoder timeline minus network-aligned delay** so the window matches what remotes hear. |
 
-## Problem: network delay vs local preview
+## Network delay vs local preview (TX)
 
-On **RX**, graphics and audio should both target the **same** media time after playout buffering.
+Listeners see content after serialization, FEC, UDP, **receiver preroll**, **software PCM ring**, and **DAC latency**. The transmitter’s local preview used to track **encode position** only, so it looked **early** vs clients.
 
-On **TX**, local **preview** (GDI/GL) historically tracks **file/encode position** with minimal delay, while **listeners on the network** see content delayed by:
+**Implemented:** configurable preview lag via `--tx-preview-delay-ms`:
 
-- Serialization + FEC + UDP,
-- `playout_delay_ms` and receiver jitter buffer,
-- Decode + render.
+| Mode | Behaviour |
+| --- | --- |
+| **auto** (default) | `UINT32_MAX` internal sentinel — effective delay = `announce.playout_delay_ms` when non-zero, else `DASHCDG_PAYOUT_DELAY_MS` (500 ms). |
+| **0** | No compensation — preview seeks to **current encoder playback** (matches “what we’re sending now”). |
+| **N > 0** | Seek CDG to `playback_ms - N` (clamped at 0). |
 
-Without compensating, **TX preview is early** relative to what clients hear and see.
+Implementation: `dashcdg_tx_preview_delay_effective_ms_locked()` in `platform/desktop/src/app_tx.c`; GL preview `dashcdg_tx_preview_display()` and Win32 GDI preview loop apply the lag before `dashcdg_cdg_reader_seek()`.
 
-## TX codec cycle (TTY `c`) and the media timeline
+Headless TX does not render; the setting is ignored.
 
-Hot-swapping the v4 audio codec **reopens** the MP3 decoder (new encoder state). The decoder must **seek** to the same **logical playback position** as `dashcdg_tx_current_playback_ms_locked()` so each emitted frame’s **`playback_ms`** stays on the **session wall-clock timeline**. Otherwise audio packet timestamps fall far behind CDG/video and v4 send scheduling (`playback_deadline` in `dashcdg_tx_tick_v4_locked`) can stop forwarding audio until a **full track load** (next/back), which resets anchors. Implementation: `dashcdg_desktop_audio_seek_mp3_stream()` after reopen; **`next_playback_ms`** / **`frame_index`** align to the seek position.
+## RX: single clock for A/V
 
-## Target behaviour (to implement)
+1. **Drain order** (`dashcdg_rx_drain_media_locked`): **audio jitter is drained before CDG**. If the PCM ring is full, CDG does not advance that tick — avoids graphics leading audio by the entire buffer depth.
+2. **Software ring** (`dashcdg_rx_network_stream_ring_ms()`): bounded (~500–1100 ms wideband, higher for narrowband codecs) instead of multi-second queues.
+3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): when not paused, HUD/playback uses `g_audio->timestamp_ms` (DAC-compensated) when available.
 
-1. **RX (all platforms)**  
-   - **Audio** output timestamp (`dashcdg_desktop_audio` / HUD) and **CDG raster** should use the **same** compensated media clock (already anchored via `stream_base_timestamp_ms` + playout).  
-   - Documented ring targets: multi‑second software buffer + host buffer (PortAudio high latency or WinMM chunk depth); see `desktop_audio.c`.
+## TX codec cycle (`c`) and the media timeline
 
-2. **TX preview (windowed builds)**  
-   - Introduce a configurable **`tx_preview_delay_ms`** (default ≈ **announced `playout_delay_ms`** or a conservative floor, e.g. 150–300 ms).  
-   - Rasterize / seek the preview CDG surface to **media_now − tx_preview_delay_ms** (clamped), so local preview **approximates** client-visible timing.  
-   - Headless TX may keep **zero** preview delay (no display).
+Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `dashcdg_tx_current_playback_ms_locked()` so `playback_ms` on emitted frames stays on the session timeline. See `dashcdg_desktop_audio_seek_mp3_stream()` and `dashcdg_tx_tick_v4_locked` (`playback_deadline`).
 
-3. **Consistency checks (manual / automated later)**  
-   - Same song: RX **audio PTS** vs **CDG frame index** vs **sender `playback_ms`** within one frame period + known buffer slack.  
-   - TX preview vs RX: offset should match configured network + playout delays within tolerance.
+## Related code
 
-## Non-goals (this tranche)
+| Area | File / symbol |
+| --- | --- |
+| TX preview lag | `app_tx.c` — `dashcdg_tx_preview_delay_effective_ms_locked`, preview display paths |
+| TX pacing / v4 send | `app_tx.c` — `dashcdg_tx_tick_v4_locked`, `dashcdg_tx_current_playback_ms_locked` |
+| RX drain + ring | `app_rx.c` — `dashcdg_rx_drain_media_locked`, `dashcdg_rx_network_stream_ring_ms`, `dashcdg_rx_configure_audio_locked` |
+| Audio host + timestamps | `desktop_audio.c` — `dashcdg_desktop_audio_queue_frames`, PortAudio callback / WinMM fill |
+| Raster contract | `docs/specs/cpu-rgba-raster-contract.md` |
 
-- Sub-frame genlock across machines (NTP/PTP already partially used elsewhere; full wall-clock lock is optional).  
-- Changing the v4 wire format solely for sync (use existing timestamps + session fields).
+## Non-goals
 
-## Related code (pointers)
-
-- TX audio pacing / queue: `platform/desktop/src/app_tx.c` (`dashcdg_tx_audio_thread_main`, runtime queue).  
-- RX playout + audio queue: `platform/desktop/src/app_rx.c` (`dashcdg_desktop_audio_*`, `dashcdg_rx_configure_audio_locked`).  
-- Audio host buffering: `platform/desktop/src/desktop_audio.c` (PortAudio suggested latency, WinMM buffers).  
-- Raster contract: `docs/specs/cpu-rgba-raster-contract.md`.
+- Sample-accurate genlock across machines without clock sync (PTP helps but is optional).
+- Wire-format changes solely for sync — timestamps and session fields remain sufficient.

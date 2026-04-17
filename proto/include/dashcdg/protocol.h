@@ -44,7 +44,8 @@ enum dashcdg_packet_type {
     DASHCDG_PACKET_V4_VIDEO_DELTA = 17,
     DASHCDG_PACKET_V4_REPAIR_WINDOW = 18,
     DASHCDG_PACKET_V4_BACKFILL_CHUNK = 19,
-    DASHCDG_PACKET_V4_CLOCK_SYNC = 20
+    DASHCDG_PACKET_V4_CLOCK_SYNC = 20,
+    DASHCDG_PACKET_V4_RX_STATS = 21
 };
 
 /*
@@ -293,6 +294,27 @@ struct dashcdg_v4_clock_sync_payload {
     uint32_t reserved;
 };
 
+/*
+ * Receiver → network observability (low rate). Big-endian fields on the wire.
+ * TX listens on the same UDP port as media (PTP socket) and counts/log these.
+ */
+struct dashcdg_v4_rx_stats_payload {
+    uint32_t report_seq;
+    uint64_t wall_now_ms;
+    uint64_t sender_time_observed_ms;
+    int32_t clock_offset_estimate_ms;
+    uint16_t playout_delay_ms_config;
+    uint16_t reserved0;
+    uint32_t audio_buffer_ms;
+    uint32_t audio_queue_pressure_events;
+    uint32_t fec_audio_recovered;
+    uint16_t jitter_rms_ms;
+    uint16_t loss_pct_x100;
+    uint8_t v4_codec_id;
+    uint8_t reserved1[3];
+    uint32_t opus_bitrate_bps;
+};
+
 struct dashcdg_packet_view {
     struct dashcdg_packet_header header;
     struct dashcdg_announce_payload announce;
@@ -314,6 +336,7 @@ struct dashcdg_packet_view {
     struct dashcdg_v4_repair_window_payload v4_repair_window;
     struct dashcdg_v4_backfill_chunk_payload v4_backfill_chunk;
     struct dashcdg_v4_clock_sync_payload v4_clock_sync;
+    struct dashcdg_v4_rx_stats_payload v4_rx_stats;
 };
 
 size_t dashcdg_protocol_serialize_announce(
@@ -447,6 +470,13 @@ size_t dashcdg_protocol_serialize_v4_clock_sync(
         size_t buffer_size,
         const struct dashcdg_packet_header *header,
         const struct dashcdg_v4_clock_sync_payload *payload
+);
+
+size_t dashcdg_protocol_serialize_v4_rx_stats(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_rx_stats_payload *payload
 );
 
 int dashcdg_protocol_parse_packet(

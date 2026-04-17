@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,6 +140,12 @@ struct receiver_state {
     uint64_t asset_bytes_written;
     uint64_t last_progress_local_ms;
     uint64_t last_datagram_local_ms;
+    uint32_t rx_interarrival_jitter_ema_ms;
+    int rx_sender_skew_ema_inited;
+    int64_t rx_sender_skew_ema_ms;
+    uint32_t rx_stats_report_seq;
+    uint64_t rx_stats_last_sent_local_ms;
+    uint64_t v4_rx_stats_peer_packets;
     uint64_t audio_packets;
     uint64_t cdg_batch_packets;
     uint64_t ptp_sync_packets;
@@ -264,6 +271,9 @@ static const char *g_endpoint_address;
 static struct in_addr g_endpoint_in_addr;
 static int g_endpoint_is_multicast;
 static int g_endpoint_is_broadcast;
+static uint32_t g_rx_stats_interval_ms = 0U;
+static dashcdg_socket_t g_rx_stats_sockfd = DASHCDG_INVALID_SOCKET;
+static struct sockaddr_in g_rx_stats_dest;
 static int g_headless = 0;
 static int g_audio_stream_started = 0;
 static int g_audio_start_inflight = 0;
@@ -562,11 +572,15 @@ static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
 
 static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
-    fprintf(stderr, "usage: %s [--help] [--headless] [--win-gdi|--gdi] [endpoint-address] [port]\n", argv0);
+    fprintf(
+            stderr,
+            "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
+            argv0
+    );
     fprintf(stderr, "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
     fprintf(stderr, "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
 #else
-    fprintf(stderr, "usage: %s [--help] [--headless] [endpoint-address] [port]\n", argv0);
+    fprintf(stderr, "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [endpoint-address] [port]\n", argv0);
 #endif
     fprintf(
             stderr,
@@ -607,6 +621,11 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT
     );
+    fprintf(
+            stdout,
+            "\n--rx-stats-ms <ms>: v4 only; send periodic observability packets to the session endpoint "
+            "(default off; try 2000 ms). Transmitters listen on the same UDP port (PTP path) and count them.\n"
+    );
 }
 
 static void receiver_state_reset(struct receiver_state *state) {
@@ -629,6 +648,12 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->duplicate_chunks = 0;
     state->asset_bytes_written = 0;
     state->last_progress_local_ms = 0;
+    state->rx_interarrival_jitter_ema_ms = 0U;
+    state->rx_sender_skew_ema_inited = 0;
+    state->rx_sender_skew_ema_ms = 0;
+    state->rx_stats_report_seq = 0U;
+    state->rx_stats_last_sent_local_ms = 0U;
+    state->v4_rx_stats_peer_packets = 0U;
     state->audio_packets = 0;
     state->cdg_batch_packets = 0;
     state->ptp_sync_packets = 0;
@@ -2632,6 +2657,115 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
     }
 }
 
+static void dashcdg_rx_init_stats_sender(int port) {
+    int ttl = 1;
+    unsigned char loopback = 0;
+    struct dashcdg_multicast_interface multicast_interfaces[DASHCDG_MAX_MULTICAST_INTERFACES];
+    size_t multicast_interface_count = 0U;
+
+    if (g_rx_stats_interval_ms == 0U) {
+        return;
+    }
+    g_rx_stats_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_rx_stats_sockfd == DASHCDG_INVALID_SOCKET) {
+        perror("[rx] stats socket");
+        return;
+    }
+    if (g_endpoint_is_multicast) {
+        multicast_interface_count = dashcdg_net_list_multicast_interfaces(
+                multicast_interfaces,
+                DASHCDG_MAX_MULTICAST_INTERFACES
+        );
+        if (multicast_interface_count > 0U &&
+                !dashcdg_net_set_multicast_interface(g_rx_stats_sockfd, &multicast_interfaces[0].ipv4_addr)) {
+            perror("[rx] stats IP_MULTICAST_IF");
+        }
+        if (setsockopt(g_rx_stats_sockfd, IPPROTO_IP, IP_MULTICAST_TTL, (const char *) &ttl, sizeof(ttl)) != 0) {
+            perror("[rx] stats IP_MULTICAST_TTL");
+        }
+        if (setsockopt(g_rx_stats_sockfd, IPPROTO_IP, IP_MULTICAST_LOOP, (const char *) &loopback, sizeof(loopback)) != 0) {
+            perror("[rx] stats IP_MULTICAST_LOOP");
+        }
+    } else if (g_endpoint_is_broadcast) {
+        int enable_broadcast = 1;
+
+        if (setsockopt(
+                    g_rx_stats_sockfd,
+                    SOL_SOCKET,
+                    SO_BROADCAST,
+                    (const char *) &enable_broadcast,
+                    sizeof(enable_broadcast)
+            ) != 0) {
+            perror("[rx] stats SO_BROADCAST");
+        }
+    }
+
+    memset(&g_rx_stats_dest, 0, sizeof(g_rx_stats_dest));
+    g_rx_stats_dest.sin_family = AF_INET;
+    g_rx_stats_dest.sin_port = htons((uint16_t) port);
+    g_rx_stats_dest.sin_addr = g_endpoint_in_addr;
+}
+
+static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    struct dashcdg_packet_header hdr;
+    struct dashcdg_v4_rx_stats_payload pl;
+    size_t sz;
+    uint64_t sender_observed_ms;
+
+    if (g_rx_stats_interval_ms == 0U || g_rx_stats_sockfd == DASHCDG_INVALID_SOCKET) {
+        return;
+    }
+    if (g_receiver.announced_transport_version != DASHCDG_PROTOCOL_VERSION_V4 || !g_receiver.network_audio_enabled) {
+        return;
+    }
+    if (g_receiver.rx_stats_last_sent_local_ms != 0U &&
+            now_ms - g_receiver.rx_stats_last_sent_local_ms < (uint64_t) g_rx_stats_interval_ms) {
+        return;
+    }
+
+    memset(&hdr, 0, sizeof(hdr));
+    memset(&pl, 0, sizeof(pl));
+    hdr.sequence = ++g_receiver.rx_stats_report_seq;
+    hdr.sender_time_ms = now_ms;
+
+    if (g_receiver.have_clock) {
+        sender_observed_ms = (uint64_t) dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) now_ms);
+    } else {
+        sender_observed_ms = 0U;
+    }
+
+    pl.report_seq = g_receiver.rx_stats_report_seq;
+    pl.wall_now_ms = now_ms;
+    pl.sender_time_observed_ms = sender_observed_ms;
+    pl.clock_offset_estimate_ms = (int32_t) g_receiver.sender_offset_ms;
+    pl.playout_delay_ms_config = g_receiver.announced_playout_delay_ms;
+    pl.audio_buffer_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+    pl.audio_queue_pressure_events = (uint32_t) g_receiver.audio_queue_overflows;
+    pl.fec_audio_recovered = (uint32_t) g_receiver.fec_audio_recovered;
+    pl.jitter_rms_ms = (uint16_t) (g_receiver.rx_interarrival_jitter_ema_ms > 65535U ? 65535U : g_receiver.rx_interarrival_jitter_ema_ms);
+    pl.loss_pct_x100 = 0U;
+    pl.v4_codec_id = g_receiver.announced_audio_codec_id;
+    pl.opus_bitrate_bps = 0U;
+
+    sz = dashcdg_protocol_serialize_v4_rx_stats(packet, sizeof(packet), &hdr, &pl);
+    if (sz == 0U) {
+        return;
+    }
+    if (sendto(
+                g_rx_stats_sockfd,
+                (const char *) packet,
+                (int) sz,
+                0,
+                (struct sockaddr *) &g_rx_stats_dest,
+                sizeof(g_rx_stats_dest)
+        ) != (int) sz) {
+        perror("[rx] send v4 rx-stats");
+        return;
+    }
+    g_receiver.rx_stats_last_sent_local_ms = now_ms;
+}
+
 static void *network_thread(void *user_data) {
     int port = *(int *) user_data;
     dashcdg_socket_t sockfd;
@@ -2704,14 +2838,35 @@ static void *network_thread(void *user_data) {
             uint64_t local_now_ms = dashcdg_clock_now_ms();
 
             pthread_mutex_lock(&g_receiver.mutex);
-            g_receiver.datagrams_received++;
-            g_receiver.bytes_received += (uint64_t) received;
-            g_receiver.last_datagram_local_ms = local_now_ms;
+            {
+                uint64_t prev_dg = g_receiver.last_datagram_local_ms;
+
+                g_receiver.datagrams_received++;
+                g_receiver.bytes_received += (uint64_t) received;
+                g_receiver.last_datagram_local_ms = local_now_ms;
+                if (prev_dg > 0U && local_now_ms > prev_dg) {
+                    uint64_t gap = local_now_ms - prev_dg;
+                    uint64_t err = gap > 25U ? gap - 25U : 25U - gap;
+
+                    g_receiver.rx_interarrival_jitter_ema_ms =
+                            (g_receiver.rx_interarrival_jitter_ema_ms * 7U + (uint32_t) err) / 8U;
+                }
+            }
 
             if (!dashcdg_protocol_parse_packet(&view, buffer, received)) {
                 g_receiver.parse_failures++;
                 pthread_mutex_unlock(&g_receiver.mutex);
                 continue;
+            }
+            {
+                int64_t skew = (int64_t) view.header.sender_time_ms - (int64_t) local_now_ms;
+
+                if (!g_receiver.rx_sender_skew_ema_inited) {
+                    g_receiver.rx_sender_skew_ema_ms = skew;
+                    g_receiver.rx_sender_skew_ema_inited = 1;
+                } else {
+                    g_receiver.rx_sender_skew_ema_ms = (g_receiver.rx_sender_skew_ema_ms * 7 + skew) / 8;
+                }
             }
 
             switch (view.header.type) {
@@ -2830,6 +2985,9 @@ static void *network_thread(void *user_data) {
                     g_receiver.v4_clock_sync_packets++;
                     handle_v4_clock_sync(&g_receiver, &view, local_now_ms);
                     break;
+                case DASHCDG_PACKET_V4_RX_STATS:
+                    g_receiver.v4_rx_stats_peer_packets++;
+                    break;
                 default:
                     g_receiver.unknown_packets++;
                     break;
@@ -2895,6 +3053,7 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
         should_start_audio = dashcdg_rx_claim_audio_start_locked();
         dashcdg_rx_publish_render_snapshot_locked(now_ms);
+        dashcdg_rx_maybe_send_v4_stats_locked(now_ms);
         if (g_headless && (last_status_ms == 0U || now_ms - last_status_ms >= 1000U)) {
             dashcdg_rx_print_status_locked();
             last_status_ms = now_ms;
@@ -3363,6 +3522,19 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     g_endpoint_is_broadcast = 0;
 
     for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--rx-stats-ms") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --rx-stats-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                return 1;
+            }
+            ++i;
+            if (!dashcdg_rx_is_number(argv[i])) {
+                fprintf(stderr, "%s: --rx-stats-ms expects a non-negative integer\n", argv[0]);
+                return 1;
+            }
+            g_rx_stats_interval_ms = (uint32_t) strtoul(argv[i], NULL, 10);
+            continue;
+        }
         if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
             continue;
@@ -3443,6 +3615,8 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         fprintf(stderr, "failed to initialize network stack\n");
         return 1;
     }
+
+    dashcdg_rx_init_stats_sender(port);
 
     memset(&g_receiver, 0, sizeof(g_receiver));
     pthread_mutex_init(&g_receiver.mutex, NULL);

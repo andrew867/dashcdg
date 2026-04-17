@@ -12,6 +12,7 @@
 #define DASHCDG_V4_SESSION_INFO_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 1U + 1U + 1U + 1U + 2U + 1U + 1U + 2U + 2U + 1U + 1U + 1U + 1U + 1U + 1U + 4U + 8U)
 #define DASHCDG_V4_LOADING_SCREEN_PAYLOAD_SIZE (4U + 1U + 1U + 1U + 1U + 8U + DASHCDG_MAX_V4_LOADING_TEXT)
 #define DASHCDG_V4_CLOCK_SYNC_PAYLOAD_SIZE 24U
+#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE 52U
 
 static void dashcdg_write_u16(uint8_t *dst, uint16_t value) {
     dst[0] = (uint8_t) ((value >> 8U) & 0xFFU);
@@ -50,6 +51,10 @@ static uint64_t dashcdg_read_u64(const uint8_t *src) {
     }
 
     return value;
+}
+
+static int32_t dashcdg_read_s32(const uint8_t *src) {
+    return (int32_t) dashcdg_read_u32(src);
 }
 
 int dashcdg_v4_audio_codec_is_narrowband(uint8_t codec_id) {
@@ -764,6 +769,57 @@ size_t dashcdg_protocol_serialize_v4_clock_sync(
     return offset;
 }
 
+size_t dashcdg_protocol_serialize_v4_rx_stats(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_rx_stats_payload *payload
+) {
+    size_t offset;
+
+    if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_RX_STATS_PAYLOAD_SIZE) {
+        return 0;
+    }
+
+    offset = dashcdg_write_header_version(
+            buffer,
+            buffer_size,
+            header,
+            DASHCDG_PROTOCOL_VERSION_V4,
+            DASHCDG_PACKET_V4_RX_STATS,
+            DASHCDG_V4_RX_STATS_PAYLOAD_SIZE
+    );
+    dashcdg_write_u32(buffer + offset, payload->report_seq);
+    offset += 4U;
+    dashcdg_write_u64(buffer + offset, payload->wall_now_ms);
+    offset += 8U;
+    dashcdg_write_u64(buffer + offset, payload->sender_time_observed_ms);
+    offset += 8U;
+    dashcdg_write_u32(buffer + offset, (uint32_t) payload->clock_offset_estimate_ms);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->playout_delay_ms_config);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->reserved0);
+    offset += 2U;
+    dashcdg_write_u32(buffer + offset, payload->audio_buffer_ms);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->audio_queue_pressure_events);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->fec_audio_recovered);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->jitter_rms_ms);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->loss_pct_x100);
+    offset += 2U;
+    buffer[offset++] = payload->v4_codec_id;
+    buffer[offset++] = payload->reserved1[0];
+    buffer[offset++] = payload->reserved1[1];
+    buffer[offset++] = payload->reserved1[2];
+    dashcdg_write_u32(buffer + offset, payload->opus_bitrate_bps);
+    offset += 4U;
+    return offset;
+}
+
 int dashcdg_protocol_parse_packet(
         struct dashcdg_packet_view *view,
         const uint8_t *buffer,
@@ -1165,6 +1221,40 @@ int dashcdg_protocol_parse_packet(
             view->v4_clock_sync.startup_state = dashcdg_read_u32(buffer + offset);
             offset += 4U;
             view->v4_clock_sync.reserved = dashcdg_read_u32(buffer + offset);
+            return 1;
+
+        case DASHCDG_PACKET_V4_RX_STATS:
+            if (view->header.version != DASHCDG_PROTOCOL_VERSION_V4 ||
+                    payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_SIZE) {
+                return 0;
+            }
+            view->v4_rx_stats.report_seq = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->v4_rx_stats.wall_now_ms = dashcdg_read_u64(buffer + offset);
+            offset += 8U;
+            view->v4_rx_stats.sender_time_observed_ms = dashcdg_read_u64(buffer + offset);
+            offset += 8U;
+            view->v4_rx_stats.clock_offset_estimate_ms = dashcdg_read_s32(buffer + offset);
+            offset += 4U;
+            view->v4_rx_stats.playout_delay_ms_config = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->v4_rx_stats.reserved0 = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->v4_rx_stats.audio_buffer_ms = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->v4_rx_stats.audio_queue_pressure_events = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->v4_rx_stats.fec_audio_recovered = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->v4_rx_stats.jitter_rms_ms = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->v4_rx_stats.loss_pct_x100 = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->v4_rx_stats.v4_codec_id = buffer[offset++];
+            view->v4_rx_stats.reserved1[0] = buffer[offset++];
+            view->v4_rx_stats.reserved1[1] = buffer[offset++];
+            view->v4_rx_stats.reserved1[2] = buffer[offset++];
+            view->v4_rx_stats.opus_bitrate_bps = dashcdg_read_u32(buffer + offset);
             return 1;
 
         default:
