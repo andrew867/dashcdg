@@ -7,6 +7,8 @@
 #define DASHCDG_PROTOCOL_MAGIC 0x444B4731U
 #define DASHCDG_PROTOCOL_VERSION 3U
 #define DASHCDG_PROTOCOL_VERSION_V4 4U
+/* Reserved for multistream/simulcast/adaptation work; wire format TBD — see docs/specs/v5-multistream-adaptation-architecture.md */
+#define DASHCDG_PROTOCOL_VERSION_V5 5U
 #define DASHCDG_MAX_SONG_ID 64U
 #define DASHCDG_MAX_PACKET_SIZE 1400U
 #define DASHCDG_MAX_ASSET_CHUNK 1024U

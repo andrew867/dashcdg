@@ -41,6 +41,7 @@
 #include "dashcdg/nb_codec_adapters.h"
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/transport_udp.h"
+#include "dashcdg/win32_timing_boost.h"
 
 /*
  * MinGW32 builds use -D__USE_MINGW_ANSI_STDIO=0 (see Makefile), so printf-style
@@ -2823,6 +2824,7 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
 }
 
 static void *network_thread(void *user_data) {
+    struct dashcdg_win32_mmcss_handle mmcss;
     int port = *(int *) user_data;
     dashcdg_socket_t sockfd;
     struct dashcdg_udp_rx_config rx_cfg;
@@ -2876,6 +2878,8 @@ static void *network_thread(void *user_data) {
             fflush(stdout);
         }
     }
+
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
 
     memset(&endpoint_addr, 0, sizeof(endpoint_addr));
     endpoint_addr.sin_family = AF_INET;
@@ -3098,9 +3102,11 @@ static void dashcdg_rx_start_audio_async(void) {
 }
 
 static void *dashcdg_rx_media_thread_main(void *unused) {
+    struct dashcdg_win32_mmcss_handle mmcss;
     uint64_t last_status_ms = 0U;
 
     (void) unused;
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
     for (;;) {
         int should_start_audio = 0;
         uint64_t now_ms = dashcdg_clock_now_ms();
@@ -3671,6 +3677,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         fprintf(stderr, "failed to initialize network stack\n");
         return 1;
     }
+    dashcdg_win32_process_timing_enable();
 
     dashcdg_rx_init_stats_sender(port);
 

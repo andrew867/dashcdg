@@ -116,11 +116,13 @@ else
 LDLIBS_DESKTOP_AUDIO := $(DESKTOP_PORTAUDIO_LINK)
 endif
 
-LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(OPUS_LINK) -lpthread
+# MMCSS (Avrt) + 1 ms timer resolution (WinMM) for desktop/stream threads; see win32_timing_boost.c
+WINDOWS_STREAMING_TIMING_LIBS := -lavrt -lwinmm
+LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
 WINDOWS_GDI_LIBS := -lgdi32 -luser32
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-LDLIBS_DESKTOP_RETRO := -lwinmm -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_RETRO := $(WINDOWS_STREAMING_TIMING_LIBS) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 DESKTOP_AUDIO_CPPFLAGS := -DDASHCDG_DESKTOP_WIN32_WAVEOUT=1
 endif
 else
@@ -138,8 +140,8 @@ BIN_DIR := $(BUILD_DIR)/bin
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
 RX_GDI_BIN := $(BIN_DIR)/desktop-gdi-rx.exe
 TX_GDI_BIN := $(BIN_DIR)/desktop-gdi-tx.exe
-LDLIBS_DESKTOP_RX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
-LDLIBS_DESKTOP_TX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_RX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_TX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 RETRO_RX_BIN :=
 RETRO_TX_BIN :=
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
@@ -194,7 +196,7 @@ CODEC_SBC_OBJS := $(OBJ_DIR)/bt_sbc_sbc.o $(OBJ_DIR)/bt_sbc_sbc_primitives.o
 
 DESKTOP_NB_CODEC_OBJS := $(OBJ_DIR)/desktop_nb_evrc_codec.o $(OBJ_DIR)/desktop_nb_qcelp_codec.o $(OBJ_DIR)/desktop_nb_sbc_codec.o
 
-DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_win32_timing_boost.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
 DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
 DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
 DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
@@ -326,6 +328,9 @@ $(OBJ_DIR)/desktop_stream_runtime.o: platform/desktop/src/stream_runtime.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_transport_udp.o: platform/desktop/src/transport_udp.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_win32_timing_boost.o: platform/desktop/src/win32_timing_boost.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_win32_gdi_view.o: platform/desktop/src/win32_gdi_view.c

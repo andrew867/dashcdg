@@ -64,6 +64,7 @@
 #include "dashcdg/nb_ima_codec.h"
 #include "dashcdg/nb_codec_adapters.h"
 #include "dashcdg/stream_runtime.h"
+#include "dashcdg/win32_timing_boost.h"
 
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) && !defined(_WIN32)
 #error "DASHCDG_DESKTOP_RETRO_WINDOWS is only supported on Windows desktop builds"
@@ -3158,6 +3159,7 @@ static int dashcdg_tx_audio_open_source(
 }
 
 static void *dashcdg_tx_audio_thread_main(void *unused) {
+    struct dashcdg_win32_mmcss_handle mmcss;
     uint64_t local_generation = UINT64_MAX;
     struct dashcdg_desktop_audio *source = NULL;
     struct dashcdg_opus_encoder encoder;
@@ -3178,6 +3180,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     uint8_t current_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
 
     (void) unused;
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
     memset(&encoder, 0, sizeof(encoder));
     memset(pcm_fifo, 0, sizeof(pcm_fifo));
     amr_wb_encoder = NULL;
@@ -3569,15 +3572,18 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
         sbc_encoder = NULL;
     }
     dashcdg_tx_audio_close_source(&source, &encoder, &encoder_ready);
+    dashcdg_win32_thread_timing_boost_end(&mmcss);
     return NULL;
 }
 
 static void *dashcdg_tx_ptp_thread_main(void *unused) {
+    struct dashcdg_win32_mmcss_handle mmcss;
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
     struct sockaddr_in source_addr;
     socklen_t source_addr_len;
 
     (void) unused;
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
 
     for (;;) {
         int received;
@@ -3636,6 +3642,7 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
         }
     }
 
+    dashcdg_win32_thread_timing_boost_end(&mmcss);
     return NULL;
 }
 
@@ -4241,10 +4248,12 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
 }
 
 static void *dashcdg_tx_thread_main(void *unused) {
+    struct dashcdg_win32_mmcss_handle mmcss;
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
     size_t previous_offset = 0;
 
     (void) unused;
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
 
     for (;;) {
         uint64_t now_ms = dashcdg_clock_now_ms();
@@ -4252,6 +4261,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
         pthread_mutex_lock(&g_tx_state.mutex);
         if (g_tx_state.shutdown_requested) {
             pthread_mutex_unlock(&g_tx_state.mutex);
+            dashcdg_win32_thread_timing_boost_end(&mmcss);
             break;
         }
 
@@ -4749,10 +4759,12 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv);
 #endif
 
 static void *dashcdg_tx_render_thread_main(void *user_data) {
+    struct dashcdg_win32_mmcss_handle mmcss;
     struct dashcdg_tx_glut_bootstrap *bootstrap = (struct dashcdg_tx_glut_bootstrap *) user_data;
     int argc = bootstrap != NULL ? bootstrap->argc : 0;
     char **argv = bootstrap != NULL ? bootstrap->argv : NULL;
 
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
     glutInitWindowSize(DASHCDG_VISIBLE_WIDTH * 4, DASHCDG_VISIBLE_HEIGHT * 4);
@@ -4767,10 +4779,10 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
         fprintf(stderr, "[tx] falling back to Win32 GDI preview\n");
         glutDestroyWindow(glutGetWindow());
         dashcdg_tx_run_win32_gdi_preview_loop(argc, argv);
-        return NULL;
+        goto dashcdg_tx_render_thread_done;
 #else
         g_tx_state.shutdown_requested = 1;
-        return NULL;
+        goto dashcdg_tx_render_thread_done;
 #endif
     }
 
@@ -4780,6 +4792,8 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
     glutSpecialFunc(dashcdg_tx_preview_special);
     glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_tx_preview_timer, 0);
     glutMainLoop();
+dashcdg_tx_render_thread_done:
+    dashcdg_win32_thread_timing_boost_end(&mmcss);
     return NULL;
 }
 
@@ -5070,6 +5084,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         pthread_mutex_destroy(&g_tx_state.mutex);
         return 1;
     }
+    dashcdg_win32_process_timing_enable();
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--headless") == 0) {
