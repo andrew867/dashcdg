@@ -36,6 +36,17 @@ echo "[p3-vendor] Building shared libopus -> $OPUS_PREFIX"
 mkdir -p "$OPUS_PREFIX"
 cd "$OPUS_SRC"
 if [[ ! -f ./configure ]]; then
+  if [[ ! -x ./autogen.sh ]]; then
+    echo "[p3-vendor] Missing autogen.sh in Opus tree" >&2
+    exit 1
+  fi
+  if ! command -v autoreconf >/dev/null 2>&1; then
+    echo "[p3-vendor] autoreconf not found (needed to generate configure from opus git)." >&2
+    echo "  Install autotools (MSYS2 pacman):" >&2
+    echo "    pacman -S --needed base-devel autoconf automake libtool m4" >&2
+    echo "  Run this script from MSYS2 UCRT64/MSYS terminal if tools are installed there." >&2
+    exit 1
+  fi
   ./autogen.sh
 fi
 # Shared + static: package copies bin/libopus-0.dll

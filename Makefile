@@ -133,8 +133,8 @@ WINDOWS_RUNTIME_DLLS :=
 endif
 LDLIBS_DESKTOP_AUDIO := $(DESKTOP_PORTAUDIO_LINK)
 
-# MMCSS (Avrt) + 1 ms timer resolution (WinMM) for desktop/stream threads; see win32_timing_boost.c
-WINDOWS_STREAMING_TIMING_LIBS := -lavrt -lwinmm
+# WinMM for timeBeginPeriod; MMCSS (avrt.dll) is loaded at runtime on Vista+ only — do not link -lavrt (no AVRT on XP/2K). See win32_timing_boost.c
+WINDOWS_STREAMING_TIMING_LIBS := -lwinmm
 LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
 WINDOWS_GDI_LIBS := -lgdi32 -luser32

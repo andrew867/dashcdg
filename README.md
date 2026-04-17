@@ -114,7 +114,7 @@ GDI/user32 — **no** FreeGLUT/GLEW in that link (see
 
 **Retro bundle** (`desktop-retro-*.exe`, `WINDOWS_RETRO_BUNDLE=1`): GDI only, **no** OpenGL; **Opus + PortAudio** via the same PIII-safe DLLs as other mingw32 builds (see `docs/specs/vendored-opus-portaudio-windows.md`). Narrowband codecs remain available via v4 session / `c` key.
 
-**Windows desktop timing (TX/RX):** builds link **`AVRT.dll`** and **`WINMM.dll`** (system components) for MMCSS “Pro Audio” thread registration and `timeBeginPeriod(1)` via `platform/desktop/src/win32_timing_boost.c`. This reduces timer quantization under foreground UI load; it is not a guarantee of glitch-free audio under arbitrary host scheduling.
+**Windows desktop timing (TX/RX):** builds import only **`WINMM.dll`** for `timeBeginPeriod(1)`; on Vista+, `avrt.dll` (MMCSS) is **loaded at runtime** if present — static links to AVRT were removed so **Windows XP / 2000** EXEs start without “AVRT.dll not found”. See `platform/desktop/src/win32_timing_boost.c`.
 
 On the current Windows/MSYS2 flow:
 

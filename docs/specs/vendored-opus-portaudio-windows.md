@@ -2,7 +2,7 @@
 
 ## Goals
 
-0. **System DLLs:** all Windows desktop binaries also import **`AVRT.dll`** / **`WINMM.dll`** for streaming thread timing (`win32_timing_boost.c`); those are OS components, not vendored.
+0. **System DLLs:** all Windows desktop binaries import **`WINMM.dll`** for `timeBeginPeriod`; **`AVRT.dll`** is **optional** — loaded only on Vista+ via `LoadLibrary` (`win32_timing_boost.c`). EXEs **do not** statically import AVRT (missing on XP/2000).
 1. **Pin upstream sources** under `audio_modules/` (same pattern as AMR/EVRC/SBC), reproducible via scripts.
 2. **MinGW i686 default (current):** `Makefile` sets `DASHCDG_OPUS_VENDOR` / `DASHCDG_PORTAUDIO_VENDOR` to **on** for `MINGW_ARCH=mingw32` with prefixes under **`build/mingw32-p3-vendor/{opus,portaudio}`**. **`scripts/build_mingw32_p3_opus_portaudio_shared.sh`** builds **shared** `libopus-0.dll` and `libportaudio.dll` with **`-march=pentium3 -mno-sse2`** so Pentium III / pre-SSE2 laptops do not fault on MSYS2 SSE2-assuming codec DLLs. **`scripts/build_release.sh`** / **`scripts/build_windows_sneakernet_dist.sh`** run this script before `mingw32` packages (skip with **`SKIP_MINGW32_P3_VENDOR=1`** if DLLs are already built).
 3. **Retro (`WINDOWS_RETRO_BUNDLE=1`):** `desktop-retro-rx.exe` / `desktop-retro-tx.exe` now link **real Opus + PortAudio** (same PIII-safe DLLs) instead of the Opus stub + WinMM-only path.
@@ -16,6 +16,16 @@ audio_modules/portaudio/vendor/portaudio # upstream PortAudio/portaudio (optiona
 ```
 
 Populated by `scripts/fetch_opus_portaudio_vendors.sh`. Large trees are **gitignored** under `audio_modules/*/vendor/` unless intentionally committed.
+
+### Autotools for Opus `configure` (git checkout)
+
+Building from a **git** clone runs `./autogen.sh`, which requires **`autoreconf`** on your PATH:
+
+```bash
+pacman -S --needed base-devel autoconf automake libtool m4
+```
+
+Install and run `./scripts/build_mingw32_p3_opus_portaudio_shared.sh` from a shell where those tools resolve (often **MSYS MSYS2** terminal, not only mingw64).
 
 ## Makefile integration (implemented)
 

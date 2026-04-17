@@ -138,8 +138,8 @@ Direct DLL dependencies (from `objdump -p … \| grep 'DLL Name'`):
 - `msvcrt.dll`
 - `WS2_32.dll`
 - `IPHLPAPI.DLL`
-- `AVRT.dll` (system — MMCSS / multimedia thread scheduling; linked for `win32_timing_boost.c`)
-- `WINMM.dll` (system — `timeBeginPeriod` / `timeEndPeriod`)
+- `WINMM.dll` (system — `timeBeginPeriod` / `timeEndPeriod`; only timing DLL required on XP)
+- *(No static import of `AVRT.dll` — MMCSS is optional via `LoadLibrary` on Vista+; XP/2000 have no AVRT.)*
 - `OPENGL32.dll`
 - `glew32.dll` (bundled)
 - `libfreeglut.dll` (bundled)
@@ -217,12 +217,12 @@ rebuilds every third-party dependency for that era.
 
 ## MMCSS / 1 ms timer resolution (desktop TX/RX)
 
-The desktop transmitter and receiver call into **`AVRT.dll`** (MMCSS “Pro Audio” task
-registration) and **`WINMM.dll`** (`timeBeginPeriod(1)` / `timeEndPeriod`) from
-`platform/desktop/src/win32_timing_boost.c`, linked on all Windows desktop and retro
-targets (`-lavrt -lwinmm` in the `Makefile`). This improves scheduling and sleep
-granularity for streaming threads; it does not remove all audio glitches under heavy
-foreground UI load.
+The desktop transmitter and receiver call **`WINMM.dll`** (`timeBeginPeriod` / `timeEndPeriod`)
+from `platform/desktop/src/win32_timing_boost.c` (`-lwinmm` only). On Vista and later,
+the same module **loads `avrt.dll` dynamically** for MMCSS “Pro Audio”; on Windows XP and
+Windows 2000 there is no AVRT — the code falls back to higher thread priority only.
+This improves scheduling and sleep granularity where supported; it does not remove all
+audio glitches under heavy foreground UI load.
 
 ## Unified zip output (`build/dist`)
 

@@ -75,7 +75,7 @@ Variables (see `Makefile`):
 - `WINDOWS_LEGACY_TARGET=1` — XP-oriented PE subsystem flags; on i686 adds `-march=pentium3 -mtune=pentium3` when retro bundle is off.
 - `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, same **`-march=pentium3`** object tuning as other pre-SSE2 profiles, `LDLIBS_DESKTOP_RETRO` (no OpenGL/Opus DLLs in the copy list; audio via WinMM).
 
-**Windows TX/RX:** desktop apps link **`AVRT.dll`** / **`WINMM.dll`** for MMCSS + 1 ms timer resolution (`win32_timing_boost.c`).
+**Windows TX/RX:** **`WINMM.dll`** for timer resolution; MMCSS uses **`AVRT.dll`** only when loadable (Vista+); XP/2000 skip AVRT (`win32_timing_boost.c`).
 
 ## Pixel path (GL vs GDI)
 

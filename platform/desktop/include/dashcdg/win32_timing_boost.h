@@ -2,10 +2,9 @@
 #define DASHCDG_WIN32_TIMING_BOOST_H
 
 /*
- * Windows-only: MMCSS ("Pro Audio") + optional thread priority for real-time-ish
- * streaming threads, plus 1 ms system timer resolution (timeBeginPeriod) so
- * Sleep() in the TX/RX loops is less granular under load (IDE foreground, etc.).
- * See docs/specs/v5-multistream-adaptation-architecture.md (enterprise timing section).
+ * Windows-only: MMCSS ("Pro Audio") via runtime LoadLibrary(avrt.dll) when available,
+ * fallback thread priority otherwise; WinMM timeBeginPeriod(1) process-wide (XP+).
+ * Do not static-link AVRT — AVRT.dll does not exist on XP/2000.
  */
 
 struct dashcdg_win32_mmcss_handle {
