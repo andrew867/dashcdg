@@ -9,6 +9,30 @@ EXTRA_LDFLAGS :=
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
 UNAME_S := $(shell uname -s 2>/dev/null)
 
+# Optional vendored libopus (all platforms): DASHCDG_OPUS_VENDOR=1 OPUS_VENDOR_PREFIX=build/x86-retro/prefix-opus make debug
+DASHCDG_OPUS_VENDOR ?= 0
+OPUS_VENDOR_PREFIX ?=
+OPUS_CPPFLAGS :=
+OPUS_LINK := -lopus
+ifeq ($(DASHCDG_OPUS_VENDOR),1)
+ifneq ($(OPUS_VENDOR_PREFIX),)
+OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
+OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
+endif
+endif
+# Optional vendored PortAudio (paths that link -lportaudio; not used with WinMM-only retro)
+DASHCDG_PORTAUDIO_VENDOR ?= 0
+PORTAUDIO_VENDOR_PREFIX ?=
+PORTAUDIO_CPPFLAGS :=
+DESKTOP_PORTAUDIO_LINK := -lportaudio
+ifeq ($(DASHCDG_PORTAUDIO_VENDOR),1)
+ifneq ($(PORTAUDIO_VENDOR_PREFIX),)
+PORTAUDIO_CPPFLAGS := -I$(PORTAUDIO_VENDOR_PREFIX)/include -DDASHCDG_PORTAUDIO_VENDOR_BUILD=1
+DESKTOP_PORTAUDIO_LINK := -L$(PORTAUDIO_VENDOR_PREFIX)/lib -lportaudio
+endif
+endif
+CFLAGS += $(OPUS_CPPFLAGS) $(PORTAUDIO_CPPFLAGS)
+
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
 MINGW_ARCH ?= mingw64
 ifeq ($(MINGW_ARCH),mingw32)
@@ -89,20 +113,8 @@ endif
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
 LDLIBS_DESKTOP_AUDIO := -lwinmm
 else
-LDLIBS_DESKTOP_AUDIO := -lportaudio
+LDLIBS_DESKTOP_AUDIO := $(DESKTOP_PORTAUDIO_LINK)
 endif
-# Optional vendored libopus: DASHCDG_OPUS_VENDOR=1 OPUS_VENDOR_PREFIX=build/x86-retro/prefix-opus make debug
-DASHCDG_OPUS_VENDOR ?= 0
-OPUS_VENDOR_PREFIX ?=
-OPUS_CPPFLAGS :=
-OPUS_LINK := -lopus
-ifeq ($(DASHCDG_OPUS_VENDOR),1)
-ifneq ($(OPUS_VENDOR_PREFIX),)
-OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
-OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
-endif
-endif
-CFLAGS += $(OPUS_CPPFLAGS)
 
 LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(OPUS_LINK) -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
@@ -112,7 +124,7 @@ LDLIBS_DESKTOP_RETRO := -lwinmm -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 DESKTOP_AUDIO_CPPFLAGS := -DDASHCDG_DESKTOP_WIN32_WAVEOUT=1
 endif
 else
-LDLIBS_DESKTOP := -lGL -lGLEW -lglut -lportaudio $(OPUS_LINK) -lpthread -lm
+LDLIBS_DESKTOP := -lGL -lGLEW -lglut $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) -lpthread -lm
 NET_LIBS :=
 WINDOWS_GDI_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
