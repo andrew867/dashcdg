@@ -4,7 +4,7 @@ This document tracks **planned** protocol and implementation work for separating
 
 ## Enterprise timing (implemented on Windows desktop)
 
-The desktop TX/RX apps call `timeBeginPeriod(1)` once per process and register streaming worker threads with MMCSS **Pro Audio** (`AvSetMmThreadCharacteristicsW` / `AvSetMmThreadPriority`), with fallbacks to raised thread priority. Source: `platform/desktop/src/win32_timing_boost.c`, wired from `app_tx.c` / `app_rx.c`.
+The desktop TX/RX apps call `timeBeginPeriod(1)` once per process and register streaming worker threads with MMCSS **Pro Audio** (`AvSetMmThreadCharacteristicsW` / `AvSetMmThreadPriority`), with fallbacks to raised thread priority. Source: `platform/desktop/src/win32_timing_boost.c`, wired from `app_tx.c` / `app_rx.c`. PE import tables include **`AVRT.dll`** and **`WINMM.dll`** on linked EXEs (system components).
 
 Goals:
 

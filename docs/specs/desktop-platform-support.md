@@ -51,8 +51,8 @@ Standard zips on Windows MSYS2 include **`desktop-gdi-rx.exe`**, **`desktop-gdi-
 
 - `build/dist/dashcdg-windows-sneakernet/windows-x64/`
 - `build/dist/dashcdg-windows-sneakernet/windows-x86/`
-- `build/dist/dashcdg-windows-sneakernet/windows-x86-legacy-p3/` (`WINDOWS_LEGACY_TARGET=1`, Pentium III–oriented objects)
-- `build/dist/dashcdg-windows-sneakernet/windows-x86-retro/` (`WINDOWS_RETRO_BUNDLE=1`: `desktop-retro-*.exe`, minimal DLLs)
+- `build/dist/dashcdg-windows-sneakernet/windows-x86-legacy-p3/` (`WINDOWS_LEGACY_TARGET=1`, Pentium III–oriented **dashcdg** objects; includes MSYS2 **`libopus-0.dll`** / **`libportaudio.dll`** — rebuild for real PIII if needed)
+- `build/dist/dashcdg-windows-sneakernet/windows-x86-retro/` (`WINDOWS_RETRO_BUNDLE=1`: `desktop-retro-*.exe` only + minimal DLLs; **no** bundled Opus/PortAudio/GL)
 
 Standard folders ship **`desktop-tx.exe`**, **`desktop-gdi-tx.exe`**, **`desktop-rx.exe`**, a **`desktop-gl-rx.exe`** alias (copy of `desktop-rx.exe`), **`desktop-gdi-rx.exe`**, and **`desktop-player.exe`** (+ legacy `desktop-*-player.exe` copies); see `README.txt` in that tree.
 
@@ -64,7 +64,7 @@ Optional zip: `build/dist/dashcdg-windows-sneakernet.zip` (PowerShell `Compress-
 | --- | --- |
 | `make debug` | Core + proto + desktop lib + tests + `desktop-player`, `desktop-tx`, `desktop-rx`, **`desktop-gdi-rx.exe`** (Windows), retro pair when `WINDOWS_RETRO_BUNDLE=1`. |
 | `make desktop-apps` | Same product set without `test-core`. |
-| `make desktop-windows-x86-retro` | `clean debug` with `MINGW_ARCH=mingw32` `WINDOWS_RETRO_BUNDLE=1` (Win2000-style PE + Pentium2 tune + retro binaries). |
+| `make desktop-windows-x86-retro` | `clean debug` with `MINGW_ARCH=mingw32` `WINDOWS_RETRO_BUNDLE=1` (Win2000-style PE + `-march=pentium3` on dashcdg objects + retro binaries). |
 | `make package` / `package-x64` / `package-x86` | Zip layout under `build/<arch>/release/`. |
 | `make dist-windows` | `package-all-windows` + copy zips to `build/dist/`. |
 | `make dist-windows-sneakernet` | Runs the sneakernet script above. |
@@ -73,7 +73,9 @@ Variables (see `Makefile`):
 
 - `MINGW_ARCH=mingw64` | `mingw32`
 - `WINDOWS_LEGACY_TARGET=1` — XP-oriented PE subsystem flags; on i686 adds `-march=pentium3 -mtune=pentium3` when retro bundle is off.
-- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, Pentium2 tune, `LDLIBS_DESKTOP_RETRO` (no OpenGL/Opus DLLs in the copy list).
+- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, same **`-march=pentium3`** object tuning as other pre-SSE2 profiles, `LDLIBS_DESKTOP_RETRO` (no OpenGL/Opus DLLs in the copy list; audio via WinMM).
+
+**Windows TX/RX:** desktop apps link **`AVRT.dll`** / **`WINMM.dll`** for MMCSS + 1 ms timer resolution (`win32_timing_boost.c`).
 
 ## Pixel path (GL vs GDI)
 

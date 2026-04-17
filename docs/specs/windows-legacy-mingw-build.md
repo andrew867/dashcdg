@@ -138,6 +138,8 @@ Direct DLL dependencies (from `objdump -p … \| grep 'DLL Name'`):
 - `msvcrt.dll`
 - `WS2_32.dll`
 - `IPHLPAPI.DLL`
+- `AVRT.dll` (system — MMCSS / multimedia thread scheduling; linked for `win32_timing_boost.c`)
+- `WINMM.dll` (system — `timeBeginPeriod` / `timeEndPeriod`)
 - `OPENGL32.dll`
 - `glew32.dll` (bundled)
 - `libfreeglut.dll` (bundled)
@@ -213,6 +215,15 @@ in the archive:
 implements and proves an alternate adapter path, downgrades the GL path, and
 rebuilds every third-party dependency for that era.
 
+## MMCSS / 1 ms timer resolution (desktop TX/RX)
+
+The desktop transmitter and receiver call into **`AVRT.dll`** (MMCSS “Pro Audio” task
+registration) and **`WINMM.dll`** (`timeBeginPeriod(1)` / `timeEndPeriod`) from
+`platform/desktop/src/win32_timing_boost.c`, linked on all Windows desktop and retro
+targets (`-lavrt -lwinmm` in the `Makefile`). This improves scheduling and sleep
+granularity for streaming threads; it does not remove all audio glitches under heavy
+foreground UI load.
+
 ## Unified zip output (`build/dist`)
 
 After `scripts/build_release.sh all` or `make dist-windows`, portable zips are
@@ -234,8 +245,8 @@ Per-arch script invocations copy only the zip that was built. The per-arch
   codebase today: MinGW’s CRT, Winsock, threading, and `GetAdaptersAddresses` (see
   IPHLPAPI section above) assume at least **roughly XP-era** APIs unless someone ports
   fallbacks. Unicode Win32 (`CreateWindowExW`, etc.) is used in the GDI view.
-- **`-march=pentium2 -mtune=pentium2`** for dashcdg objects (below Pentium III; no
-  MMX-only floor in this Makefile — use a custom `-march=` if you need older).
+- **`-march=pentium3 -mtune=pentium3`** for dashcdg objects (same pre-SSE2 profile as
+  legacy P3 builds; adjust with a custom `-march=` in the Makefile if you need older).
 - **`desktop-retro-rx.exe`**: GDI-only receiver, **no `libopus-0.dll`**, no
   OpenGL/GLUT/GLEW imports (links `desktop_app_rx_retro_gdi.o` + `opus_codec` stub).
 - **`desktop-retro-tx.exe`**: transmitter built with **`DASHCDG_DESKTOP_RETRO_WINDOWS`**

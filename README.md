@@ -112,14 +112,16 @@ For a **single USB-ready folder** (x64 + x86 + legacy P3 + retro layouts with
 GDI/user32 — **no** FreeGLUT/GLEW in that link (see
 `docs/specs/win32-gdi-view-backend.md`).
 
-**Retro bundle** (`desktop-retro-*.exe`, `WINDOWS_RETRO_BUNDLE=1`): PortAudio +
-GDI + **NB-IMA** narrowband codec path; **no** Opus and **no** OpenGL stack in the shipped DLL set.
+**Retro bundle** (`desktop-retro-*.exe`, `WINDOWS_RETRO_BUNDLE=1`): **WinMM** (`waveOut`) +
+GDI + **NB-IMA** narrowband codec path; **no** Opus and **no** OpenGL stack in the shipped DLL set (see `docs/specs/desktop-platform-support.md`).
+
+**Windows desktop timing (TX/RX):** builds link **`AVRT.dll`** and **`WINMM.dll`** (system components) for MMCSS “Pro Audio” thread registration and `timeBeginPeriod(1)` via `platform/desktop/src/win32_timing_boost.c`. This reduces timer quantization under foreground UI load; it is not a guarantee of glitch-free audio under arbitrary host scheduling.
 
 On the current Windows/MSYS2 flow:
 
 - `x64` packaging requires `mingw-w64-x86_64-gcc`, `mingw-w64-x86_64-opus`, `mingw-w64-x86_64-portaudio`, `mingw-w64-x86_64-freeglut`, and `mingw-w64-x86_64-glew`
 - `x86` packaging requires `mingw-w64-i686-gcc`, `mingw-w64-i686-opus`, `mingw-w64-i686-portaudio`, `mingw-w64-i686-freeglut`, and `mingw-w64-i686-glew`
-- standard portable Windows zips ship `glew32.dll`, `libfreeglut.dll`, `libportaudio.dll`, `libopus-0.dll`, `libwinpthread-1.dll`, a matching `libgcc_s_*.dll`, and `libstdc++-6.dll` (retro omits GL/Opus DLLs; see platform matrix)
+- standard portable Windows zips ship `glew32.dll`, `libfreeglut.dll`, `libportaudio.dll`, `libopus-0.dll`, `libwinpthread-1.dll`, a matching `libgcc_s_*.dll`, and `libstdc++-6.dll` (retro omits GL/Opus DLLs; see platform matrix). **V5+ roadmap** (multistream/adaptation placeholders): `docs/specs/v5-multistream-adaptation-architecture.md`, `DASHCDG_PROTOCOL_VERSION_V5` in `proto/include/dashcdg/protocol.h` (not on wire yet).
 
 ## Desktop App Usage
 

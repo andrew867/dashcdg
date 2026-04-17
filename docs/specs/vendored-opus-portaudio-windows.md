@@ -2,6 +2,7 @@
 
 ## Goals
 
+0. **System DLLs:** all Windows desktop binaries also import **`AVRT.dll`** / **`WINMM.dll`** for streaming thread timing (`win32_timing_boost.c`); those are OS components, not vendored.
 1. **Pin upstream sources** under `audio_modules/` (same pattern as AMR/EVRC/SBC), reproducible via scripts.
 2. **Build libopus** with **Pentium II/III–safe** flags for `MINGW_ARCH=mingw32` **retro** bundles when avoiding MSYS2 `libopus-0.dll` that may assume SSE2 beyond the target CPU.
 3. **Optional:** link a **static** `libopus.a` from a prefix under `build/` instead of the MSYS2 shared stub path.

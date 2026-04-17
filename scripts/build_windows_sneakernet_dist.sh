@@ -121,8 +121,9 @@ windows-x86-legacy-p3/
   need a custom libopus build for real P3 machines.
 
 windows-x86-retro/
-  “Retro” bundle: Win2000-style PE targets, -march=pentium2, no Opus, no OpenGL.
+  “Retro” bundle: Win2000-style PE targets, -march=pentium3 on dashcdg objects, no Opus, no OpenGL.
   desktop-retro-rx.exe = GDI receiver; desktop-retro-tx.exe = transmitter (no --display).
+  Audio output uses WinMM (waveOut), not bundled libportaudio. AVRT/WINMM are system DLLs for MMCSS + timer boost.
   Use --badnet-v4 and SBC-like audio with matching sender/receiver.
 
 Executables (standard folders)
