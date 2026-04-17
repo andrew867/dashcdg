@@ -4049,16 +4049,23 @@ static int dashcdg_tx_handle_command(int command) {
         case 'q':
             g_tx_state.shutdown_requested = 1;
             break;
-        case 'c':
+        case 'c': {
+            uint8_t session_packet[DASHCDG_MAX_PACKET_SIZE];
+            uint64_t now_ms = dashcdg_clock_now_ms();
+
             dashcdg_tx_cycle_v4_audio_codec_locked(1);
+            if (g_tx_state.transport_v4_enabled) {
+                (void) dashcdg_tx_send_v4_session_info_locked(now_ms, session_packet, sizeof(session_packet));
+            }
             fprintf(
                     stdout,
-                    "[tx] v4 audio codec -> %s (id %u); session_info will refresh for receivers\n",
+                    "[tx] v4 audio codec -> %s (id %u); session_info sent for receivers\n",
                     dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
                     (unsigned int) g_tx_state.v4_audio_codec_id
             );
             fflush(stdout);
             break;
+        }
         case 'h':
         case '?':
             dashcdg_tx_print_controls_help();

@@ -2339,6 +2339,13 @@ static void dashcdg_rx_configure_audio_locked(
         return;
     }
 
+    /*
+     * Always drop queued frames and FEC trackers when (re)opening decoders so a codec
+     * or format change cannot leave stale media_sequence / parity state wedged.
+     */
+    dashcdg_audio_jitter_clear(&state->audio_jitter);
+    memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+
     if (g_audio == NULL) {
         g_audio = dashcdg_desktop_audio_new();
     }
@@ -2385,6 +2392,46 @@ static void dashcdg_rx_configure_audio_locked(
     dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
     g_audio_stream_started = 0;
     g_audio_start_inflight = 0;
+}
+
+/*
+ * If v4_audio_chunk.codec_id disagrees with what session_info last announced (e.g. session_info
+ * dropped), align decoder state with the wire before inserting the frame. See
+ * docs/specs/v4-codec-switching-contract.md.
+ */
+static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
+        struct receiver_state *state,
+        uint8_t wire_codec_id,
+        uint8_t wire_profile_id,
+        uint8_t wire_frame_ms
+) {
+    if (state == NULL || !state->network_audio_enabled || state->announced_audio_sample_rate == 0U) {
+        return;
+    }
+    if (wire_codec_id == state->announced_audio_codec_id) {
+        return;
+    }
+
+    fprintf(
+            stdout,
+            "[rx] v4 audio codec reconcile: chunk id %u (announced was %u); refreshing decoders\n",
+            (unsigned int) wire_codec_id,
+            (unsigned int) state->announced_audio_codec_id
+    );
+    fflush(stdout);
+
+    state->announced_audio_codec_id = wire_codec_id;
+    state->announced_audio_profile_id = wire_profile_id;
+    state->announced_audio_frame_ms = wire_frame_ms;
+
+    dashcdg_rx_configure_audio_locked(
+            state,
+            state->announced_audio_sample_rate,
+            state->announced_audio_channels,
+            wire_frame_ms,
+            state->announced_playout_delay_ms,
+            wire_codec_id
+    );
 }
 
 /*
@@ -2488,6 +2535,13 @@ static int dashcdg_rx_store_v4_audio_frame_locked(struct receiver_state *state, 
     if (state == NULL || view == NULL || view->v4_audio_chunk.encoded_bytes == NULL) {
         return 0;
     }
+
+    dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
+            state,
+            view->v4_audio_chunk.codec_id,
+            view->v4_audio_chunk.audio_profile_id,
+            view->v4_audio_chunk.frame_ms
+    );
 
     return dashcdg_rx_insert_audio_pending_locked(
             state,
