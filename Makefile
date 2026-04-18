@@ -282,7 +282,8 @@ DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
 endif
 
 .PHONY: all debug dirs libs test desktop-apps bundle-runtime check-mingw32-p3-implib \
-	vendor-mingw32-p3-runtime verify-mingw32-p3-dlls verify-sneakernet-mingw32-p3 \
+	vendor-mingw32-p3-runtime verify-mingw32-p3-dlls verify-p3-mingw32-all \
+	verify-sneakernet-mingw32-p3 \
 	package package-x64 package-x86 \
 	package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
 
@@ -577,9 +578,13 @@ vendor-mingw32-p3-runtime:
 verify-mingw32-p3-dlls:
 	bash scripts/verify_mingw32_p3_codec_dlls.sh
 
-# After dist-windows-sneakernet: heuristically scan exes+DLLs (requires objdump on PATH).
+# Disassemble *every* .exe/.dll: sneakernet subfolders + PIII vendor + build/x86*/bin (no args).
+verify-p3-mingw32-all:
+	bash scripts/verify_p3_pe_pentium3.sh
+
+# After a sneakernet dist: same as verify-p3 for the dist root only, still merges vendor + build/x86* if present.
 verify-sneakernet-mingw32-p3:
-	bash scripts/verify_sneakernet_mingw32_p3_artifacts.sh
+	bash scripts/verify_p3_pe_pentium3.sh build/dist/dashcdg-windows-sneakernet
 
 # Full sneakernet matrix after fetching sources and building PIII-safe codecs.
 dist-windows-sneakernet-with-sources: vendor-audio-sources vendor-mingw32-p3-runtime dist-windows-sneakernet

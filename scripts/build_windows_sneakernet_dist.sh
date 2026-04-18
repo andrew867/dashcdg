@@ -203,11 +203,14 @@ copy_p3_codec_dlls "${DIST_ROOT}/windows-x86-retro"
 
 write_readme
 
-if command -v objdump >/dev/null 2>&1; then
-  echo "[sneakernet-dist] objdump: verifying i686 PIII heuristics (no SSE2-class fixups in sneakernet tree)…"
-  bash "${SCRIPT_DIR}/verify_sneakernet_mingw32_p3_artifacts.sh" "${DIST_ROOT}" || exit 1
+if [[ "${SKIP_P3_DISASM:-0}" == "1" ]]; then
+  echo "[sneakernet-dist] SKIP_P3_DISASM=1 — not running PIII disassembly scan (not recommended)" >&2
+elif command -v objdump >/dev/null 2>&1; then
+  echo "[sneakernet-dist] objdump: full PIII gate on every .exe/.dll in dist + PIII vendor + build/x86*/bin…"
+  bash "${SCRIPT_DIR}/verify_p3_pe_pentium3.sh" "${DIST_ROOT}" || exit 1
 else
-  echo "[sneakernet-dist] objdump not on PATH; skipping disassembly check (install mingw-w64-i686-binutils in MSYS2)" >&2
+  echo "[sneakernet-dist] FATAL: objdump not on PATH (mingw-w64-i686-binutils). Set SKIP_P3_DISASM=1 to override (not recommended)." >&2
+  exit 1
 fi
 
 rm -f "${OUT_ZIP}"

@@ -7,7 +7,17 @@
 2. **MinGW i686 default (current):** `Makefile` sets `DASHCDG_OPUS_VENDOR` / `DASHCDG_PORTAUDIO_VENDOR` to **on** for `MINGW_ARCH=mingw32` with prefixes under **`build/mingw32-p3-vendor/{opus,portaudio}`**. **`scripts/build_mingw32_p3_opus_portaudio_shared.sh`** builds **shared** `libopus-0.dll` and `libportaudio.dll` with **`-march=pentium3 -mno-sse2`** so Pentium III / pre-SSE2 laptops do not fault on MSYS2 SSE2-assuming codec DLLs. **`scripts/build_release.sh`** / **`scripts/build_windows_sneakernet_dist.sh`** run this script before `mingw32` packages (skip with **`SKIP_MINGW32_P3_VENDOR=1`** if DLLs are already built).
 3. **All** `mingw32` **desktop objects** (not only `WINDOWS_LEGACY_TARGET` / `WINDOWS_RETRO_BUNDLE`) use the same **`-march=pentium3 -mno-sse2 -mfpmath=387 -DDASHCDG_CPU_PRE_SSE2_MINIMP3=1`** flags so `build/x86/bin` and sneakernet `windows-x86` do not ship **SSE2** in the EXE (separate from the Opus/PortAudio DLLs). **`check-mingw32-p3-implib`** (run before `make debug` / `make all`) requires vendored **import** libs in `build/mingw32-p3-vendor/.../lib/`, or you must set **`DASHCDG_OPUS_VENDOR=0 DASHCDG_PORTAUDIO_VENDOR=0`** explicitly to link against MSYS2 (not PIII-safe).
 4. **Retro (`WINDOWS_RETRO_BUNDLE=1`):** `desktop-retro-rx.exe` / `desktop-retro-tx.exe` use **the same** PIII Opus/PortAudio DLLs as the standard i686 build.
-5. **Sneakernet** re-copies PIII `libopus-0.dll` and `libportaudio.dll` from `build/mingw32-p3-vendor/.../bin` into every `windows-x86*` tree so a stale `cp` from `build/x86/bin` cannot ship the wrong file. Optional **`verify_sneakernet_mingw32_p3_artifacts.sh`** runs an **objdump** heuristic (same as **`verify_mingw32_p3_codec_dlls.sh`**) on those dist artifacts when **`objdump`** is on your PATH.
+5. **Sneakernet** re-copies PIII `libopus-0.dll` and `libportaudio.dll` from `build/mingw32-p3-vendor/.../bin` into every `windows-x86*` tree so a stale `cp` from `build/x86/bin` cannot ship the wrong file.
+
+### Full PIII / `objdump` gate (all shipped PEs, not just Opus)
+
+- **`scripts/verify_p3_pe_pentium3.sh`** disassembles **every** `.exe` and `.dll` in:
+  - (no args) sneakernet + `build/mingw32-p3-vendor` + `build/x86/bin` + `build/x86-retro/bin`;
+  - (directory args) those trees **plus** the same vendor + `x86*\/bin` merges, unless you pass **only files** (then only those files — e.g. codec check).
+- It rejects **%ymm** / **%zmm** (no AVX), VEX `v…` opcodes, a large **banned** mnemonic set (`scripts/data/p3_pentium3_banned_mnemonics.txt`) for SSE2+, SSSE3, SSE3, and explicit rules for `cmpsd`/`paddq` on `%xmm`, MMX-ambiguous p\* with `%xmm`, and `palignr` on `%xmm`.
+- **`make verify-p3-mingw32-all`**, **`make verify-sneakernet-mingw32-p3`**, and **`build_windows_sneakernet_dist.sh`** call this. **`SKIP_P3_DISASM=1`** skips the sneakernet end step only (not recommended). Missing **`objdump`** is a **fatal** error for sneakernet unless you set **`SKIP_P3_DISASM=1`**.
+
+This is the **strongest static** guarantee the repo can enforce; a real Pentium III is still the final acceptance test in case a decoder emits an opcode not on our list.
 
 ## Layout
 

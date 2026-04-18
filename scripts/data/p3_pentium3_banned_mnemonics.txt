@@ -1,0 +1,117 @@
+# Pentium III: MMX + SSE(1) only. These mnemonics (AT&T) imply SSE2 or later if they appear in .text.
+# Do not list SSE1 (addps, movaps, shufps, movss, movlps, movhps, orps, unpck*ps, etc.).
+# One token per line. # and blank lines ignored.
+# --- packed / scalar double (SSE2) ---
+addpd
+addsd
+andnpd
+andpd
+cmpeqpd
+cmpeqsd
+cmplepd
+cmplesd
+cmpltpd
+cmpltsd
+cmpnlepd
+cmpnlesd
+cmpnltpd
+cmpnltsd
+comisd
+divpd
+divsd
+maxpd
+maxsd
+minpd
+minsd
+mulpd
+mulsd
+orpd
+shufpd
+subpd
+subsd
+sqrtsd
+ucomisd
+xorpd
+movapd
+movhpd
+movlpd
+movmskpd
+movsd
+movupd
+movdqa
+movdqu
+movddup
+unpckhpd
+unpcklpd
+punpckhqdq
+punpcklqdq
+pshufd
+pshufhw
+pshuflw
+pslldq
+psrldq
+# paddq / psubq: MMX-ambiguous — detect %xmm in verify_p3_pe_pentium3.sh only
+pmuludq
+psadbw
+pmulld
+pmuldq
+maskmovdqu
+cmppd
+# (cmpsd: same GAS name as a string-compare in some assemblers — detect %xmm in script, not this list)
+# CVTs that are not in Pentium III SSE1
+cvtdq2pd
+cvtdq2ps
+cvtpd2dq
+cvtpd2pi
+cvtpd2ps
+cvtpi2pd
+cvtps2dq
+cvtps2pd
+cvtsd2si
+cvtsd2ss
+cvtsi2sd
+cvtss2sd
+cvttpd2dq
+cvttpd2pi
+cvttps2dq
+cvttss2si
+cvttsd2si
+# SSE3
+haddps
+hsubps
+haddpd
+hsubpd
+lddqu
+addsubps
+addsubpd
+movsldup
+movshdup
+# SSSE3 and later
+pshufb
+palignr
+pabsb
+pabsw
+pabsd
+pblendvb
+pblendw
+phaddw
+phaddd
+phaddsw
+phsubw
+phsubd
+phsubsw
+pmaddubsw
+pmulhrsw
+# SSE4 / other fast-path CRT
+popcnt
+crc32
+# Crypto / PCLMUL
+aesenc
+aesenclast
+aesdec
+aesdeclast
+aesimc
+aeskeygenassist
+pclmulqdq
+# 64-bit mode
+movabs
