@@ -10,6 +10,33 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# MSYS2: autoreconf/automake live in usr/bin. MINGW64/MINGW32 shells often omit it from PATH
+# (so "autoreconf: command not found" even after pacman -S autoconf). Prepend when needed.
+dashcdg_prepend_autotools_path() {
+  if command -v autoreconf >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -x /usr/bin/autoreconf ]]; then
+    export PATH="/usr/bin:$PATH"
+    return 0
+  fi
+  local gcc_path bin_dir msys_root
+  gcc_path="$(command -v gcc 2>/dev/null || true)"
+  if [[ -z "$gcc_path" ]]; then
+    return 1
+  fi
+  bin_dir="$(cd "$(dirname "$gcc_path")" && pwd)"
+  # .../mingw64/bin/gcc -> .../msys64/usr/bin (two levels up from toolchain bin dir)
+  msys_root="$(cd "$bin_dir/../.." && pwd)"
+  if [[ -x "$msys_root/usr/bin/autoreconf" ]]; then
+    export PATH="$msys_root/usr/bin:$PATH"
+    return 0
+  fi
+  return 1
+}
+
+dashcdg_prepend_autotools_path || true
+
 export CC="${CC:-gcc}"
 export CXX="${CXX:-g++}"
 # Pentium III class: no SSE2 in third-party code (match dashcdg -march=pentium3 objects).
@@ -42,9 +69,10 @@ if [[ ! -f ./configure ]]; then
   fi
   if ! command -v autoreconf >/dev/null 2>&1; then
     echo "[p3-vendor] autoreconf not found (needed to generate configure from opus git)." >&2
-    echo "  Install autotools (MSYS2 pacman):" >&2
+    echo "  Install autotools (MSYS2 pacman in an MSYS2 shell):" >&2
     echo "    pacman -S --needed base-devel autoconf automake libtool m4" >&2
-    echo "  Run this script from MSYS2 UCRT64/MSYS terminal if tools are installed there." >&2
+    echo "  If already installed, MINGW64 may not have /usr/bin on PATH — this script prepends" >&2
+    echo "  <msys64>/usr/bin when gcc is under <msys64>/mingw64|mingw32|ucrt64/bin." >&2
     exit 1
   fi
   ./autogen.sh

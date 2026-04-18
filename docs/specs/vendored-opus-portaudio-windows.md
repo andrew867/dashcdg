@@ -25,7 +25,7 @@ Building from a **git** clone runs `./autogen.sh`, which requires **`autoreconf`
 pacman -S --needed base-devel autoconf automake libtool m4
 ```
 
-Install and run `./scripts/build_mingw32_p3_opus_portaudio_shared.sh` from a shell where those tools resolve (often **MSYS MSYS2** terminal, not only mingw64).
+The vendor script prepends **`&lt;msys64&gt;/usr/bin`** when `gcc` is under **`mingw64/bin`**, **`mingw32/bin`**, or **`ucrt64/bin`** so **`autoreconf`** is found from a **MINGW64** terminal (same fix as PATH in MSYS-only shells).
 
 ## Makefile integration (implemented)
 
