@@ -101,6 +101,29 @@ kill_running() {
   fi
 }
 
+# Force PIII-built Opus + PortAudio next to exes (never rely on stale or MSYS2 copies from a prior build/ dir).
+copy_p3_codec_dlls() {
+  local destdir="${1?}"
+  local p3o="${REPO_ROOT}/build/mingw32-p3-vendor/opus/bin"
+  local p3p="${REPO_ROOT}/build/mingw32-p3-vendor/portaudio/bin"
+
+  if [[ ! -f "${p3o}/libopus-0.dll" && ! -f "${p3o}/libopus.dll" ]]; then
+    echo "[sneakernet] missing P3 libopus in ${p3o} (build_mingw32_p3_opus_portaudio_shared.sh did not install a DLL?)" >&2
+    return 1
+  fi
+  if [[ ! -f "${p3p}/libportaudio.dll" ]]; then
+    echo "[sneakernet] missing ${p3p}/libportaudio.dll" >&2
+    return 1
+  fi
+
+  for n in libopus-0.dll libopus.dll; do
+    if [[ -f "${p3o}/${n}" ]]; then
+      cp -f "${p3o}/${n}" "${destdir}/"
+    fi
+  done
+  cp -f "${p3p}/libportaudio.dll" "${destdir}/"
+}
+
 write_readme() {
   cat > "${DIST_ROOT}/README.txt" <<'EOF'
 dashcdg — Windows sneakernet bundle
@@ -164,18 +187,28 @@ layout_standard_variant "${REPO_ROOT}/build/amd64/bin" "${DIST_ROOT}/windows-x64
 echo "[sneakernet-dist] (2/4) windows-x86 — mingw32"
 run_make_debug mingw32
 layout_standard_variant "${REPO_ROOT}/build/x86/bin" "${DIST_ROOT}/windows-x86"
+copy_p3_codec_dlls "${DIST_ROOT}/windows-x86"
 cp -f "${DIST_ROOT}/windows-x86/desktop-gdi-rx.exe" "${DIST_ROOT}/windows-x86/desktop-legacy-rx.exe"
 
 echo "[sneakernet-dist] (3/4) windows-x86-legacy-p3 — mingw32 WINDOWS_LEGACY_TARGET=1"
 run_make_debug mingw32 WINDOWS_LEGACY_TARGET=1
 layout_standard_variant "${REPO_ROOT}/build/x86/bin" "${DIST_ROOT}/windows-x86-legacy-p3"
+copy_p3_codec_dlls "${DIST_ROOT}/windows-x86-legacy-p3"
 cp -f "${DIST_ROOT}/windows-x86-legacy-p3/desktop-gdi-rx.exe" "${DIST_ROOT}/windows-x86-legacy-p3/desktop-legacy-rx.exe"
 
 echo "[sneakernet-dist] (4/4) windows-x86-retro — mingw32 WINDOWS_RETRO_BUNDLE=1"
 run_make_debug mingw32 WINDOWS_RETRO_BUNDLE=1
 layout_retro_variant "${REPO_ROOT}/build/x86-retro/bin" "${DIST_ROOT}/windows-x86-retro"
+copy_p3_codec_dlls "${DIST_ROOT}/windows-x86-retro"
 
 write_readme
+
+if command -v objdump >/dev/null 2>&1; then
+  echo "[sneakernet-dist] objdump: verifying i686 PIII heuristics (no SSE2-class fixups in sneakernet tree)…"
+  bash "${SCRIPT_DIR}/verify_sneakernet_mingw32_p3_artifacts.sh" "${DIST_ROOT}" || exit 1
+else
+  echo "[sneakernet-dist] objdump not on PATH; skipping disassembly check (install mingw-w64-i686-binutils in MSYS2)" >&2
+fi
 
 rm -f "${OUT_ZIP}"
 

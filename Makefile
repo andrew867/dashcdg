@@ -46,11 +46,17 @@ PORTAUDIO_VENDOR_PREFIX ?= build/mingw32-p3-vendor/portaudio
 DASHCDG_OPUS_VENDOR ?= 1
 DASHCDG_PORTAUDIO_VENDOR ?= 1
 endif
+# CMake installs MinGW import libs as libopus-0.dll.a or libopus.dll.a; both must be recognized.
 ifeq ($(DASHCDG_OPUS_VENDOR),1)
 ifneq ($(OPUS_VENDOR_PREFIX),)
+ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/lib/libopus-0.dll.a),)
+OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
+OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
+else
 ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/lib/libopus.dll.a),)
 OPUS_CPPFLAGS := -I$(OPUS_VENDOR_PREFIX)/include -DDASHCDG_OPUS_VENDOR_BUILD=1
 OPUS_LINK := -L$(OPUS_VENDOR_PREFIX)/lib -lopus
+endif
 endif
 endif
 endif
@@ -88,18 +94,9 @@ endif
 endif
 endif
 # Pre-SSE2 CPUs (e.g. Pentium III): MSYS2 i686 defaults often define __SSE2__; minimp3 then
-# emits SSE2 intrinsics. Force scalar FP + no SSE2 for legacy and retro Win32 bundles.
+# emits SSE2 intrinsics. All mingw32 EXEs in sneakernet (x86, legacy-p3, retro) must be PIII-safe
+# so we always apply this for MINGW_ARCH=mingw32 (not only legacy/retro).
 ifeq ($(MINGW_ARCH),mingw32)
-WINDOWS_CPU_PRE_SSE2 := 0
-ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-WINDOWS_CPU_PRE_SSE2 := 1
-endif
-ifeq ($(WINDOWS_LEGACY_TARGET),1)
-ifeq ($(WINDOWS_RETRO_BUNDLE),0)
-WINDOWS_CPU_PRE_SSE2 := 1
-endif
-endif
-ifeq ($(WINDOWS_CPU_PRE_SSE2),1)
 # Drop fortify/stdio inlines and tree vectorization; both can still emit SSE2 insns in .text
 # even when -mno-sse2 is set (seen as illegal instruction on Pentium III).
 CFLAGS += -march=pentium3 -mtune=pentium3 -mno-sse2 -mfpmath=387 -DDASHCDG_CPU_PRE_SSE2_MINIMP3=1
@@ -110,13 +107,24 @@ CFLAGS += -D__USE_MINGW_ANSI_STDIO=0
 # MSVCRT printf checking disagrees with %zu under -pedantic; silence format warnings for this column.
 CFLAGS += -Wno-format
 endif
-endif
-# Opus/PortAudio: prefer scripts/build_mingw32_p3_opus_portaudio_shared.sh outputs when present.
+# Opus/PortAudio: PIII build outputs under OPUS_VENDOR_PREFIX; never silently mix MSYS2 libopus-0.dll.
 WINDOWS_OPUS_PORTAUDIO_DLLS :=
 ifeq ($(MINGW_ARCH),mingw32)
+ifeq ($(DASHCDG_OPUS_VENDOR),1)
+DASHCDG_P3_VEND_OPUS_DLL :=
 ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/bin/libopus-0.dll),)
-WINDOWS_OPUS_PORTAUDIO_DLLS := $(OPUS_VENDOR_PREFIX)/bin/libopus-0.dll $(PORTAUDIO_VENDOR_PREFIX)/bin/libportaudio.dll
-else
+DASHCDG_P3_VEND_OPUS_DLL := $(OPUS_VENDOR_PREFIX)/bin/libopus-0.dll
+endif
+ifeq ($(DASHCDG_P3_VEND_OPUS_DLL),)
+ifneq ($(wildcard $(OPUS_VENDOR_PREFIX)/bin/libopus.dll),)
+DASHCDG_P3_VEND_OPUS_DLL := $(OPUS_VENDOR_PREFIX)/bin/libopus.dll
+endif
+endif
+ifneq ($(and $(DASHCDG_P3_VEND_OPUS_DLL),$(wildcard $(PORTAUDIO_VENDOR_PREFIX)/bin/libportaudio.dll)),)
+WINDOWS_OPUS_PORTAUDIO_DLLS := $(DASHCDG_P3_VEND_OPUS_DLL) $(PORTAUDIO_VENDOR_PREFIX)/bin/libportaudio.dll
+endif
+endif
+ifeq ($(DASHCDG_OPUS_VENDOR),0)
 WINDOWS_OPUS_PORTAUDIO_DLLS := $(shell for pattern in libportaudio.dll libopus-0.dll; do for f in "$(WINDOWS_MINGW_PREFIX)"/bin/$$pattern; do if [ -f "$$f" ]; then printf '%s ' "$$f"; fi; done; done)
 endif
 endif
@@ -273,15 +281,28 @@ ifneq ($(RETRO_RX_BIN),)
 DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
 endif
 
-.PHONY: all debug dirs libs test desktop-apps bundle-runtime vendor-mingw32-p3-runtime verify-mingw32-p3-dlls package package-x64 package-x86 package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime check-mingw32-p3-implib \
+	vendor-mingw32-p3-runtime verify-mingw32-p3-dlls verify-sneakernet-mingw32-p3 \
+	package package-x64 package-x86 \
+	package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
+
+# Fails if mingw32 + default vendor build has no PIII Opus/PortAudio import libs (avoids silent link to MSYS2 SSE2 libopus-0.dll).
+# Run `make vendor-mingw32-p3-runtime` first, or DASHCDG_OPUS_VENDOR=0 DASHCDG_PORTAUDIO_VENDOR=0 to use system DLLs.
+check-mingw32-p3-implib:
+	@O="$(OPUS_VENDOR_PREFIX)/lib/libopus-0.dll.a" P="$(OPUS_VENDOR_PREFIX)/lib/libopus.dll.a" A="$(PORTAUDIO_VENDOR_PREFIX)/lib/libportaudio.dll.a"; \
+		if [ "$(DASHCDG_OPUS_VENDOR)" = "1" ] && [ "$(DASHCDG_PORTAUDIO_VENDOR)" = "1" ] && [ "$(MINGW_ARCH)" = "mingw32" ]; then \
+		if ( test -f "$$O" || test -f "$$P" ) && test -f "$$A" ; then exit 0; else \
+		echo "check-mingw32-p3-implib: need vendored PIII import libs under build/mingw32-p3-vendor/. Run: make vendor-mingw32-p3-runtime" >&2; \
+		echo "  (after scripts/fetch_opus_portaudio_vendors.sh), or: DASHCDG_OPUS_VENDOR=0 DASHCDG_PORTAUDIO_VENDOR=0 for MSYS2 (not PIII-safe)." >&2; \
+		exit 1; fi; fi; exit 0
 
 all: CFLAGS += -O2
-all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
+all: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
 
 debug: CFLAGS += -DDEBUG -g
-debug: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
+debug: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
 
-desktop-apps: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(TX_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
+desktop-apps: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(TX_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
 
 desktop-windows-x86-retro:
 	$(MAKE) clean debug MINGW_ARCH=mingw32 WINDOWS_RETRO_BUNDLE=1
@@ -555,6 +576,10 @@ vendor-mingw32-p3-runtime:
 
 verify-mingw32-p3-dlls:
 	bash scripts/verify_mingw32_p3_codec_dlls.sh
+
+# After dist-windows-sneakernet: heuristically scan exes+DLLs (requires objdump on PATH).
+verify-sneakernet-mingw32-p3:
+	bash scripts/verify_sneakernet_mingw32_p3_artifacts.sh
 
 # Full sneakernet matrix after fetching sources and building PIII-safe codecs.
 dist-windows-sneakernet-with-sources: vendor-audio-sources vendor-mingw32-p3-runtime dist-windows-sneakernet

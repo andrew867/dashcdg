@@ -250,6 +250,15 @@ if [[ "$OPUS_INST" != "$OPUS_PREFIX" ]]; then
   rm -rf "$OPUS_INST"
 fi
 
+# GNU make looks for libopus-0.dll.a or libopus.dll.a; duplicate so either wildcard matches.
+if [[ -d "$OPUS_PREFIX/lib" ]]; then
+  if [[ -f "$OPUS_PREFIX/lib/libopus-0.dll.a" && ! -f "$OPUS_PREFIX/lib/libopus.dll.a" ]]; then
+    cp -a "$OPUS_PREFIX/lib/libopus-0.dll.a" "$OPUS_PREFIX/lib/libopus.dll.a"
+  elif [[ -f "$OPUS_PREFIX/lib/libopus.dll.a" && ! -f "$OPUS_PREFIX/lib/libopus-0.dll.a" ]]; then
+    cp -a "$OPUS_PREFIX/lib/libopus.dll.a" "$OPUS_PREFIX/lib/libopus-0.dll.a"
+  fi
+fi
+
 cd "$ROOT"
 echo "[p3-vendor] Building shared PortAudio -> $PA_PREFIX"
 PA_BUILD="$PA_WORK/build-dashcdg-mingw32-p3-shared"
