@@ -193,18 +193,22 @@ static int dashcdg_pa_callback(
         latency_ms = dashcdg_pa_latency_ms_from_timeinfo(time_info, 80);
         consumed_frames = dashcdg_stream_buffer_consume(audio, frame_count, (int16_t *) output_buffer);
         total_samples = (size_t) frame_count * (size_t) audio->stream_channels;
-        if (consumed_frames > 0) {
-            audio->stream_played_frames += consumed_frames;
-        }
         if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
             memset(output_buffer, 0, total_samples * sizeof(int16_t));
         }
         if (audio->stream_base_timestamp_ms >= 0) {
+            /*
+             * Advance by the full PortAudio block size. Partial underrun still outputs silence for
+             * the whole block; stream_played_frames must track DAC time so CDG/graphics (which
+             * use timestamp_ms) stay aligned with what is heard.
+             */
+            audio->stream_played_frames += (size_t) frame_count;
             audio_ts = (int) (audio->stream_base_timestamp_ms +
                     ((int64_t) audio->stream_played_frames * 1000LL) / (int64_t) audio->stream_sample_rate);
             audio_ts -= latency_ms;
             DASHCDG_ATOMIC_SET(audio->timestamp_ms, audio_ts < 0 ? 0 : audio_ts);
         }
+        (void) consumed_frames;
         return paContinue;
     }
 
@@ -398,18 +402,17 @@ static void dashcdg_winmm_fill_block(
 
         consumed_frames = dashcdg_stream_buffer_consume(audio, (unsigned long) frames, dst);
         total_samples = frames * (size_t) audio->stream_channels;
-        if (consumed_frames > 0U) {
-            audio->stream_played_frames += consumed_frames;
-        }
         if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
             memset(dst, 0, total_samples * sizeof(int16_t));
         }
         if (audio->stream_base_timestamp_ms >= 0) {
+            audio->stream_played_frames += frames;
             audio_ts = (int) (audio->stream_base_timestamp_ms +
                     ((int64_t) audio->stream_played_frames * 1000LL) / (int64_t) audio->stream_sample_rate);
             audio_ts -= latency_ms;
             DASHCDG_ATOMIC_SET(audio->timestamp_ms, audio_ts < 0 ? 0 : audio_ts);
         }
+        (void) consumed_frames;
         return;
     }
 

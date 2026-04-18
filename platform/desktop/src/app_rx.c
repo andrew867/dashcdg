@@ -2239,13 +2239,14 @@ static uint32_t dashcdg_rx_network_stream_ring_ms(uint16_t playout_delay_ms, uin
     if (ms < 500U) {
         ms = 500U;
     }
-    if (!dashcdg_v4_audio_codec_is_narrowband(codec_id)) {
-        if (ms > 1100U) {
-            ms = 1100U;
-        }
-    }
-    if (dashcdg_v4_audio_codec_is_narrowband(codec_id) && ms < 2000U) {
-        ms = 2000U;
+    /*
+     * One cap for all codecs: a multi-second software ring (the old 2000 ms floor for narrowband)
+     * pushed audio many hundreds of ms behind the CDG path and destroyed A/V sync. Jitter
+     * absorption remains in the core jitter buffer; device latency should stay in the same order
+     * as Opus / wideband.
+     */
+    if (ms > 1100U) {
+        ms = 1100U;
     }
     return ms;
 }

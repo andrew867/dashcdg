@@ -51,7 +51,7 @@ Canonical **NB-IMA** implementation: **`core/include/dashcdg/nb_ima_codec.h`** +
 - Copy **`song_id`** and timing fields from `v4_session_info` into receiver state.
 - **Decode:** branch on `audio_codec_id` (and per-frame `codec_id` on audio chunks) — Opus vs AMR vs NB-IMA vs EVRC / QCELP / SBC blobs per the table above.
 - When **`audio_codec_id` changes** between session_info packets, the receiver resets the asset receiver where required, **reconfigures PortAudio and decoders**, and continues (same session clock where applicable).
-- **Playout buffer:** narrowband family uses the **≥ 2000 ms** minimum buffer rule in `app_rx.c`.
+- **Playout buffer:** the device-side PCM ring in `app_rx.c` is capped the same for narrowband and Opus (see `dashcdg_rx_network_stream_ring_ms`); jitter handling stays in the core audio jitter buffer.
 
 ## Tests
 
