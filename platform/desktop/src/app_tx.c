@@ -4203,7 +4203,16 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
     if (g_tx_state.last_v4_clock_sync_ms == 0U ||
             now_ms - g_tx_state.last_v4_clock_sync_ms >= DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS) {
-        dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, packet_size);
+        /*
+         * Same-tick duplicate before any audio leaves the stack: RX may still process the first
+         * datagram as audio-only if UDP reordering or thread scheduling reorders work; a second
+         * clock_sync with the same timeline improves odds playback_base_* is set before drain.
+         */
+        if (dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, packet_size) &&
+                g_tx_state.v4_audio_chunk_packets_sent == 0U &&
+                g_tx_state.v4_clock_sync_packets_sent == 1U) {
+            (void) dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, packet_size);
+        }
     }
     /*
      * Loading screens are for true cold start only (first anchor / first audio not
