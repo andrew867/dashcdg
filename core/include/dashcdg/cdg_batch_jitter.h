@@ -10,6 +10,10 @@ enum {
     DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT = 64
 };
 
+#ifndef DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS
+#define DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS 280U
+#endif
+
 struct dashcdg_cdg_batch_jitter_frame {
     int occupied;
     uint64_t packet_start_index;
@@ -31,6 +35,8 @@ struct dashcdg_cdg_batch_jitter_drain_input {
     uint64_t sender_playback_now_ms;
     uint32_t late_grace_ms;
     int late_gate;
+    /* 0 = omit (stall-loss recovery disabled). */
+    uint64_t ms_since_prior_cdg_apply;
 };
 
 enum dashcdg_cdg_batch_drain_step {

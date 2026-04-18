@@ -172,6 +172,17 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         return DASHCDG_CDG_BATCH_DRAIN_SKIP;
     }
 
+    if (in->have_sender_playback && in->late_gate != 0 && in->ms_since_prior_cdg_apply != 0U &&
+            in->ms_since_prior_cdg_apply >= (uint64_t) DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS &&
+            dashcdg_cdg_batch_jitter_oldest(jb) == NULL) {
+        uint64_t skipped_packet_index = jb->next_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
+
+        *out_missing_skips_delta = 1U;
+        jb->next_packet_index = skipped_packet_index;
+        jb->next_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
+        return DASHCDG_CDG_BATCH_DRAIN_SKIP;
+    }
+
     return DASHCDG_CDG_BATCH_DRAIN_STOP;
 }
 

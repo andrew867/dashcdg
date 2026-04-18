@@ -34,6 +34,14 @@ enum {
 #ifndef DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MAX_SKEW_MS
 #define DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MAX_SKEW_MS 750U
 #endif
+/*
+ * When clock_sync rewires playback_base_* against packet playback_ms tags, derived sender time can
+ * sit *behind* jb->next_playback_ms indefinitely — skew stays 0 and the primary missing-frame gate
+ * (sender > next + grace) never opens. Wall-clock stall fires empty-buffer loss recovery anyway.
+ */
+#ifndef DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS
+#define DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS 280U
+#endif
 
 struct dashcdg_audio_jitter_frame {
     int occupied;

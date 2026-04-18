@@ -130,6 +130,7 @@ struct receiver_state {
     uint64_t playback_base_ms;
     uint64_t playback_base_sender_ms;
     uint64_t last_audio_jitter_apply_local_ms;
+    uint64_t last_cdg_jitter_apply_local_ms;
     char song_id[DASHCDG_MAX_SONG_ID];
     size_t contiguous_prefix_chunks;
     uint64_t datagrams_received;
@@ -648,6 +649,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->playback_base_ms = 0;
     state->playback_base_sender_ms = 0;
     state->last_audio_jitter_apply_local_ms = 0;
+    state->last_cdg_jitter_apply_local_ms = 0;
     state->contiguous_prefix_chunks = 0;
     /* Datagram / parse counters are cumulative for the process (not reset per asset). */
     state->duplicate_chunks = 0;
@@ -2027,6 +2029,13 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             cdg_din.sender_playback_now_ms = sender_playback_now_ms;
             cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
             cdg_din.late_gate = (state->cdg_snapshots_applied == 0 || state->live_packets_applied > 0) ? 1 : 0;
+            cdg_din.ms_since_prior_cdg_apply = 0U;
+            if (state->last_cdg_jitter_apply_local_ms != 0U) {
+                cdg_din.ms_since_prior_cdg_apply = dashcdg_rx_elapsed_ms_safe(
+                        local_now_ms,
+                        state->last_cdg_jitter_apply_local_ms
+                );
+            }
 
             cdg_step = dashcdg_cdg_batch_jitter_drain_step(&state->cdg_batch_jitter, &cdg_din, &batch, &cdg_miss);
             if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
@@ -2035,6 +2044,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             } else if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_APPLY && batch != NULL) {
                 dashcdg_rx_apply_cdg_batch_locked(state, batch);
                 dashcdg_cdg_batch_jitter_note_applied(&state->cdg_batch_jitter, batch);
+                state->last_cdg_jitter_apply_local_ms = local_now_ms;
                 progressed = 1;
             }
         }

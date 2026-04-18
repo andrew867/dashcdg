@@ -692,6 +692,39 @@ static void test_audio_jitter_drain_empty_hole_recovery_bounded_skew(void) {
     assert(jb.next_media_sequence == 12U);
 }
 
+static void test_audio_jitter_stall_when_sender_lags_packet_timeline(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    struct dashcdg_audio_jitter_frame *frame = NULL;
+    struct dashcdg_audio_jitter_drain_input din;
+    uint64_t miss = 0U;
+    const uint8_t one[] = {0x31};
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 10U, 2000U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.announced_audio_frame_ms = 20U;
+    din.announced_playout_delay_ms = 500U;
+    din.late_grace_ms = 80U;
+    din.audio_stream_started = 1;
+    din.audio_buffered_ms = 300U;
+
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_APPLY);
+    dashcdg_audio_jitter_note_applied(&jb, frame, 20U);
+
+    miss = 0U;
+    frame = NULL;
+    /*
+     * Next ~2020 ms; sender-derived playback stuck at 2050 — below next+grace (2100): primary gate
+     * never opens after clock/bootstrap skew. Stall path must still skip the missing frame.
+     */
+    din.sender_playback_now_ms = 2050U;
+    din.ms_since_prior_audio_apply = 300U;
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_SKIP);
+    assert(jb.next_media_sequence == 12U);
+}
+
 static void test_cdg_raster_rgba_matches_memory_preset(void) {
     struct dashcdg_cdg_state state;
     struct dashcdg_subchannel_packet pkt = make_packet(DASHCDG_INSN_MEMORY_PRESET);
@@ -868,6 +901,7 @@ int main(void) {
     test_audio_jitter_drain_skip_missing();
     test_audio_jitter_drain_no_ghost_skip_small_clock_skew();
     test_audio_jitter_drain_empty_hole_recovery_bounded_skew();
+    test_audio_jitter_stall_when_sender_lags_packet_timeline();
     test_cdg_raster_rgba_matches_memory_preset();
     test_cdg_raster_alpha_from_transparency();
     test_cdg_batch_jitter_duplicate_drop();

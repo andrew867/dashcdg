@@ -206,6 +206,23 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         return DASHCDG_AUDIO_DRAIN_SKIP;
     }
 
+    /*
+     * Sender playback can lag jb->next_playback_ms after clock_sync/bootstrap realignment — the
+     * gate above never opens and skew stays 0. Same empty buffer + loss as hole recovery, but
+     * driven by wall time since last decode.
+     */
+    if (in->announced_audio_frame_ms > 0 &&
+            (in->audio_stream_started || in->audio_device_null != 0 ||
+                    in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
+            in->ms_since_prior_audio_apply != 0U &&
+            in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
+            dashcdg_audio_jitter_oldest(jb) == NULL) {
+        *out_missing_skips_delta = 1U;
+        jb->next_media_sequence++;
+        jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+        return DASHCDG_AUDIO_DRAIN_SKIP;
+    }
+
     return DASHCDG_AUDIO_DRAIN_STOP;
 }
 
