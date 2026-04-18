@@ -47,7 +47,13 @@ Standard zips on Windows MSYS2 include **`desktop-gdi-rx.exe`**, **`desktop-gdi-
 
 ## Sneakernet tree (`make dist-windows-sneakernet`)
 
-`scripts/build_windows_sneakernet_dist.sh` performs **four** clean `make debug` passes and lays out:
+`scripts/build_windows_sneakernet_dist.sh` builds **four** `make debug` variants and lays out:
+
+- **Default (fast):** **no** `make clean` — incremental compile/link from existing `build/{amd64,x86,x86-retro}` trees. **`make -jN`** with `N` = `DASHCDG_SNEAKENET_JOBS` or CPU count. **Phase 1** builds **mingw64** and **mingw32** in **parallel** (disjoint `BUILD_DIR`); **phase 2** builds **legacy-p3** and **retro** in **parallel** (`build/x86` vs `build/x86-retro`).
+- **Full rebuild:** set **`DASHCDG_SNEAKENET_CLEAN=1`** to run `make clean` before each variant (CI-style, slow).
+- **Zip:** optional **`DASHCDG_SNEAKENET_ZIP_FAST=1`** uses `zip -1` when available instead of PowerShell `Compress-Archive`.
+
+Layout:
 
 - `build/dist/dashcdg-windows-sneakernet/windows-x64/`
 - `build/dist/dashcdg-windows-sneakernet/windows-x86/`
@@ -56,7 +62,7 @@ Standard zips on Windows MSYS2 include **`desktop-gdi-rx.exe`**, **`desktop-gdi-
 
 Standard folders ship **`desktop-tx.exe`**, **`desktop-gdi-tx.exe`**, **`desktop-rx.exe`**, a **`desktop-gl-rx.exe`** alias (copy of `desktop-rx.exe`), **`desktop-gdi-rx.exe`**, and **`desktop-player.exe`** (+ legacy `desktop-*-player.exe` copies); see `README.txt` in that tree.
 
-Optional zip: `build/dist/dashcdg-windows-sneakernet.zip` (PowerShell `Compress-Archive` when available).
+Optional zip: `build/dist/dashcdg-windows-sneakernet.zip` — PowerShell `Compress-Archive` by default, or **`zip -1`** when **`DASHCDG_SNEAKENET_ZIP_FAST=1`** and `zip` is on `PATH`.
 
 ## Makefile targets (Windows-focused)
 

@@ -571,6 +571,7 @@ dist-windows: package-all-windows
 	mkdir -p $(WINDOWS_DIST_DIR)
 	cp -f $(WINDOWS_ZIP_X64) $(WINDOWS_ZIP_X86) $(WINDOWS_DIST_DIR)/
 
+# Incremental debug builds + parallel variants unless DASHCDG_SNEAKENET_CLEAN=1 (see scripts/build_windows_sneakernet_dist.sh).
 dist-windows-sneakernet:
 	bash scripts/build_windows_sneakernet_dist.sh
 

@@ -261,7 +261,7 @@ for testing; Opus-only senders will not produce audio on the retro RX.
 
 ## Sneakernet bundle (`make dist-windows-sneakernet`)
 
-`make dist-windows-sneakernet` runs `scripts/build_windows_sneakernet_dist.sh`.
+`make dist-windows-sneakernet` runs `scripts/build_windows_sneakernet_dist.sh` (incremental by default; see **`desktop-platform-support.md`** §Sneakernet for `DASHCDG_SNEAKENET_CLEAN`, parallel jobs, fast zip).
 It performs **four** full `make clean debug` passes and lays out **one** copy‑paste
 tree you can put on a USB stick:
 

@@ -11,8 +11,18 @@
 # Standard folders ship distinct EXEs: headless desktop-tx, GL desktop-rx, GDI RX/TX,
 # full desktop-player. Retro folder uses desktop-retro-*.exe + minimal DLLs.
 #
-# Optional: DASHCDG_KILL_RUNNING_DESKTOP_BINS=1 — taskkill desktop-*.exe before packaging
-# (default: do not kill; close apps manually if linker cannot overwrite locked files).
+# Speed (default — incremental, parallel):
+#   - Does NOT run `make clean` unless DASHCDG_SNEAKENET_CLEAN=1 (reuse object files).
+#   - Runs `make -jN` with N = DASHCDG_SNEAKENET_JOBS or CPU count (parallel compilation).
+#   - Builds amd64 and x86 in parallel (separate BUILD_DIR), then legacy + retro in parallel.
+#
+# Optional env:
+#   DASHCDG_SNEAKENET_CLEAN=1     — full rebuild (make clean debug) per variant (slow, CI-like).
+#   DASHCDG_SNEAKENET_JOBS=N      — make parallelism (default: nproc or 8).
+#   DASHCDG_SNEAKENET_ZIP_FAST=1  — use `zip -1` if available (faster, slightly larger .zip).
+#   DASHCDG_KILL_RUNNING_DESKTOP_BINS=1 — taskkill desktop-*.exe before packaging
+#   SKIP_MINGW32_P3_VENDOR=1      — skip rebuilding PIII vendor codecs
+#   SKIP_P3_DISASM=1              — skip objdump PIII gate (not recommended)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,11 +37,21 @@ fi
 DIST_ROOT="${REPO_ROOT}/build/dist/dashcdg-windows-sneakernet"
 OUT_ZIP="${REPO_ROOT}/build/dist/dashcdg-windows-sneakernet.zip"
 
+# Parallel make jobs: explicit > nproc > 8
+if [[ -n "${DASHCDG_SNEAKENET_JOBS:-}" ]]; then
+  SNEAKERNET_MAKE_JOBS="${DASHCDG_SNEAKENET_JOBS}"
+elif command -v nproc >/dev/null 2>&1; then
+  SNEAKERNET_MAKE_JOBS="$(nproc)"
+else
+  SNEAKERNET_MAKE_JOBS="8"
+fi
+
 cd "${REPO_ROOT}"
 
-run_make_debug() {
-  local arch="$1"
-  shift
+run_make_variant() {
+  local label="$1"
+  local arch="$2"
+  shift 2
   local extra_make_args=("$@")
   local toolchain_bin=""
 
@@ -40,12 +60,45 @@ run_make_debug() {
     mingw32) toolchain_bin="/c/msys64/mingw32/bin" ;;
     *)
       echo "[sneakernet-dist] unknown toolchain arch: ${arch}" >&2
-      exit 1
+      return 1
       ;;
   esac
 
-  PATH="${toolchain_bin}:$(dirname "${MAKE_CMD}"):${PATH}" \
-    "${MAKE_CMD}" clean debug MINGW_ARCH="${arch}" "${extra_make_args[@]}"
+  echo "[sneakernet-dist] building ${label} (${arch})…"
+  (
+    cd "${REPO_ROOT}"
+    export PATH="${toolchain_bin}:$(dirname "${MAKE_CMD}"):${PATH}"
+    # Never pass `clean` and `debug` in one -j make: targets could run in parallel.
+    if [[ "${DASHCDG_SNEAKENET_CLEAN:-0}" == "1" ]]; then
+      "${MAKE_CMD}" clean MINGW_ARCH="${arch}" "${extra_make_args[@]}"
+    fi
+    "${MAKE_CMD}" -j"${SNEAKERNET_MAKE_JOBS}" debug MINGW_ARCH="${arch}" "${extra_make_args[@]}"
+  )
+}
+
+# Force PIII-built Opus + PortAudio next to exes (never rely on stale or MSYS2 copies from a prior build/ dir).
+copy_p3_codec_dlls() {
+  local destdir="${1?}"
+  local p3o="${REPO_ROOT}/build/mingw32-p3-vendor/opus/bin"
+  local p3p="${REPO_ROOT}/build/mingw32-p3-vendor/portaudio/bin"
+
+  if [[ ! -f "${p3o}/libopus-0.dll" && ! -f "${p3o}/libopus.dll" ]]; then
+    echo "[sneakernet] missing P3 libopus in ${p3o} (build_mingw32_p3_opus_portaudio_shared.sh did not install a DLL?)" >&2
+    return 1
+  fi
+  if [[ ! -f "${p3p}/libportaudio.dll" ]]; then
+    echo "[sneakernet] missing ${p3p}/libportaudio.dll" >&2
+    return 1
+  fi
+
+  # Always ship the MSYS2/loader name next to EXEs (`-lopus` → libopus-0.dll).
+  if [[ -f "${p3o}/libopus-0.dll" ]]; then
+    cp -f "${p3o}/libopus-0.dll" "${destdir}/"
+  elif [[ -f "${p3o}/libopus.dll" ]]; then
+    cp -f "${p3o}/libopus.dll" "${destdir}/libopus-0.dll"
+  fi
+  rm -f "${destdir}/libopus.dll"
+  cp -f "${p3p}/libportaudio.dll" "${destdir}/"
 }
 
 # Standard layout: real binaries + optional GL-RX alias name for muscle memory.
@@ -99,31 +152,6 @@ kill_running() {
       taskkill //IM "${im}" //F >/dev/null 2>&1 || true
     done
   fi
-}
-
-# Force PIII-built Opus + PortAudio next to exes (never rely on stale or MSYS2 copies from a prior build/ dir).
-copy_p3_codec_dlls() {
-  local destdir="${1?}"
-  local p3o="${REPO_ROOT}/build/mingw32-p3-vendor/opus/bin"
-  local p3p="${REPO_ROOT}/build/mingw32-p3-vendor/portaudio/bin"
-
-  if [[ ! -f "${p3o}/libopus-0.dll" && ! -f "${p3o}/libopus.dll" ]]; then
-    echo "[sneakernet] missing P3 libopus in ${p3o} (build_mingw32_p3_opus_portaudio_shared.sh did not install a DLL?)" >&2
-    return 1
-  fi
-  if [[ ! -f "${p3p}/libportaudio.dll" ]]; then
-    echo "[sneakernet] missing ${p3p}/libportaudio.dll" >&2
-    return 1
-  fi
-
-  # Always ship the MSYS2/loader name next to EXEs (`-lopus` → libopus-0.dll).
-  if [[ -f "${p3o}/libopus-0.dll" ]]; then
-    cp -f "${p3o}/libopus-0.dll" "${destdir}/"
-  elif [[ -f "${p3o}/libopus.dll" ]]; then
-    cp -f "${p3o}/libopus.dll" "${destdir}/libopus-0.dll"
-  fi
-  rm -f "${destdir}/libopus.dll"
-  cp -f "${p3p}/libportaudio.dll" "${destdir}/"
 }
 
 write_readme() {
@@ -182,24 +210,38 @@ else
   bash "${SCRIPT_DIR}/build_mingw32_p3_opus_portaudio_shared.sh"
 fi
 
-echo "[sneakernet-dist] (1/4) windows-x64 — mingw64"
-run_make_debug mingw64
-layout_standard_variant "${REPO_ROOT}/build/amd64/bin" "${DIST_ROOT}/windows-x64"
+if [[ "${DASHCDG_SNEAKENET_CLEAN:-0}" == "1" ]]; then
+  echo "[sneakernet-dist] DASHCDG_SNEAKENET_CLEAN=1 — full rebuild (clean + debug) per variant"
+else
+  echo "[sneakernet-dist] incremental: no make clean (set DASHCDG_SNEAKENET_CLEAN=1 for full rebuild)"
+fi
+echo "[sneakernet-dist] make -j${SNEAKERNET_MAKE_JOBS} per variant"
 
-echo "[sneakernet-dist] (2/4) windows-x86 — mingw32"
-run_make_debug mingw32
+# Phase 1: amd64 and x86 use disjoint BUILD_DIR — build in parallel.
+run_make_variant "windows-x64" mingw64 &
+pid_amd64=$!
+run_make_variant "windows-x86" mingw32 &
+pid_x86=$!
+wait "${pid_amd64}"
+wait "${pid_x86}"
+
+layout_standard_variant "${REPO_ROOT}/build/amd64/bin" "${DIST_ROOT}/windows-x64"
 layout_standard_variant "${REPO_ROOT}/build/x86/bin" "${DIST_ROOT}/windows-x86"
 copy_p3_codec_dlls "${DIST_ROOT}/windows-x86"
 cp -f "${DIST_ROOT}/windows-x86/desktop-gdi-rx.exe" "${DIST_ROOT}/windows-x86/desktop-legacy-rx.exe"
 
-echo "[sneakernet-dist] (3/4) windows-x86-legacy-p3 — mingw32 WINDOWS_LEGACY_TARGET=1"
-run_make_debug mingw32 WINDOWS_LEGACY_TARGET=1
+# Phase 2: legacy (build/x86) and retro (build/x86-retro) are disjoint — parallel.
+run_make_variant "windows-x86-legacy-p3" mingw32 WINDOWS_LEGACY_TARGET=1 &
+pid_leg=$!
+run_make_variant "windows-x86-retro" mingw32 WINDOWS_RETRO_BUNDLE=1 &
+pid_ret=$!
+wait "${pid_leg}"
+wait "${pid_ret}"
+
 layout_standard_variant "${REPO_ROOT}/build/x86/bin" "${DIST_ROOT}/windows-x86-legacy-p3"
 copy_p3_codec_dlls "${DIST_ROOT}/windows-x86-legacy-p3"
 cp -f "${DIST_ROOT}/windows-x86-legacy-p3/desktop-gdi-rx.exe" "${DIST_ROOT}/windows-x86-legacy-p3/desktop-legacy-rx.exe"
 
-echo "[sneakernet-dist] (4/4) windows-x86-retro — mingw32 WINDOWS_RETRO_BUNDLE=1"
-run_make_debug mingw32 WINDOWS_RETRO_BUNDLE=1
 layout_retro_variant "${REPO_ROOT}/build/x86-retro/bin" "${DIST_ROOT}/windows-x86-retro"
 copy_p3_codec_dlls "${DIST_ROOT}/windows-x86-retro"
 
@@ -209,8 +251,6 @@ if [[ "${SKIP_P3_DISASM:-0}" == "1" ]]; then
   echo "[sneakernet-dist] SKIP_P3_DISASM=1 — not running PIII disassembly scan (not recommended)" >&2
 elif command -v objdump >/dev/null 2>&1; then
   echo "[sneakernet-dist] objdump: full PIII gate on every .exe/.dll in dist + PIII vendor + build/x86*/bin…"
-  # verify_p3_pe_pentium3.sh defaults P3_STRICT_MINGW_DLLS=1 (scan libstdc++/glew/freeglut runtimes).
-  # MSYS2 copies of those DLLs are not PIII-built and will fail the gate; sneakernet unset → allow skip unless caller exports P3_STRICT_MINGW_DLLS=1.
   export P3_STRICT_MINGW_DLLS="${P3_STRICT_MINGW_DLLS:-0}"
   bash "${SCRIPT_DIR}/verify_p3_pe_pentium3.sh" "${DIST_ROOT}" || exit 1
 else
@@ -220,7 +260,10 @@ fi
 
 rm -f "${OUT_ZIP}"
 
-if command -v powershell.exe >/dev/null 2>&1; then
+if [[ "${DASHCDG_SNEAKENET_ZIP_FAST:-0}" == "1" ]] && command -v zip >/dev/null 2>&1; then
+  echo "[sneakernet-dist] DASHCDG_SNEAKENET_ZIP_FAST=1 — zip -1 (fast compression)"
+  (cd "${REPO_ROOT}/build/dist" && zip -r -q -1 "$(basename "${OUT_ZIP}")" "$(basename "${DIST_ROOT}")")
+elif command -v powershell.exe >/dev/null 2>&1; then
   REPO_WIN="${REPO_ROOT}"
   if command -v cygpath >/dev/null 2>&1; then
     REPO_WIN="$(cygpath -w "${REPO_ROOT}")"
