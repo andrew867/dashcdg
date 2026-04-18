@@ -24,6 +24,7 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`specs/windows-legacy-mingw-build.md`](specs/windows-legacy-mingw-build.md) | PE/subsystem audit, XP/P3 profile, **retro** bundle, sneakernet zip, Opus DLL notes |
 | [`specs/transport-protocol.md`](specs/transport-protocol.md) | Protocol v3/v4 fields |
 | [`specs/bad-network-transport.md`](specs/bad-network-transport.md) | v4 transport overview |
+| [`specs/v5-multistream-adaptation-architecture.md`](specs/v5-multistream-adaptation-architecture.md) | **V5** — simulcast, IGMP ladder, parallel decode (planned) |
 | [`specs/bad-network-audio-profiles.md`](specs/bad-network-audio-profiles.md) | Audio profiles (quality vs resilience / SBC‑like) |
 | [`specs/cdg-batch-jitter-playout-boundary.md`](specs/cdg-batch-jitter-playout-boundary.md) | CDG batch jitter + snapshot deferral rules |
 | [`specs/cpu-rgba-raster-contract.md`](specs/cpu-rgba-raster-contract.md) | `dashcdg_cdg_state_to_rgba8` contract (shared by GL and GDI) |

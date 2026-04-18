@@ -162,7 +162,24 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             *out_missing_skips_delta = (uint64_t) (oldest->media_sequence - jb->next_media_sequence);
             jb->next_media_sequence = oldest->media_sequence;
             jb->next_playback_ms = oldest->playback_ms;
+        } else if (oldest != NULL) {
+            *out_missing_skips_delta = 1U;
+            jb->next_media_sequence++;
+            jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
         } else {
+            /*
+             * Nothing buffered ahead of next_media_sequence: advancing the sequence without a
+             * queued frame is only justified when sender media time proves this slot is very
+             * stale (severe loss after join). Join skew between clock_sync and jitter playback
+             * stays below this gap while packets drain.
+             */
+            uint64_t skew = (in->sender_playback_now_ms > jb->next_playback_ms)
+                    ? (in->sender_playback_now_ms - jb->next_playback_ms)
+                    : 0U;
+
+            if (skew < (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS) {
+                return DASHCDG_AUDIO_DRAIN_STOP;
+            }
             *out_missing_skips_delta = 1U;
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;

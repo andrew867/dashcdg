@@ -97,6 +97,8 @@ enum dashcdg_audio_drain_step {
 
 **SKIP path:** Jitter updates `next_media_sequence` / `next_playback_ms` exactly as legacy skip branches; `*out_missing_skips_delta` is the increment for RX aggregate stats (0 or gap size).
 
+**Empty-buffer skip guard:** When the next `media_sequence` is missing and **no** buffered frame exists ahead of it (`dashcdg_audio_jitter_oldest` would advance reorder only when `oldest->media_sequence > next`), advancing the sequence without a queued packet is allowed only if **sender playback minus `jb->next_playback_ms` ≥ `DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS`** (see `audio_jitter.h`). Otherwise return **STOP** so join skew between `clock_sync` and drained packet timestamps cannot ghost-skip in-flight frames (regression: one blip of audio then silence).
+
 ## Invariants (MUST hold)
 
 1. `payload_length <= DASHCDG_AUDIO_JITTER_MAX_PAYLOAD` or insert returns `0`.

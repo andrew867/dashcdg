@@ -14,6 +14,7 @@ Single index for **planned but not finished** desktop transport, resilience, TX 
 | **TX CD+G slimdown / source model + late join** | [tx-cdg-source-model.md](tx-cdg-source-model.md) | [tx-cdg-source-late-join-regression-plan.md](../test/tx-cdg-source-late-join-regression-plan.md), [desktop-proof-plan.md](../test/desktop-proof-plan.md) | Preserve ASSET_CHUNK, snapshots, live deltas per source model stages. |
 | **Narrowband / low-bitrate perceived quality** | [narrowband-low-bitrate-audio-quality.md](narrowband-low-bitrate-audio-quality.md), [v4-audio-codecs.md](v4-audio-codecs.md) | Sections 5–6 in that spec + [v4-audio-codec-validation.md](../test/v4-audio-codec-validation.md) | Hypotheses and acceptance bars; implementation optional per tranche. |
 | **PTP, operator UI, metrics UI** | [operator-observability-and-sync-future-work.md](operator-observability-and-sync-future-work.md), [v4-network-stats-and-adaptation.md](v4-network-stats-and-adaptation.md) | [v4-network-observability-validation.md](../test/v4-network-observability-validation.md) | Documented limitations; future acceptance criteria. |
+| **V5 simulcast / IGMP / ladder** | [v5-multistream-adaptation-architecture.md](v5-multistream-adaptation-architecture.md) | v4 soak + future v5-specific matrix (TBD) | After v4 stability; parallel audio groups + join policy. |
 
 ## Suggested sequencing (non-binding)
 
@@ -23,11 +24,16 @@ Single index for **planned but not finished** desktop transport, resilience, TX 
 4. **TX CD+G slimdown** stages from [tx-cdg-source-model.md](tx-cdg-source-model.md) — each stage gated by [tx-cdg-source-late-join-regression-plan.md](../test/tx-cdg-source-late-join-regression-plan.md).
 5. **Observability / PTP / UI** — incremental; see future-work spec.
 
-## Open questions (resolve before or during implementation)
+## Criteria agreed (product)
 
-1. **Soak environment**: impaired relay only vs mixed real Wi-Fi legs — affects whether thresholds are labeled “lab relay” vs “field Wi-Fi”.
-2. **Burst-loss acceptance**: maximum allowed **audible gap rate** or **repair failure ratio** per hour at a named impairment profile (must be numeric for regression).
-3. **Bad-network redesign scope**: iterate within **v4** packet families vs introduce a **new protocol version** — [bad-network-transport.md](bad-network-transport.md) allows a bump; confirm product decision before coding.
-4. **Log retention**: single-machine text logs vs scripted capture + timestamp correlation — soak doc assumes both are acceptable if the runbook is followed.
+1. **Soak environments**: tag results for **both** — **Ethernet + impaired relay (lab)** and **real Wi-Fi** — separate threshold rows where they differ.
+2. **Subjective audio bar**: **Occasional** breakups / gaps under loss are **acceptable**; **continuous** “choppy” output (sustained unusable stutter) is **not**. Formal metrics still use counters (`fail`, jitter skips, repair) but pass/fail allows **sparse** defects.
+3. **v4 vs v5**: **Ship fixes and improvements on v4 immediately** (protocol families unchanged unless a small additive field is unavoidable). **v5** is for **parallel streams, IGMP join policy, ladder**, and optional wire bump — see [v5-multistream-adaptation-architecture.md](v5-multistream-adaptation-architecture.md).
 
-When these are answered, update the relevant test plan rows (pass criteria) and shrink this section.
+## Open questions
+
+1. **Numeric regression caps**: optional hard caps on `fail=`/hour once baseline soak logs exist (supplements subjective bar).
+2. **Bad-network wholesale redesign**: full scheduler rewrite vs phased — still **decide per** [bad-network-transport-next-phases.md](bad-network-transport-next-phases.md).
+3. **Log retention**: archive policy for multi-day zips (storage).
+
+When numeric caps are set, update [long-impairment-soak-validation.md](../test/long-impairment-soak-validation.md) §threshold table.

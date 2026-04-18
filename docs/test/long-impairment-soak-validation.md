@@ -7,8 +7,14 @@ Extend short matrices in **[desktop-impairment-validation.md](desktop-impairment
 ## Prerequisites
 
 - Same topology as desktop impairment: TX → relay input group → impaired output → RX (**desktop-impairment-validation.md** §Topology).
+- **Tag each run** with link class: **`lab-relay`**, **`ethernet-direct`**, or **`wifi-field`** so thresholds are comparable within class.
 - Record: git commit hash, build flavor (amd64/x86/x86-retro), `desktop-tx` / `desktop-rx` variant (GL/GDI/headless), OS build.
 - Capture **three** streams minimum: **TX stdout/stderr**, **RX stdout/stderr**, **relay `stats:` lines** (redirect to timestamped files).
+
+## Subjective pass bar (alongside counters)
+
+- **Acceptable:** occasional dropouts, brief gaps, or rare artifacts under impairment — **normal** for lossy paths.
+- **Unacceptable:** **sustained** choppy or unusable audio (continuous stutter or silence while counters show traffic) — **fail** even if numeric thresholds are not yet formalized.
 
 ## Runbook — soak tiers
 

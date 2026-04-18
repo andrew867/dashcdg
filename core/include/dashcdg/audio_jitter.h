@@ -9,6 +9,16 @@ enum {
     DASHCDG_AUDIO_JITTER_SLOT_COUNT = 64
 };
 
+/*
+ * When the next sequential frame is missing and no higher-sequence packet is buffered,
+ * draining would otherwise advance sequence numbers ("empty skip") using sender playback.
+ * Clock sync vs jitter join skew often leaves sender_playback_ms hundreds of ms ahead of
+ * jb->next_playback_ms while packets are still in flight — advancing here caused silent wedge.
+ */
+#ifndef DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS
+#define DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS 2000U
+#endif
+
 struct dashcdg_audio_jitter_frame {
     int occupied;
     uint32_t media_sequence;

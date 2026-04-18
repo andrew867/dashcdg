@@ -49,6 +49,10 @@ Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `
 
 See **`docs/specs/av-sync-network-clients.md`** (encoder-primary timeline, MP3 silence vs CDG authoring).
 
+## Audio jitter empty skip (v4)
+
+Loss recovery **SKIP** in `dashcdg_audio_jitter_drain_step` must not advance `next_media_sequence` against an **empty** buffer until sender-vs-slot skew exceeds **`DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS`** — otherwise late **clock_sync** vs early packets caused **ghost skips** and one-blip-then-silence. See **[audio-jitter-playout-boundary.md](audio-jitter-playout-boundary.md)**.
+
 ## Related code
 
 | Area | File / symbol |
