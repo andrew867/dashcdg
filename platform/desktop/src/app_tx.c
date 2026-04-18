@@ -4187,7 +4187,13 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
 }
 
 static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size) {
-    uint64_t playback_deadline = dashcdg_tx_network_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
+    /*
+     * Release pacing must follow session wall playback so queued frames whose playback_ms
+     * tracks the anchor timeline can ship even when the encoder tail lags (startup, seek,
+     * or CPU). Encoder-aligned network_playback_ms is for clock_sync/beacons vs chunk tags,
+     * not for this gate — using it here could stall audio/CDG release indefinitely.
+     */
+    uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
     unsigned int audio_sent = 0U;
     unsigned int video_sent = 0U;
 
@@ -4439,7 +4445,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
             }
 
             frame = &g_tx_state.pending_audio_frame;
-            if (frame->playback_ms > dashcdg_tx_network_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+            if (frame->playback_ms > dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
                 break;
             }
 
@@ -4495,7 +4501,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
                 g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
-                dashcdg_tx_network_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+                dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
             const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
             int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                     g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;

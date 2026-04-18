@@ -43,7 +43,7 @@ Headless TX does not render; the setting is ignored.
 
 ## TX codec cycle (`c`) and the media timeline
 
-Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `dashcdg_tx_current_playback_ms_locked()` so `playback_ms` on emitted frames stays on the session timeline. See `dashcdg_desktop_audio_seek_mp3_stream()` and `dashcdg_tx_tick_v4_locked` (`playback_deadline` uses **`dashcdg_tx_network_playback_ms_locked()`** so release tracks encoder progress; clock_sync/beacons use the same reference).
+Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `dashcdg_tx_current_playback_ms_locked()` so `playback_ms` on emitted frames stays on the session timeline. See `dashcdg_desktop_audio_seek_mp3_stream()` and `dashcdg_tx_tick_v4_locked`: **`playback_deadline` uses wall playback + payout delay**; **v4 `clock_sync` / legacy beacon `playback_ms` use `dashcdg_tx_network_playback_ms_locked()`** so the wire clock matches audio chunk tags (see `docs/specs/av-sync-network-clients.md`).
 
 ## Multi-receiver policy
 

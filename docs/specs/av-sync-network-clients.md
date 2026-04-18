@@ -26,7 +26,7 @@ Multiple receivers (for example Windows 11 + PortAudio and Windows XP + WinMM) m
 **Idea:**
 
 1. **TX:** Advertise synchronisation `playback_ms` from the **same conceptual timeline as audio chunks**: while MP3 frames are being produced, use the **start time of the last encoded frame** (`audio_playback_end_ms - DASHCDG_AUDIO_FRAME_MS`), bounded by `duration_ms`. When paused, before the first frame, or CDG-only without encoder progress, fall back to wall playback.
-2. **TX:** Use that same reference for **send gates** (`playback_deadline` / payout delay) so release order tracks encoder progress, not runaway wall clock.
+2. **TX:** **Send gates** (`playback_deadline` in `dashcdg_tx_tick_v4_locked` and legacy audio/CDG loops) stay on **session wall playback** (`dashcdg_tx_current_playback_ms_locked`) plus payout delay. Using encoder-tail time for those gates could stall release when wall playback and encoder progress diverge (startup, seek, scheduling), which starves receivers.
 3. **RX:** When `dashcdg_rx_sender_playback_now_locked()` succeeds (clock_sync established `playback_base_*`), **do not** override with local DAC timestamps — CDG raster uses **sender playback**. If clock is not ready yet, fall back to `g_audio->timestamp_ms`.
 
 **Why this matches product expectations:** All receivers share **one** media timeline tied to **tags on the wire**. Local DAC still drives **when** samples hit the speaker (preroll, jitter buffer); drain order prevents graphics from running ahead of queued PCM.
@@ -56,7 +56,7 @@ Consumer players typically mux audio + subchannel and drive subtitles from **one
 | TX network playback | `dashcdg_tx_network_playback_ms_locked()` — `platform/desktop/src/app_tx.c` |
 | TX clock_sync payload | `dashcdg_tx_send_v4_clock_sync_locked()` |
 | TX legacy beacon | non-v4 branch, `g_tx_state.beacon.playback_ms` |
-| TX send pacing | `dashcdg_tx_tick_v4_locked()`, legacy audio/CDG loops |
+| TX send pacing (wall + payout) | `dashcdg_tx_tick_v4_locked()`, legacy audio/CDG loops |
 | RX raster time | `dashcdg_rx_publish_render_snapshot_locked()` — `platform/desktop/src/app_rx.c` |
 
 ## Related documents
