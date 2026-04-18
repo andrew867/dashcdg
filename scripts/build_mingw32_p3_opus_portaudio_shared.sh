@@ -7,6 +7,10 @@
 #
 # Prerequisites: mingw-w64-i686-{gcc,tools} and mingw-w64-i686-cmake (Ninja is pulled in).
 # Optional: OPUS_VENDOR_PREFIX PORTAUDIO_VENDOR_PREFIX JOBS MSYS2_ROOT
+#
+# Incremental (default): if installed DLLs + stamp under each prefix match this script's
+# configuration and vendor CMakeLists.txt is not newer than the DLL, skip that codec rebuild.
+# Force full rebuild: DASHCDG_P3_VENDOR_REBUILD=1
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -229,16 +233,41 @@ if [[ ! -f "$PA_SRC/CMakeLists.txt" ]]; then
   exit 1
 fi
 
-echo "[p3-vendor] Building shared libopus (CMake) -> $OPUS_PREFIX"
+# Bump embedded config version if CMake options below change (invalidates skip stamps).
+P3_OPUS_CFG_SIG="opus-p3-v2|${P3_CMAKE_C_FLAGS}|SHARED|FIXED_POINT|NO_INTRINSICS|NO_FLOAT_API"
+P3_PA_CFG_SIG="portaudio-p3-v2|${P3_CMAKE_C_FLAGS}|SHARED|WMME|DSOUND|NO_WASAPI"
+if command -v sha256sum >/dev/null 2>&1; then
+  P3_OPUS_BUILD_ID="$(printf '%s' "$P3_OPUS_CFG_SIG" | sha256sum | awk '{print $1}')"
+  P3_PA_BUILD_ID="$(printf '%s' "$P3_PA_CFG_SIG" | sha256sum | awk '{print $1}')"
+else
+  P3_OPUS_BUILD_ID="$P3_OPUS_CFG_SIG"
+  P3_PA_BUILD_ID="$P3_PA_CFG_SIG"
+fi
+
 mkdir -p "$OPUS_PREFIX"
 if ! command -v cmake >/dev/null 2>&1; then
   echo "[p3-vendor] cmake not found on PATH (need MinGW i686 CMake next to CC)." >&2
   echo "  MSYS2 MINGW32:  pacman -S --needed mingw-w64-i686-cmake" >&2
   exit 1
 fi
-OPUS_BUILD="$OPUS_WORK/build-dashcdg-mingw32-p3-shared"
-rm -rf "$OPUS_BUILD"
-cmake -S "$OPUS_WORK" -B "$OPUS_BUILD" -G Ninja \
+
+OPUS_DLL=""
+[[ -f "${OPUS_PREFIX}/bin/libopus-0.dll" ]] && OPUS_DLL="${OPUS_PREFIX}/bin/libopus-0.dll"
+[[ -z "$OPUS_DLL" && -f "${OPUS_PREFIX}/bin/libopus.dll" ]] && OPUS_DLL="${OPUS_PREFIX}/bin/libopus.dll"
+OPUS_STAMP="${OPUS_PREFIX}/.dashcdg_p3_opus_build_id"
+OPUS_SKIP=0
+if [[ "${DASHCDG_P3_VENDOR_REBUILD:-0}" != "1" ]] && [[ -n "$OPUS_DLL" ]] && [[ -f "$OPUS_STAMP" ]] &&
+    [[ "$(cat "$OPUS_STAMP" 2>/dev/null || true)" == "$P3_OPUS_BUILD_ID" ]] &&
+    [[ ! "$OPUS_SRC/CMakeLists.txt" -nt "$OPUS_DLL" ]]; then
+  echo "[p3-vendor] skip: Opus shared lib already up to date ($OPUS_DLL). Set DASHCDG_P3_VENDOR_REBUILD=1 to rebuild."
+  OPUS_SKIP=1
+fi
+
+if [[ "$OPUS_SKIP" -eq 0 ]]; then
+  echo "[p3-vendor] Building shared libopus (CMake) -> $OPUS_PREFIX"
+  OPUS_BUILD="$OPUS_WORK/build-dashcdg-mingw32-p3-shared"
+  rm -rf "$OPUS_BUILD"
+  cmake -S "$OPUS_WORK" -B "$OPUS_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$OPUS_INST" \
   -DCMAKE_C_COMPILER="$CC" \
@@ -255,13 +284,15 @@ cmake -S "$OPUS_WORK" -B "$OPUS_BUILD" -G Ninja \
   -DOPUS_INSTALL_PKG_CONFIG_MODULE=OFF \
   -DOPUS_INSTALL_CMAKE_CONFIG_MODULE=OFF
 
-cmake --build "$OPUS_BUILD" --parallel "${JOBS:-8}"
-cmake --install "$OPUS_BUILD"
+  cmake --build "$OPUS_BUILD" --parallel "${JOBS:-8}"
+  cmake --install "$OPUS_BUILD"
 
-if [[ "$OPUS_INST" != "$OPUS_PREFIX" ]]; then
-  mkdir -p "$OPUS_PREFIX"
-  cp -a "$OPUS_INST/." "$OPUS_PREFIX/"
-  rm -rf "$OPUS_INST"
+  if [[ "$OPUS_INST" != "$OPUS_PREFIX" ]]; then
+    mkdir -p "$OPUS_PREFIX"
+    cp -a "$OPUS_INST/." "$OPUS_PREFIX/"
+    rm -rf "$OPUS_INST"
+  fi
+  printf '%s' "$P3_OPUS_BUILD_ID" > "$OPUS_STAMP"
 fi
 
 # GNU make looks for libopus-0.dll.a or libopus.dll.a; duplicate so either wildcard matches.
@@ -280,11 +311,23 @@ if [[ -f "$OPUS_PREFIX/bin/libopus.dll" && ! -f "$OPUS_PREFIX/bin/libopus-0.dll"
 fi
 
 cd "$ROOT"
-echo "[p3-vendor] Building shared PortAudio -> $PA_PREFIX"
-PA_BUILD="$PA_WORK/build-dashcdg-mingw32-p3-shared"
-rm -rf "$PA_BUILD"
-# WASAPI off: friendlier to Windows 2000 / older hosts; WMME + DSOUND remain.
-cmake -S "$PA_WORK" -B "$PA_BUILD" -G Ninja \
+
+PA_DLL="${PA_PREFIX}/bin/libportaudio.dll"
+PA_STAMP="${PA_PREFIX}/.dashcdg_p3_portaudio_build_id"
+PA_SKIP=0
+if [[ "${DASHCDG_P3_VENDOR_REBUILD:-0}" != "1" ]] && [[ -f "$PA_DLL" ]] && [[ -f "$PA_STAMP" ]] &&
+    [[ "$(cat "$PA_STAMP" 2>/dev/null || true)" == "$P3_PA_BUILD_ID" ]] &&
+    [[ ! "$PA_SRC/CMakeLists.txt" -nt "$PA_DLL" ]]; then
+  echo "[p3-vendor] skip: PortAudio shared lib already up to date ($PA_DLL). Set DASHCDG_P3_VENDOR_REBUILD=1 to rebuild."
+  PA_SKIP=1
+fi
+
+if [[ "$PA_SKIP" -eq 0 ]]; then
+  echo "[p3-vendor] Building shared PortAudio -> $PA_PREFIX"
+  PA_BUILD="$PA_WORK/build-dashcdg-mingw32-p3-shared"
+  rm -rf "$PA_BUILD"
+  # WASAPI off: friendlier to Windows 2000 / older hosts; WMME + DSOUND remain.
+  cmake -S "$PA_WORK" -B "$PA_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PA_INST" \
   -DCMAKE_C_COMPILER="$CC" \
@@ -305,13 +348,15 @@ cmake -S "$PA_WORK" -B "$PA_BUILD" -G Ninja \
   -DPA_USE_WASAPI=OFF \
   -DPA_USE_ASIO=OFF
 
-cmake --build "$PA_BUILD" --parallel "${JOBS:-8}"
-cmake --install "$PA_BUILD"
+  cmake --build "$PA_BUILD" --parallel "${JOBS:-8}"
+  cmake --install "$PA_BUILD"
 
-if [[ "$PA_INST" != "$PA_PREFIX" ]]; then
-  mkdir -p "$PA_PREFIX"
-  cp -a "$PA_INST/." "$PA_PREFIX/"
-  rm -rf "$PA_INST"
+  if [[ "$PA_INST" != "$PA_PREFIX" ]]; then
+    mkdir -p "$PA_PREFIX"
+    cp -a "$PA_INST/." "$PA_PREFIX/"
+    rm -rf "$PA_INST"
+  fi
+  printf '%s' "$P3_PA_BUILD_ID" > "$PA_STAMP"
 fi
 
 if [[ -n "$STAGE_DIR" ]]; then
