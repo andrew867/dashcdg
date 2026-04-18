@@ -166,9 +166,18 @@ dashcdg_prepend_autotools_path || true
 
 export CC CXX MAKE
 # Pentium III class: no SSE2 in third-party code (match dashcdg -march=pentium3 objects).
+# -mno-sse on top of -march=p3 -mno-sse2: helps keep scalar FP in x87 for third-party C (PortAudio, etc.).
+# The Opus float path (silk/.../float/*) still tripped the PIII disasm gate (cvttsd2si) on GCC 15, so we also
+# build the codec in fixed point (PIII/embedded-friendly; public DLL API is unchanged for libopus use).
 # Pentium MMX and older: use -march=pentium-mmx in a custom build if you must; Opus is not tuned for that here.
 # Keep this one shell word per flag: some MSYS sh/configure paths misparsed combined options as --enable-0.
-P3_CFLAGS="-O2 -march=pentium3 -mtune=pentium3 -mno-sse2 -mfpmath=387 -fno-tree-vectorize -fno-tree-slp-vectorize -U_FORTIFY_SOURCE"
+P3_CFLAGS="-O2 -march=pentium3 -mtune=pentium3 -mno-sse -mno-sse2 -mfpmath=387 -fno-tree-vectorize -fno-tree-slp-vectorize -U_FORTIFY_SOURCE"
+# CMake appends CMAKE_C_FLAGS_RELEASE to CMAKE_C_FLAGS for -DCMAKE_BUILD_TYPE=Release. The MinGW
+# default for that is often -O3, which can re-open vectorization (SSE2) after -fno-tree-vectorize
+# in CMAKE_C_FLAGS. Put the full PIII set in CFLAGS and turn off the extra Release layer.
+P3_CMAKE_C_FLAGS="${P3_CFLAGS} -DNDEBUG"
+# Empty Release flags so CMake does not add the toolchain default -O3 (see verify_p3 on libopus).
+P3_CMAKE_FLAGS_RELEASE_INIT=""
 
 OPUS_SRC="$ROOT/audio_modules/opus/vendor/opus"
 PA_SRC="$ROOT/audio_modules/portaudio/vendor/portaudio"
@@ -233,9 +242,14 @@ cmake -S "$OPUS_WORK" -B "$OPUS_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$OPUS_INST" \
   -DCMAKE_C_COMPILER="$CC" \
-  -DCMAKE_C_FLAGS="$P3_CFLAGS" \
+  -DCMAKE_C_FLAGS:STRING="${P3_CMAKE_C_FLAGS}" \
+  -DCMAKE_C_FLAGS_RELEASE:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_C_FLAGS_MINSIZEREL:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_C_FLAGS_RELWITHDEBINFO:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
   -DOPUS_BUILD_SHARED_LIBRARY=ON \
   -DOPUS_DISABLE_INTRINSICS=ON \
+  -DOPUS_FIXED_POINT=ON \
+  -DOPUS_ENABLE_FLOAT_API=OFF \
   -DOPUS_BUILD_TESTING=OFF \
   -DOPUS_BUILD_PROGRAMS=OFF \
   -DOPUS_INSTALL_PKG_CONFIG_MODULE=OFF \
@@ -259,6 +273,12 @@ if [[ -d "$OPUS_PREFIX/lib" ]]; then
   fi
 fi
 
+# MinGW `-lopus` + Windows loader expect `libopus-0.dll` beside the EXE; Opus CMake may install only `libopus.dll`.
+if [[ -f "$OPUS_PREFIX/bin/libopus.dll" && ! -f "$OPUS_PREFIX/bin/libopus-0.dll" ]]; then
+  cp -f "$OPUS_PREFIX/bin/libopus.dll" "$OPUS_PREFIX/bin/libopus-0.dll"
+  echo "[p3-vendor] mirrored libopus.dll → libopus-0.dll (runtime name for dashcdg bundles)" >&2
+fi
+
 cd "$ROOT"
 echo "[p3-vendor] Building shared PortAudio -> $PA_PREFIX"
 PA_BUILD="$PA_WORK/build-dashcdg-mingw32-p3-shared"
@@ -269,7 +289,14 @@ cmake -S "$PA_WORK" -B "$PA_BUILD" -G Ninja \
   -DCMAKE_INSTALL_PREFIX="$PA_INST" \
   -DCMAKE_C_COMPILER="$CC" \
   -DCMAKE_CXX_COMPILER="$CXX" \
-  -DCMAKE_C_FLAGS="$P3_CFLAGS" \
+  -DCMAKE_C_FLAGS:STRING="${P3_CMAKE_C_FLAGS}" \
+  -DCMAKE_CXX_FLAGS:STRING="${P3_CMAKE_C_FLAGS}" \
+  -DCMAKE_C_FLAGS_RELEASE:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_CXX_FLAGS_RELEASE:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_C_FLAGS_MINSIZEREL:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_CXX_FLAGS_MINSIZEREL:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_C_FLAGS_RELWITHDEBINFO:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
+  -DCMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING="${P3_CMAKE_FLAGS_RELEASE_INIT}" \
   -DBUILD_SHARED_LIBS=ON \
   -DPA_BUILD_TESTS=OFF \
   -DPA_BUILD_EXAMPLES=OFF \

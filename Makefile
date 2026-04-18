@@ -10,8 +10,8 @@ CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 # Opus / PortAudio link flags (expanded after MINGW_ARCH is known on Windows). Linux: set DASHCDG_OPUS_VENDOR=1 and prefixes if needed.
-OPUS_VENDOR_PREFIX ?=
-PORTAUDIO_VENDOR_PREFIX ?=
+# Do not assign OPUS_VENDOR_PREFIX / PORTAUDIO_VENDOR_PREFIX to empty here — GNU Make treats `VAR ?=` as defined,
+# which blocks the mingw32 defaults below (`?= build/mingw32-p3-vendor/...`).
 OPUS_CPPFLAGS :=
 OPUS_LINK := -lopus
 PORTAUDIO_CPPFLAGS :=
@@ -318,6 +318,7 @@ endif
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 
 libs: $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB)
 
@@ -492,6 +493,7 @@ $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 
 $(TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_LINK_OBJ) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
 ifeq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
@@ -502,12 +504,14 @@ endif
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 
 $(RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 
 ifneq ($(RX_GDI_BIN),)
 $(RX_GDI_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GDI_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
@@ -515,6 +519,7 @@ $(RX_GDI_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_GDI_OBJECT) $(DESKTOP_OP
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 endif
 
 ifneq ($(TX_GDI_BIN),)
@@ -523,6 +528,7 @@ $(TX_GDI_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_GDI_OBJECT) $(DESKTOP_OP
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 endif
 
 ifneq ($(RETRO_RX_BIN),)
@@ -531,12 +537,14 @@ $(RETRO_RX_BIN): $(OBJ_DIR)/app_desktop_rx.o $(DESKTOP_RX_RETRO_GDI_OBJECT) $(DE
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 
 $(RETRO_TX_BIN): $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_tx.o $(DESKTOP_TX_RETRO_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP_RETRO)
 ifneq ($(WINDOWS_RUNTIME_DLLS),)
 	cp -f $(WINDOWS_RUNTIME_DLLS) $(BIN_DIR)/
 endif
+	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 endif
 
 test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN) $(TEST_TRANSPORT_UDP_BIN)

@@ -1316,6 +1316,16 @@ static int dashcdg_rx_sender_playback_now_locked(
     return 1;
 }
 
+/*
+ * CDG frame selection for both GL and Win32 GDI uses the same render snapshot.
+ * When network audio is active, playback_ms follows g_audio->timestamp_ms, which
+ * desktop_audio updates from the output device clock (PortAudio: full callback
+ * frame_count + DAC latency from PaStreamCallbackTimeInfo; WinMM: chunk size +
+ * fixed queue latency). That keeps graphics aligned with sound leaving the
+ * buffer, not with decode enqueue. Separately, dashcdg_rx_drain_media_locked drains
+ * audio jitter before CDG and stalls CDG when the PCM queue is back-pressured so
+ * video cannot run ahead of buffered audio.
+ */
 static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
     struct dashcdg_rx_render_snapshot snapshot;
     uint64_t packet_ts = 0U;

@@ -74,7 +74,7 @@ cvtss2sd
 cvttpd2dq
 cvttpd2pi
 cvttps2dq
-cvttss2si
+# CVTTSS2SI: SSE(1) scalar, legitimate on PIII; do not ban
 cvttsd2si
 # SSE3
 haddps

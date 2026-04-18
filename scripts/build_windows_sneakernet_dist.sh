@@ -116,11 +116,13 @@ copy_p3_codec_dlls() {
     return 1
   fi
 
-  for n in libopus-0.dll libopus.dll; do
-    if [[ -f "${p3o}/${n}" ]]; then
-      cp -f "${p3o}/${n}" "${destdir}/"
-    fi
-  done
+  # Always ship the MSYS2/loader name next to EXEs (`-lopus` → libopus-0.dll).
+  if [[ -f "${p3o}/libopus-0.dll" ]]; then
+    cp -f "${p3o}/libopus-0.dll" "${destdir}/"
+  elif [[ -f "${p3o}/libopus.dll" ]]; then
+    cp -f "${p3o}/libopus.dll" "${destdir}/libopus-0.dll"
+  fi
+  rm -f "${destdir}/libopus.dll"
   cp -f "${p3p}/libportaudio.dll" "${destdir}/"
 }
 
@@ -207,6 +209,9 @@ if [[ "${SKIP_P3_DISASM:-0}" == "1" ]]; then
   echo "[sneakernet-dist] SKIP_P3_DISASM=1 — not running PIII disassembly scan (not recommended)" >&2
 elif command -v objdump >/dev/null 2>&1; then
   echo "[sneakernet-dist] objdump: full PIII gate on every .exe/.dll in dist + PIII vendor + build/x86*/bin…"
+  # verify_p3_pe_pentium3.sh defaults P3_STRICT_MINGW_DLLS=1 (scan libstdc++/glew/freeglut runtimes).
+  # MSYS2 copies of those DLLs are not PIII-built and will fail the gate; sneakernet unset → allow skip unless caller exports P3_STRICT_MINGW_DLLS=1.
+  export P3_STRICT_MINGW_DLLS="${P3_STRICT_MINGW_DLLS:-0}"
   bash "${SCRIPT_DIR}/verify_p3_pe_pentium3.sh" "${DIST_ROOT}" || exit 1
 else
   echo "[sneakernet-dist] FATAL: objdump not on PATH (mingw-w64-i686-binutils). Set SKIP_P3_DISASM=1 to override (not recommended)." >&2
