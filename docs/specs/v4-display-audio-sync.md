@@ -38,7 +38,8 @@ Headless TX does not render; the setting is ignored.
 
 1. **Drain order** (`dashcdg_rx_drain_media_locked`): **audio jitter is drained before CDG**. If the PCM ring is full, CDG does not advance that tick — avoids graphics leading audio by the entire buffer depth.
 2. **Software ring** (`dashcdg_rx_network_stream_ring_ms()`): bounded (~500–1100 ms wideband, higher for narrowband codecs) instead of multi-second queues.
-3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): when not paused, HUD/playback uses `g_audio->timestamp_ms` (DAC-compensated) when available.
+3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): when not paused, HUD/playback uses `g_audio->timestamp_ms` (DAC-compensated) when available — **CDG seeks to the same `playback_ms`**, so graphics track **heard** audio (including WinMM’s fixed chunk latency), not enqueue time.
+4. **Output device start** (`dashcdg_rx_claim_audio_start_locked`): WinMM/PortAudio opens once the software PCM ring reaches **half** of `announced_playout_delay_ms`. We **do not** also require `sender_time >= session_start_ms`; that comparison could block late joiners on XP until the next track even though decode preroll was healthy.
 
 ## TX codec cycle (`c`) and the media timeline
 

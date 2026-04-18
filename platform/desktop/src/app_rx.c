@@ -1242,20 +1242,10 @@ static void dashcdg_rx_format_audio_gate_locked(
     } else if (buffered_ms < state->announced_playout_delay_ms / 2U) {
         snprintf(buffer, buffer_size, "wait-preroll %u/%u", (unsigned int) buffered_ms,
                 (unsigned int) (state->announced_playout_delay_ms / 2U));
+    } else if (!g_audio_stream_started) {
+        snprintf(buffer, buffer_size, "ready-to-start");
     } else {
-        int64_t sender_now_ms = dashcdg_media_clock_remote_now(&state->sender_clock, (int64_t) local_now_ms);
-
-        if (sender_now_ms < (int64_t) state->session_start_ms) {
-            snprintf(
-                    buffer,
-                    buffer_size,
-                    "wait-start %" DASHCDG_RX_PRIi64 "ms",
-                    (long long) ((int64_t) state->session_start_ms - sender_now_ms));
-        } else if (!g_audio_stream_started) {
-            snprintf(buffer, buffer_size, "ready-to-start");
-        } else {
-            snprintf(buffer, buffer_size, "running");
-        }
+        snprintf(buffer, buffer_size, "running");
     }
 }
 
@@ -3266,9 +3256,6 @@ static void dashcdg_rx_fill_hud_lines_locked(
 }
 
 static int dashcdg_rx_claim_audio_start_locked(void) {
-    uint64_t local_now_ms;
-    uint64_t sender_now_ms;
-
     if (!g_receiver.network_audio_enabled || g_audio_stream_started || g_audio_start_inflight ||
             g_audio == NULL || !g_receiver.have_clock) {
         return 0;
@@ -3278,12 +3265,13 @@ static int dashcdg_rx_claim_audio_start_locked(void) {
         return 0;
     }
 
-    local_now_ms = dashcdg_clock_now_ms();
-    sender_now_ms = (uint64_t) dashcdg_media_clock_remote_now(&g_receiver.sender_clock, (int64_t) local_now_ms);
-    if (sender_now_ms < g_receiver.session_start_ms) {
-        return 0;
-    }
-
+    /*
+     * Do not gate WinMM/PortAudio start on session_start_ms vs mapped sender time. TX sets
+     * session_start_ms at track load (playback_anchor); late joiners can map sender_now behind
+     * that value until clock observations settle, which wedged audio on XP/WinMM until the next
+     * track bumped session_start. Preroll (buffered_ms >= playout_delay/2) already implies live
+     * compressed audio is arriving and decoded PCM is queued.
+     */
     g_audio_stream_started = 1;
     return 1;
 }
