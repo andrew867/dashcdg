@@ -176,8 +176,27 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             uint64_t skew = (in->sender_playback_now_ms > jb->next_playback_ms)
                     ? (in->sender_playback_now_ms - jb->next_playback_ms)
                     : 0U;
+            uint64_t threshold = (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS;
+            uint64_t ms_since = in->ms_since_prior_audio_apply;
 
-            if (skew < (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS) {
+            /*
+             * 0 = caller did not supply timing (treat like unknown: no hole shortcut).
+             * Bounded skew/ms ratio distinguishes real-time loss (skew tracks wall clock since
+             * last decode) from join transients (huge skew ms after a fresh apply).
+             */
+            if (in->audio_stream_started && ms_since != 0U &&
+                    ms_since >= (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MIN_WAIT_MS &&
+                    skew > (uint64_t) in->late_grace_ms &&
+                    skew <= (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MAX_SKEW_MS) {
+                uint64_t ratio_skew = skew * 4U;
+                uint64_t ratio_ms = ms_since * 15U;
+
+                if (ratio_skew <= ratio_ms) {
+                    threshold = (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_HOLE_RECOVERY_SKEW_MS;
+                }
+            }
+
+            if (skew < threshold) {
                 return DASHCDG_AUDIO_DRAIN_STOP;
             }
             *out_missing_skips_delta = 1U;

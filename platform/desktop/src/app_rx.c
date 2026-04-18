@@ -129,6 +129,7 @@ struct receiver_state {
     uint64_t session_start_ms;
     uint64_t playback_base_ms;
     uint64_t playback_base_sender_ms;
+    uint64_t last_audio_jitter_apply_local_ms;
     char song_id[DASHCDG_MAX_SONG_ID];
     size_t contiguous_prefix_chunks;
     uint64_t datagrams_received;
@@ -646,6 +647,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->session_start_ms = 0;
     state->playback_base_ms = 0;
     state->playback_base_sender_ms = 0;
+    state->last_audio_jitter_apply_local_ms = 0;
     state->contiguous_prefix_chunks = 0;
     /* Datagram / parse counters are cumulative for the process (not reset per asset). */
     state->duplicate_chunks = 0;
@@ -1992,6 +1994,13 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             din.audio_stream_started = g_audio_stream_started;
             din.audio_device_null = g_audio == NULL ? 1 : 0;
             din.audio_buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+            din.ms_since_prior_audio_apply = 0U;
+            if (state->last_audio_jitter_apply_local_ms != 0U) {
+                din.ms_since_prior_audio_apply = dashcdg_rx_elapsed_ms_safe(
+                        local_now_ms,
+                        state->last_audio_jitter_apply_local_ms
+                );
+            }
 
             step = dashcdg_audio_jitter_drain_step(&state->audio_jitter, &din, &frame, &miss_delta);
             if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
@@ -2006,6 +2015,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                     audio_backpressure = 1;
                 } else {
                     dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
+                    state->last_audio_jitter_apply_local_ms = local_now_ms;
                     progressed = 1;
                 }
             }
@@ -2540,6 +2550,16 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
 static int dashcdg_rx_store_v4_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
     if (state == NULL || view == NULL || view->v4_audio_chunk.encoded_bytes == NULL) {
         return 0;
+    }
+
+    /*
+     * v4_clock_sync normally establishes playback_base_*; if audio arrives first, missing-frame
+     * drain needs have_sender_playback — bootstrap from the first chunk's tags until clock_sync
+     * overwrites with an authoritative pair.
+     */
+    if (state->playback_base_sender_ms == 0U && state->have_clock) {
+        state->playback_base_ms = view->v4_audio_chunk.playback_ms;
+        state->playback_base_sender_ms = view->header.sender_time_ms;
     }
 
     dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(

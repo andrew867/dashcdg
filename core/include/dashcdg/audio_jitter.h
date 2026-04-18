@@ -18,6 +18,22 @@ enum {
 #ifndef DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS
 #define DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS 2000U
 #endif
+/*
+ * After steady playout, a lost UDP datagram can leave the jitter buffer empty while sender
+ * playback is only hundreds of ms ahead — far below SKIP_EMPTY_MIN_SKEW_MS — wedging decode until
+ * a multi-second skew develops. Hole recovery allows empty skip when skew/ms_since_apply stays
+ * bounded (real holes) while join-clock artifacts (huge skew shortly after an apply) still use
+ * the large threshold (see tests).
+ */
+#ifndef DASHCDG_AUDIO_SKIP_EMPTY_HOLE_RECOVERY_SKEW_MS
+#define DASHCDG_AUDIO_SKIP_EMPTY_HOLE_RECOVERY_SKEW_MS 220U
+#endif
+#ifndef DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MIN_WAIT_MS
+#define DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MIN_WAIT_MS 150U
+#endif
+#ifndef DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MAX_SKEW_MS
+#define DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MAX_SKEW_MS 750U
+#endif
 
 struct dashcdg_audio_jitter_frame {
     int occupied;
@@ -48,6 +64,8 @@ struct dashcdg_audio_jitter_drain_input {
     int audio_stream_started;
     int audio_device_null;
     uint32_t audio_buffered_ms;
+    /* Wall ms since last successful jitter APPLY+decode; 0 = unknown (hole recovery disabled). */
+    uint64_t ms_since_prior_audio_apply;
 };
 
 enum dashcdg_audio_drain_step {
