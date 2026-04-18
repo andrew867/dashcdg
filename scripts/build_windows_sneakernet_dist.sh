@@ -10,6 +10,9 @@
 #
 # Standard folders ship distinct EXEs: headless desktop-tx, GL desktop-rx, GDI RX/TX,
 # full desktop-player. Retro folder uses desktop-retro-*.exe + minimal DLLs.
+#
+# Optional: DASHCDG_KILL_RUNNING_DESKTOP_BINS=1 — taskkill desktop-*.exe before packaging
+# (default: do not kill; close apps manually if linker cannot overwrite locked files).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,7 +142,10 @@ Executables (standard folders)
 EOF
 }
 
-kill_running
+if [[ "${DASHCDG_KILL_RUNNING_DESKTOP_BINS:-}" == "1" ]]; then
+  echo "[sneakernet-dist] DASHCDG_KILL_RUNNING_DESKTOP_BINS=1 — stopping running desktop binaries"
+  kill_running
+fi
 
 rm -rf "${DIST_ROOT}"
 mkdir -p "${DIST_ROOT}"

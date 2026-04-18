@@ -25,7 +25,7 @@ Building from a **git** clone runs `./autogen.sh`, which requires **`autoreconf`
 pacman -S --needed base-devel autoconf automake libtool m4
 ```
 
-The vendor script prepends **`&lt;msys64&gt;/usr/bin`** when `gcc` is under **`mingw64/bin`**, **`mingw32/bin`**, or **`ucrt64/bin`** so **`autoreconf`** is found from a **MINGW64** terminal (same fix as PATH in MSYS-only shells).
+The vendor script prepends **`<MSYS2 root>/usr/bin`** when `gcc` is under **`mingw64/bin`**, **`mingw32/bin`**, or **`ucrt64/bin`** so **`autoreconf`** is found from a **MINGW64** terminal.
 
 ## Makefile integration (implemented)
 

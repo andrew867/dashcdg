@@ -273,7 +273,7 @@ ifneq ($(RETRO_RX_BIN),)
 DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
 endif
 
-.PHONY: all debug dirs libs test desktop-apps bundle-runtime vendor-mingw32-p3-runtime package package-x64 package-x86 package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime vendor-mingw32-p3-runtime verify-mingw32-p3-dlls package package-x64 package-x86 package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
 
 all: CFLAGS += -O2
 all: dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
@@ -552,6 +552,9 @@ vendor-audio-sources:
 # Build Pentium III–safe shared libopus-0.dll + libportaudio.dll into build/mingw32-p3-vendor/ (run vendor-audio-sources first if trees are missing).
 vendor-mingw32-p3-runtime:
 	bash scripts/build_mingw32_p3_opus_portaudio_shared.sh
+
+verify-mingw32-p3-dlls:
+	bash scripts/verify_mingw32_p3_codec_dlls.sh
 
 # Full sneakernet matrix after fetching sources and building PIII-safe codecs.
 dist-windows-sneakernet-with-sources: vendor-audio-sources vendor-mingw32-p3-runtime dist-windows-sneakernet

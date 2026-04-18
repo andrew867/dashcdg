@@ -62,15 +62,17 @@ kill_posix_binary_if_running() {
   fi
 }
 
-echo "[build-release] stopping running desktop binaries"
-kill_windows_binary_if_running "desktop-tx.exe"
-kill_windows_binary_if_running "desktop-gdi-tx.exe"
-kill_windows_binary_if_running "desktop-rx.exe"
-kill_windows_binary_if_running "desktop-gdi-rx.exe"
-kill_windows_binary_if_running "desktop-player.exe"
-kill_posix_binary_if_running "desktop-tx"
-kill_posix_binary_if_running "desktop-rx"
-kill_posix_binary_if_running "desktop-player"
+if [[ "${DASHCDG_KILL_RUNNING_DESKTOP_BINS:-}" == "1" ]]; then
+  echo "[build-release] DASHCDG_KILL_RUNNING_DESKTOP_BINS=1 — stopping running desktop binaries"
+  kill_windows_binary_if_running "desktop-tx.exe"
+  kill_windows_binary_if_running "desktop-gdi-tx.exe"
+  kill_windows_binary_if_running "desktop-rx.exe"
+  kill_windows_binary_if_running "desktop-gdi-rx.exe"
+  kill_windows_binary_if_running "desktop-player.exe"
+  kill_posix_binary_if_running "desktop-tx"
+  kill_posix_binary_if_running "desktop-rx"
+  kill_posix_binary_if_running "desktop-player"
+fi
 
 cd "${REPO_ROOT}"
 
@@ -116,6 +118,7 @@ case "${TARGET_ARCH}" in
   *)
     echo "usage: ${0} [x64|x86|all]" >&2
     echo "  optional: DASHCDG_WINDOWS_LEGACY=1  (passes WINDOWS_LEGACY_TARGET=1 to make)" >&2
+    echo "  optional: DASHCDG_KILL_RUNNING_DESKTOP_BINS=1  (taskkill/pkill dashcdg desktop binaries before build)" >&2
     exit 1
     ;;
 esac
