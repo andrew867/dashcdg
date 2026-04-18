@@ -29,6 +29,10 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`specs/cpu-rgba-raster-contract.md`](specs/cpu-rgba-raster-contract.md) | `dashcdg_cdg_state_to_rgba8` contract (shared by GL and GDI) |
 | [`specs/receiver-progress-invariants.md`](specs/receiver-progress-invariants.md) | RX progress / preroll invariants |
 | [`specs/tx-cdg-source-model.md`](specs/tx-cdg-source-model.md) | TX CDG source / memory model |
+| [`specs/remaining-tranches-roadmap.md`](specs/remaining-tranches-roadmap.md) | **Remaining work index** (soak, track stress, bad-network phases, CD+G regression, observability) |
+| [`specs/bad-network-transport-next-phases.md`](specs/bad-network-transport-next-phases.md) | Bad-network transport **implementation phases** (companion) |
+| [`specs/operator-observability-and-sync-future-work.md`](specs/operator-observability-and-sync-future-work.md) | PTP / operator UI / metrics UI **future work** |
+| [`specs/narrowband-low-bitrate-audio-quality.md`](specs/narrowband-low-bitrate-audio-quality.md) | NB quality hypotheses, acceptance, test plan (draft) |
 | [`specs/tx-pause-screen.md`](specs/tx-pause-screen.md) | Pause screen packets |
 | [`specs/embedded-rx-audio-profile.md`](specs/embedded-rx-audio-profile.md) | Embedded RX audio (planning) |
 | [`specs/transport-udp-boundary.md`](specs/transport-udp-boundary.md) | UDP helper boundary |
@@ -44,6 +48,9 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`test/desktop-impairment-validation.md`](test/desktop-impairment-validation.md) | Impaired network matrix |
 | [`test/portability-streaming-validation.md`](test/portability-streaming-validation.md) | Portability / streaming checklist |
 | [`test/bad-network-transport-validation.md`](test/bad-network-transport-validation.md) | v4 transport tests |
+| [`test/long-impairment-soak-validation.md`](test/long-impairment-soak-validation.md) | **Long** impaired soaks, log capture, burst threshold quantification |
+| [`test/rapid-track-switch-pressure-validation.md`](test/rapid-track-switch-pressure-validation.md) | Rapid track changes under **sustained TX pressure** |
+| [`test/tx-cdg-source-late-join-regression-plan.md`](test/tx-cdg-source-late-join-regression-plan.md) | **TX CD+G** source slimdown — late-join / switch regression |
 | Other `test/*.md` | Feature‑specific plans and reports |
 
 ## Hardware & ops

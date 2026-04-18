@@ -182,3 +182,9 @@ Relay:
   "expected proof" interpretation with a stricter matrix that includes startup
   loading-screen latency, first-audio deadlines, throughput pressure, and
   profile-specific pass criteria.
+
+## Long soaks and quantified thresholds
+
+For **multi-hour** runs, log archival, and **numeric** burst-loss / recovery bands, use
+**[long-impairment-soak-validation.md](long-impairment-soak-validation.md)** and the index
+**[../specs/remaining-tranches-roadmap.md](../specs/remaining-tranches-roadmap.md)**.

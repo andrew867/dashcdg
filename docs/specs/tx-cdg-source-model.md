@@ -195,6 +195,8 @@ The slimdown work is only complete when all of the following are shown:
 - preview mode, if enabled, still behaves deterministically or is explicitly
   documented as using a separate fallback path
 
+Repeatable cases: **[test/tx-cdg-source-late-join-regression-plan.md](../test/tx-cdg-source-late-join-regression-plan.md)**.
+
 ## Non-Goals
 
 This document does not promise:

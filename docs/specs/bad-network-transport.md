@@ -272,3 +272,9 @@ The implementation is not complete until it is backed by:
 - late-join startup measurements for both audio and video
 - burst-loss and reorder validation
 - observability that distinguishes startup, repair, and live playout states
+
+## See also (planning)
+
+- **[remaining-tranches-roadmap.md](remaining-tranches-roadmap.md)** — index of all related tranches, specs, and tests
+- **[bad-network-transport-next-phases.md](bad-network-transport-next-phases.md)** — phased implementation order vs validation
+- **[test/long-impairment-soak-validation.md](../test/long-impairment-soak-validation.md)** — long soaks, log capture, burst-threshold quantification

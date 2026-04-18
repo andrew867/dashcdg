@@ -8,6 +8,10 @@ tranche in `docs/specs/bad-network-transport.md`.
 It is intentionally stricter than the current protocol v3 proof matrix in
 `docs/test/desktop-impairment-validation.md`.
 
+Long-duration soaks, log bundles, and **quantified** burst-recovery thresholds:
+`docs/test/long-impairment-soak-validation.md`. Roadmap index:
+`docs/specs/remaining-tranches-roadmap.md`.
+
 ## Modes Under Test
 
 - `quality`: retained higher-quality profile
