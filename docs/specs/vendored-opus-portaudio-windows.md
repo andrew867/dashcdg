@@ -13,7 +13,7 @@
 
 - **`scripts/verify_p3_pe_pentium3.sh`** disassembles **every** `.exe` and `.dll` in:
   - (no args) sneakernet + `build/mingw32-p3-vendor` + `build/x86/bin` + `build/x86-retro/bin`;
-  - (directory args) those trees **plus** the same vendor + `x86*\/bin` merges, unless you pass **only files** (then only those files — e.g. codec check).
+  - (directory args) those trees **plus** the same vendor and `build/x86*/bin` trees, unless you pass **only files** (then only those files — e.g. codec check).
 - It rejects **%ymm** / **%zmm** (no AVX), VEX `v…` opcodes, a large **banned** mnemonic set (`scripts/data/p3_pentium3_banned_mnemonics.txt`) for SSE2+, SSSE3, SSE3, and explicit rules for `cmpsd`/`paddq` on `%xmm`, MMX-ambiguous p\* with `%xmm`, and `palignr` on `%xmm`.
 - **`make verify-p3-mingw32-all`**, **`make verify-sneakernet-mingw32-p3`**, and **`build_windows_sneakernet_dist.sh`** call this. **`SKIP_P3_DISASM=1`** skips the sneakernet end step only (not recommended). Missing **`objdump`** is a **fatal** error for sneakernet unless you set **`SKIP_P3_DISASM=1`**.
 
