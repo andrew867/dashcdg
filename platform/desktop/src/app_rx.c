@@ -1239,13 +1239,18 @@ static void dashcdg_rx_format_audio_gate_locked(
         snprintf(buffer, buffer_size, "paused");
     } else if (g_audio == NULL) {
         snprintf(buffer, buffer_size, "wait-audio-init");
+    } else if (g_audio_stream_started) {
+        /*
+         * After claim_audio_start, the PCM ring often dips below playout_delay/2 while the host
+         * buffer drains — that is steady state, not startup preroll. Only !started uses the
+         * half-preroll threshold (matches claim_audio_start_locked).
+         */
+        snprintf(buffer, buffer_size, "running");
     } else if (buffered_ms < state->announced_playout_delay_ms / 2U) {
         snprintf(buffer, buffer_size, "wait-preroll %u/%u", (unsigned int) buffered_ms,
                 (unsigned int) (state->announced_playout_delay_ms / 2U));
-    } else if (!g_audio_stream_started) {
-        snprintf(buffer, buffer_size, "ready-to-start");
     } else {
-        snprintf(buffer, buffer_size, "running");
+        snprintf(buffer, buffer_size, "ready-to-start");
     }
 }
 
