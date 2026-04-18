@@ -38,19 +38,23 @@ Headless TX does not render; the setting is ignored.
 
 1. **Drain order** (`dashcdg_rx_drain_media_locked`): **audio jitter is drained before CDG**. If the PCM ring is full, CDG does not advance that tick — avoids graphics leading audio by the entire buffer depth.
 2. **Software ring** (`dashcdg_rx_network_stream_ring_ms()`): bounded (~500–1100 ms wideband, higher for narrowband codecs) instead of multi-second queues.
-3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): when not paused, HUD/playback uses `g_audio->timestamp_ms` (DAC-compensated) when available — **CDG seeks to the same `playback_ms`**, so graphics track **heard** audio (including WinMM’s fixed chunk latency), not enqueue time.
+3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): when `dashcdg_rx_sender_playback_now_locked()` succeeds (v4 clock_sync established **playback_base_***), **CDG uses sender-derived `playback_ms`** so every receiver agrees. Local `g_audio->timestamp_ms` is **not** applied on top — PortAudio vs WinMM differ and would split multi-client displays. Before sender playback is available, falls back to `g_audio->timestamp_ms` when set.
 4. **Output device start** (`dashcdg_rx_claim_audio_start_locked`): WinMM/PortAudio opens once the software PCM ring reaches **half** of `announced_playout_delay_ms`. We **do not** also require `sender_time >= session_start_ms`; that comparison could block late joiners on XP until the next track even though decode preroll was healthy.
 
 ## TX codec cycle (`c`) and the media timeline
 
-Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `dashcdg_tx_current_playback_ms_locked()` so `playback_ms` on emitted frames stays on the session timeline. See `dashcdg_desktop_audio_seek_mp3_stream()` and `dashcdg_tx_tick_v4_locked` (`playback_deadline`).
+Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `dashcdg_tx_current_playback_ms_locked()` so `playback_ms` on emitted frames stays on the session timeline. See `dashcdg_desktop_audio_seek_mp3_stream()` and `dashcdg_tx_tick_v4_locked` (`playback_deadline` uses **`dashcdg_tx_network_playback_ms_locked()`** so release tracks encoder progress; clock_sync/beacons use the same reference).
+
+## Multi-receiver policy
+
+See **`docs/specs/av-sync-network-clients.md`** (encoder-primary timeline, MP3 silence vs CDG authoring).
 
 ## Related code
 
 | Area | File / symbol |
 | --- | --- |
 | TX preview lag | `app_tx.c` — `dashcdg_tx_preview_delay_effective_ms_locked`, preview display paths |
-| TX pacing / v4 send | `app_tx.c` — `dashcdg_tx_tick_v4_locked`, `dashcdg_tx_current_playback_ms_locked` |
+| TX pacing / v4 send | `app_tx.c` — `dashcdg_tx_tick_v4_locked`, `dashcdg_tx_network_playback_ms_locked`, `dashcdg_tx_current_playback_ms_locked` |
 | RX drain + ring | `app_rx.c` — `dashcdg_rx_drain_media_locked`, `dashcdg_rx_network_stream_ring_ms`, `dashcdg_rx_configure_audio_locked` |
 | Audio host + timestamps | `desktop_audio.c` — `dashcdg_desktop_audio_queue_frames`, PortAudio callback / WinMM fill |
 | Raster contract | `docs/specs/cpu-rgba-raster-contract.md` |

@@ -2040,6 +2040,36 @@ static uint64_t dashcdg_tx_current_playback_ms_locked(uint64_t now_ms) {
     return playback_ms;
 }
 
+/*
+ * Receiver clock sync (v4) and legacy beacons advertise playback_ms so remotes can map
+ * sender wall time to media position. That value must stay on the same timeline as
+ * audio chunk playback_ms tags (encoder-driven). The session wall clock
+ * (playback_anchor + elapsed) can drift ahead or behind the MP3 encoder under load;
+ * mixing wall playback in clock_sync with encoder tags in audio chunks caused multi-
+ * receiver drift and RX code that preferred DAC timestamps made each host disagree.
+ *
+ * When MP3 frames are being produced, use the last encoded frame start time; otherwise
+ * fall back to wall playback (CDG-only, pre-first-frame, or paused).
+ */
+static uint64_t dashcdg_tx_network_playback_ms_locked(uint64_t now_ms) {
+    uint64_t wall_ms;
+    uint64_t enc_frame_start_ms;
+
+    wall_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    if (g_tx_state.paused || g_tx_state.audio_playback_end_ms == 0U) {
+        return wall_ms;
+    }
+    if (g_tx_state.audio_playback_end_ms > (uint64_t) DASHCDG_AUDIO_FRAME_MS) {
+        enc_frame_start_ms = g_tx_state.audio_playback_end_ms - (uint64_t) DASHCDG_AUDIO_FRAME_MS;
+    } else {
+        enc_frame_start_ms = 0U;
+    }
+    if (enc_frame_start_ms > g_tx_state.duration_ms) {
+        enc_frame_start_ms = g_tx_state.duration_ms;
+    }
+    return enc_frame_start_ms;
+}
+
 static uint32_t dashcdg_tx_v4_startup_state_locked(uint64_t now_ms) {
     uint64_t playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
 
@@ -2661,7 +2691,7 @@ static int dashcdg_tx_send_v4_clock_sync_locked(uint64_t now_ms, uint8_t *packet
 
     memset(&payload, 0, sizeof(payload));
     payload.session_start_ms = g_tx_state.session_start_ms;
-    payload.playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    payload.playback_ms = dashcdg_tx_network_playback_ms_locked(now_ms);
     payload.startup_state = dashcdg_tx_v4_startup_state_locked(now_ms);
 
     g_tx_state.header.flags = g_tx_state.paused ? DASHCDG_PACKET_FLAG_PAUSED : 0U;
@@ -4157,7 +4187,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
 }
 
 static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size) {
-    uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
+    uint64_t playback_deadline = dashcdg_tx_network_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
     unsigned int audio_sent = 0U;
     unsigned int video_sent = 0U;
 
@@ -4316,7 +4346,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
         if (g_tx_state.last_beacon_ms == 0 || now_ms - g_tx_state.last_beacon_ms >= 100U) {
             size_t packet_size;
 
-            g_tx_state.beacon.playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+            g_tx_state.beacon.playback_ms = dashcdg_tx_network_playback_ms_locked(now_ms);
             if (g_tx_state.chunk_seen != NULL && g_tx_state.contiguous_prefix_chunks < g_tx_state.chunk_count) {
                 while (g_tx_state.contiguous_prefix_chunks < g_tx_state.chunk_count &&
                         g_tx_state.chunk_seen[g_tx_state.contiguous_prefix_chunks] != 0) {
@@ -4409,7 +4439,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
             }
 
             frame = &g_tx_state.pending_audio_frame;
-            if (frame->playback_ms > dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+            if (frame->playback_ms > dashcdg_tx_network_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
                 break;
             }
 
@@ -4465,7 +4495,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
                 g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
-                dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+                dashcdg_tx_network_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
             const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
             int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                     g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;

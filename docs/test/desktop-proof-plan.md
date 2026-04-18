@@ -21,6 +21,7 @@ This tranche proves the architecture on computer hardware before MCU work:
 - receiver can attempt single-loss XOR repair within protected FEC groups
 - pause/resume keeps the network session healthy and displays a TX-generated pause screen
 - headless RX and TX status output make stalls and packet flow visible
+- two receivers (heterogeneous audio hosts) show the same CDG phase for the same stream; see `docs/test/av-sync-cross-client-validation.md` and `docs/specs/av-sync-network-clients.md`
 
 ## Observability requirements
 

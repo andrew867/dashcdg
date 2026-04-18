@@ -1308,13 +1308,13 @@ static int dashcdg_rx_sender_playback_now_locked(
 
 /*
  * CDG frame selection for both GL and Win32 GDI uses the same render snapshot.
- * When network audio is active, playback_ms follows g_audio->timestamp_ms, which
- * desktop_audio updates from the output device clock (PortAudio: full callback
- * frame_count + DAC latency from PaStreamCallbackTimeInfo; WinMM: chunk size +
- * fixed queue latency). That keeps graphics aligned with sound leaving the
- * buffer, not with decode enqueue. Separately, dashcdg_rx_drain_media_locked drains
- * audio jitter before CDG and stalls CDG when the PCM queue is back-pressured so
- * video cannot run ahead of buffered audio.
+ * Use the sender-derived media timeline when clock_sync has established
+ * playback_base_* so every receiver shows the same lyrics/raster for the same song
+ * position (TX clock_sync playback_ms matches audio chunk playback_ms tags). Local
+ * DAC timestamps differ between PortAudio and WinMM and must not override that.
+ * When no sender playback is available yet, fall back to g_audio->timestamp_ms.
+ * Separately, dashcdg_rx_drain_media_locked drains audio jitter before CDG and stalls
+ * CDG when the PCM queue is back-pressured so video cannot run ahead of buffered audio.
  */
 static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
     struct dashcdg_rx_render_snapshot snapshot;
@@ -1327,11 +1327,10 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
 
         if (dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &sender_playback_ms)) {
             playback_ms = (int) sender_playback_ms;
+        } else if (!g_receiver.playback_paused && g_audio != NULL &&
+                DASHCDG_ATOMIC_GET(g_audio->timestamp_ms) >= 0) {
+            playback_ms = DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
         }
-    }
-
-    if (!g_receiver.playback_paused && g_audio != NULL && DASHCDG_ATOMIC_GET(g_audio->timestamp_ms) >= 0) {
-        playback_ms = DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
     }
 
     snapshot.valid = 1;
