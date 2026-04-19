@@ -5,8 +5,10 @@
 #include <stdint.h>
 
 /*
- * Band-limited-ish rate conversion for desktop codec adapters (float math).
- * Maps output sample j to input position j * in_rate / out_rate (seconds-aligned).
+ * High-quality rate conversion for desktop: exact-ratio polyphase FIR (48↔8/16 kHz),
+ * zero-stuff + FIR for integer 8/16 kHz → 48 kHz, and Lanczos band-limited resampling
+ * for other ratios (e.g. 44.1 kHz → 48 kHz). Public name is historical (`_cubic`);
+ * Catmull–Rom cubics are no longer used in the default path.
  */
 void dashcdg_pcm_mono_resample_cubic(
         const int16_t *in,

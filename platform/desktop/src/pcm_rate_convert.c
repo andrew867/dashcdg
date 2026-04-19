@@ -1,7 +1,12 @@
 #include "dashcdg/pcm_rate_convert.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef DASHCDG_PCM_PI
+#define DASHCDG_PCM_PI 3.14159265358979323846
+#endif
 
 /*
  * Exact-ratio low-pass FIR taps for the narrowband codec adapters.
@@ -36,15 +41,6 @@ static const float dashcdg_decimate_48k_to_16k_taps[] = {
         -0.000000000000f
 };
 
-static float dashcdg_catmull_rom4(float p0, float p1, float p2, float p3, float t) {
-    float t2 = t * t;
-    float t3 = t2 * t;
-
-    return 0.5f *
-            ((2.0f * p1) + (-p0 + p2) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
-                    (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
-}
-
 static int16_t dashcdg_f32_to_i16(float x) {
     if (x > 32767.0f) {
         return 32767;
@@ -53,37 +49,6 @@ static int16_t dashcdg_f32_to_i16(float x) {
         return -32768;
     }
     return (int16_t) (x < 0.0f ? x - 0.5f : x + 0.5f);
-}
-
-static int16_t dashcdg_mono_sample_cubic(const int16_t *in, size_t in_len, float pos) {
-    float idx = pos;
-
-    if (in_len == 0U) {
-        return 0;
-    }
-    if (in_len == 1U) {
-        return in[0];
-    }
-    if (idx < 0.0f) {
-        idx = 0.0f;
-    }
-    if (idx > (float) (in_len - 1U)) {
-        idx = (float) (in_len - 1U);
-    }
-    {
-        size_t i = (size_t) idx;
-        float t = idx - (float) i;
-        size_t i0 = i > 0U ? i - 1U : 0U;
-        size_t i1 = i;
-        size_t i2 = i + 1U < in_len ? i + 1U : in_len - 1U;
-        size_t i3 = i + 2U < in_len ? i + 2U : in_len - 1U;
-        float p0 = (float) in[i0];
-        float p1 = (float) in[i1];
-        float p2 = (float) in[i2];
-        float p3 = (float) in[i3];
-
-        return dashcdg_f32_to_i16(dashcdg_catmull_rom4(p0, p1, p2, p3, t));
-    }
 }
 
 static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
@@ -117,31 +82,58 @@ static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
     }
 }
 
-static void dashcdg_pcm_mono_lowpass_filter(
+/*
+ * Lanczos kernel (order a): band-limited reconstruction for arbitrary resample ratios.
+ * Used for desktop TX capture and non–integer-rate paths where cubic interpolation aliases.
+ */
+static float dashcdg_lanczos_kernel(float x, int a) {
+    float ax = fabsf(x);
+
+    if (ax < 1e-7f) {
+        return 1.0f;
+    }
+    if (ax >= (float) a) {
+        return 0.0f;
+    }
+    {
+        float p1 = (float) DASHCDG_PCM_PI * x;
+        float p2 = p1 / (float) a;
+
+        return (sinf(p1) / p1) * (sinf(p2) / p2);
+    }
+}
+
+static void dashcdg_pcm_mono_resample_lanczos(
         const int16_t *in,
         size_t in_len,
+        uint32_t in_rate,
         int16_t *out,
-        const float *taps,
-        size_t tap_count
+        size_t out_len,
+        uint32_t out_rate,
+        int a
 ) {
-    size_t center = tap_count / 2U;
     size_t j;
 
-    for (j = 0U; j < in_len; ++j) {
-        float acc = 0.0f;
-        size_t k;
+    for (j = 0U; j < out_len; ++j) {
+        double t = ((double) j * (double) in_rate) / (double) out_rate;
+        double acc = 0.0;
+        int ti = (int) floor(t);
+        int i;
+        int i0 = ti - a + 1;
+        int i1 = ti + a;
 
-        for (k = 0U; k < tap_count; ++k) {
-            ptrdiff_t idx = (ptrdiff_t) j + (ptrdiff_t) k - (ptrdiff_t) center;
+        for (i = i0; i <= i1; ++i) {
+            float w = dashcdg_lanczos_kernel((float) (t - (double) i), a);
+            int ii = i;
 
-            if (idx < 0) {
-                idx = 0;
-            } else if ((size_t) idx >= in_len) {
-                idx = (ptrdiff_t) (in_len - 1U);
+            if (ii < 0) {
+                ii = 0;
+            } else if ((size_t) ii >= in_len) {
+                ii = (int) (in_len - 1U);
             }
-            acc += (float) in[(size_t) idx] * taps[k];
+            acc += (double) in[(size_t) ii] * (double) w;
         }
-        out[j] = dashcdg_f32_to_i16(acc);
+        out[j] = dashcdg_f32_to_i16((float) acc);
     }
 }
 
@@ -153,7 +145,6 @@ void dashcdg_pcm_mono_resample_cubic(
         size_t out_len,
         uint32_t out_rate
 ) {
-    size_t j;
 
     if (in == NULL || out == NULL || in_len == 0U || out_len == 0U || in_rate == 0U || out_rate == 0U) {
         return;
@@ -185,41 +176,26 @@ void dashcdg_pcm_mono_resample_cubic(
         return;
     }
 
-    for (j = 0U; j < out_len; ++j) {
-        float pos = ((float) j * (float) in_rate) / (float) out_rate;
-
-        out[j] = dashcdg_mono_sample_cubic(in, in_len, pos);
+    if (in_rate == 8000U && out_rate == 48000U && out_len == in_len * 6U) {
+        dashcdg_pcm_mono_resample_lanczos(in, in_len, in_rate, out, out_len, out_rate, 4);
+        return;
     }
 
-    if (in_rate == 8000U && out_rate == 48000U) {
-        int16_t *tmp = (int16_t *) malloc(out_len * sizeof(*tmp));
-
-        if (tmp != NULL) {
-            memcpy(tmp, out, out_len * sizeof(*tmp));
-            dashcdg_pcm_mono_lowpass_filter(
-                    tmp,
-                    out_len,
-                    out,
-                    dashcdg_decimate_48k_to_8k_taps,
-                    sizeof(dashcdg_decimate_48k_to_8k_taps) / sizeof(dashcdg_decimate_48k_to_8k_taps[0])
-            );
-            free(tmp);
-        }
-    } else if (in_rate == 16000U && out_rate == 48000U) {
-        int16_t *tmp = (int16_t *) malloc(out_len * sizeof(*tmp));
-
-        if (tmp != NULL) {
-            memcpy(tmp, out, out_len * sizeof(*tmp));
-            dashcdg_pcm_mono_lowpass_filter(
-                    tmp,
-                    out_len,
-                    out,
-                    dashcdg_decimate_48k_to_16k_taps,
-                    sizeof(dashcdg_decimate_48k_to_16k_taps) / sizeof(dashcdg_decimate_48k_to_16k_taps[0])
-            );
-            free(tmp);
-        }
+    if (in_rate == 16000U && out_rate == 48000U && out_len == in_len * 3U) {
+        dashcdg_pcm_mono_resample_lanczos(in, in_len, in_rate, out, out_len, out_rate, 4);
+        return;
     }
+
+    if (in_rate == out_rate && in_len == out_len) {
+        memcpy(out, in, out_len * sizeof(*out));
+        return;
+    }
+
+    /*
+     * Fallback: Lanczos sinc (a=4) approximates SoX-quality band-limited resampling for
+     * arbitrary ratios (e.g. 44.1 kHz microphone → 48 kHz session).
+     */
+    dashcdg_pcm_mono_resample_lanczos(in, in_len, in_rate, out, out_len, out_rate, 4);
 }
 
 void dashcdg_pcm_stereo_interleaved_to_mono48(

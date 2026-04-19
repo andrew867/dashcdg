@@ -121,7 +121,16 @@ int dashcdg_opus_encoder_init(
      * keep frames compact and encoding cheap for real-time desktop streaming.
      */
     opus_encoder_ctl(encoder->encoder, OPUS_SET_COMPLEXITY(5));
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    /*
+     * Karaoke default: moderate bitrates favour speech (intelligibility); higher bitrates
+     * favour music programme. Policy: docs/specs/opus-desktop-encoding-policy.md
+     */
+    if (bitrate_bps > 0 && bitrate_bps <= 64000) {
+        opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    } else {
+        opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    }
+    opus_encoder_ctl(encoder->encoder, OPUS_SET_BANDWIDTH(OPUS_AUTO));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_INBAND_FEC(0));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_PACKET_LOSS_PERC(0));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_DTX(0));

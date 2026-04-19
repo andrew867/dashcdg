@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -88,6 +89,43 @@ static void test_stereo_to_mono_avoids_phase_cancellation_collapse(void) {
     assert(mono[3] == -9000);
 }
 
+static void test_dc_preserved_on_8k_to_48k_upsample(void) {
+    int16_t in8k[160];
+    int16_t out48k[960];
+    size_t i;
+
+    for (i = 0U; i < 160U; ++i) {
+        in8k[i] = 7777;
+    }
+
+    dashcdg_pcm_mono_resample_cubic(in8k, 160U, 8000U, out48k, 960U, 48000U);
+
+    for (i = 40U; i < 920U; ++i) {
+        assert(out48k[i] >= 7600 && out48k[i] <= 7950);
+    }
+}
+
+static void test_sinc_resample_441_to_480_yields_sine_energy(void) {
+    int16_t in441[441];
+    int16_t out480[480];
+    size_t i;
+    double e = 0.0;
+
+    for (i = 0U; i < 441U; ++i) {
+        double t = (double) i / 44100.0;
+        in441[i] = (int16_t) (2500.0 * sin(2.0 * 3.141592653589793 * 440.0 * t));
+    }
+
+    dashcdg_pcm_mono_resample_cubic(in441, 441U, 44100U, out480, 480U, 48000U);
+
+    for (i = 40U; i < 440U; ++i) {
+        double s = (double) out480[i];
+
+        e += s * s;
+    }
+    assert(e > 1.0e8);
+}
+
 static void test_interleaved_to_mono_copies_single_channel_input(void) {
     int16_t mono_in[5] = { 100, -200, 300, -400, 500 };
     int16_t mono_out[5] = { 0 };
@@ -101,6 +139,8 @@ static void test_interleaved_to_mono_copies_single_channel_input(void) {
 
 int main(void) {
     test_dc_is_preserved_on_exact_narrowband_decimation();
+    test_dc_preserved_on_8k_to_48k_upsample();
+    test_sinc_resample_441_to_480_yields_sine_energy();
     test_alias_prone_high_frequency_is_rejected();
     test_stereo_to_mono_avoids_phase_cancellation_collapse();
     test_interleaved_to_mono_copies_single_channel_input();

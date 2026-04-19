@@ -20,9 +20,9 @@ This document defines the **contract** for all desktop PCM sample-rate conversio
 
 When `out_len == in_len / 6` (48→8) or `out_len == in_len / 3` (48→16), use **polyphase FIR decimation** with fixed taps (`dashcdg_decimate_48k_to_8k_taps`, `dashcdg_decimate_48k_to_16k_taps`). This is the **primary** anti-alias path for narrowband encoders.
 
-### Tier B — Exact rational upsampling (8 / 16 kHz → 48 kHz)
+### Tier B — Rational upsampling (8 / 16 kHz → 48 kHz)
 
-Use **zero-insertion expansion** by factor **6** or **3** followed by the **same FIR** applied at the **output rate** (interpolation low-pass). This replaces Catmull–Rom cubic plus reuse of decimation taps as an asymmetric reconstruction filter.
+Use **Lanczos sinc resampling** (`dashcdg_pcm_mono_resample_lanczos`, order **a = 4**) at the exact **6×** and **3×** length ratios. This replaces earlier cubic + misapplied low-pass reconstruction and avoids an incorrect zero-stuff FIR prototype that failed DC regression tests.
 
 ### Tier C — Arbitrary ratios (TX microphone / odd device rates)
 

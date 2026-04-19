@@ -25,6 +25,8 @@ Windows **desktop-rx** v4 multicast: **RX starts before TX** (cold join) → oft
 - **Repeats ~1 Hz** during failure → still hitting **full audio reinit** path (追查 session_info / reconcile / resume).
 - **Once at startup only** → teardown likely **not** the cause; focus **jitter / clock / decode**.
 
+**A/V timeline:** RX `--rx-av-sync-log-ms N` prints `[rx-av-sync]` lines (DAC vs sender vs snapshot vs queue). `--rx-graphics-clock sender|dac` switches multi-receiver vs local-heard lyrics. TX preview HUD shows `|pv r:… lag:… pb:…` (raster seek, effective lag, wall playback).
+
 ## Key files touched (recent work)
 
 | Area | Files |
@@ -35,7 +37,7 @@ Windows **desktop-rx** v4 multicast: **RX starts before TX** (cold join) → oft
 
 ## Build / test
 
-- `make test` — core tests include jitter drain cases (`primed_decode` must be set where empty SKIP expected).
+- `make test` — core tests; **`test-pcm-rate-convert`** (FIR decimate + Lanczos paths), **`test-opus-roundtrip`** (64 kbit/s encode/decode energy).
 - After edits, **rebuild** `desktop-rx`; **`build/dist/dashcdg-windows-sneakernet/...` does not auto-update** — copy fresh binaries or rerun packaging.
 
 ## Still open if user reports “unchanged behavior”
