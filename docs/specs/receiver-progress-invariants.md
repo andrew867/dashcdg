@@ -44,6 +44,11 @@ The refactor must make this class of failure structurally harder to create.
 - applying a snapshot may reset or re-anchor the live visual cursor
 - failure to apply a snapshot must not prevent later live batches from advancing
 - snapshot state is a fast-start/recovery aid, not a terminal gate
+- once `live_packets_applied > 0`, a later snapshot/anchor must not rewind
+  `next_packet_index` behind the already-applied live cursor; stale recovery
+  state may refresh the canvas, but it cannot recreate consumed gaps
+- after a snapshot/anchor is applied, post-snapshot late/empty-skip policy must
+  re-prime from the new boundary rather than inheriting pre-snapshot live state
 
 ### 6. HUD/status gates describe independent subsystems
 

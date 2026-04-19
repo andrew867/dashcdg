@@ -60,6 +60,11 @@ startup preroll as already-late content.
   with `count_stats == 0`.
 - **Snapshot / anchor:** call `apply_snapshot_seek` so pending batches before
   the new timeline position are dropped.
+- **Receiver integration rule:** only call `apply_snapshot_seek` when the
+  snapshot/anchor does not move the live cursor behind already-applied wire
+  deltas. A late first anchor may arrive after RX has already advanced; applying
+  that stale seek would rewind `next_packet_index` into a permanently-missing
+  range and force runaway skip recovery.
 
 ## Constants
 

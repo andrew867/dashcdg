@@ -2,6 +2,28 @@
 
 #include <string.h>
 
+static int dashcdg_audio_jitter_skip_starvation_gate_open(const struct dashcdg_audio_jitter_drain_input *in) {
+    uint32_t max_safe_buffer_ms = 0U;
+
+    if (in == NULL) {
+        return 0;
+    }
+    if (in->audio_device_null != 0 || !in->audio_stream_started) {
+        return 1;
+    }
+
+    max_safe_buffer_ms = (uint32_t) in->announced_audio_frame_ms * 2U;
+    if (in->announced_playout_delay_ms > 0U) {
+        uint32_t quarter_preroll_ms = (uint32_t) in->announced_playout_delay_ms / 4U;
+
+        if (quarter_preroll_ms > max_safe_buffer_ms) {
+            max_safe_buffer_ms = quarter_preroll_ms;
+        }
+    }
+
+    return in->audio_buffered_ms <= max_safe_buffer_ms;
+}
+
 void dashcdg_audio_jitter_init(struct dashcdg_audio_jitter_buffer *jb) {
     if (jb == NULL) {
         return;
@@ -165,13 +187,18 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
     if (in->have_sender_playback && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
                     in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
+            dashcdg_audio_jitter_skip_starvation_gate_open(in) &&
             receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
 
         if (oldest != NULL && oldest->media_sequence > jb->next_media_sequence) {
-            *out_missing_skips_delta = (uint64_t) (oldest->media_sequence - jb->next_media_sequence);
-            jb->next_media_sequence = oldest->media_sequence;
-            jb->next_playback_ms = oldest->playback_ms;
+            if (in->primed_decode == 0 || in->ms_since_prior_audio_apply == 0U ||
+                    in->ms_since_prior_audio_apply < (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS) {
+                return DASHCDG_AUDIO_DRAIN_STOP;
+            }
+            *out_missing_skips_delta = 1U;
+            jb->next_media_sequence++;
+            jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
         } else if (oldest != NULL) {
             if (in->primed_decode == 0) {
                 return DASHCDG_AUDIO_DRAIN_STOP;
@@ -229,6 +256,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
     if (in->primed_decode != 0 && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
                     in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
+            dashcdg_audio_jitter_skip_starvation_gate_open(in) &&
             in->ms_since_prior_audio_apply != 0U &&
             in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
             dashcdg_audio_jitter_oldest(jb) == NULL) {
