@@ -78,6 +78,7 @@ Implemented:
 - measured forced session restart to a different track, proving RX can drain an ended session and cleanly acquire a new announce/bootstrap/live cycle
 - a separate bad-network redesign tranche has been specified in `docs/specs/bad-network-transport.md` so weak-Wi-Fi transport changes can advance without rewriting this proof document in place
 - a separate portability/slimdown tranche has been specified in `docs/specs/tx-cdg-source-model.md` and companion portability docs so TX memory and platform-support planning can advance without pretending the refactor is already complete
+- desktop `v4` receiver fixes now guard against three concrete regressions: repeated `session_info` must not re-open audio unless format actually changed, cold-start jitter must not ghost-skip before the first decode/apply, and the first live CDG deltas seed from reader/bridge state instead of applying onto a black canvas
 
 The current proof document should now be read alongside two separate forward
 tranches:

@@ -74,6 +74,12 @@ struct dashcdg_audio_jitter_drain_input {
     uint32_t audio_buffered_ms;
     /* Wall ms since last successful jitter APPLY+decode; 0 = unknown (hole recovery disabled). */
     uint64_t ms_since_prior_audio_apply;
+    /*
+     * Receiver sets this after at least one successful APPLY+decode in the current jitter session.
+     * Empty-buffer SKIP / stall-loss SKIP advance sequence without applying a frame; they must not
+     * run on a cold join before the first decode or next_media_sequence can race past the stream.
+     */
+    int primed_decode;
 };
 
 enum dashcdg_audio_drain_step {

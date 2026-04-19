@@ -131,6 +131,7 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         uint64_t *out_missing_skips_delta
 ) {
     struct dashcdg_cdg_batch_jitter_frame *frame;
+    uint64_t receiver_playback_now_ms = 0U;
 
     if (jb == NULL || in == NULL || out_frame == NULL || out_missing_skips_delta == NULL) {
         return DASHCDG_CDG_BATCH_DRAIN_STOP;
@@ -143,6 +144,15 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         return DASHCDG_CDG_BATCH_DRAIN_STOP;
     }
 
+    if (in->have_sender_playback) {
+        receiver_playback_now_ms = in->sender_playback_now_ms;
+        if (receiver_playback_now_ms > (uint64_t) in->announced_playout_delay_ms) {
+            receiver_playback_now_ms -= (uint64_t) in->announced_playout_delay_ms;
+        } else {
+            receiver_playback_now_ms = 0U;
+        }
+    }
+
     frame = dashcdg_cdg_batch_jitter_find(jb, jb->next_packet_index);
     if (frame != NULL) {
         *out_frame = frame;
@@ -150,7 +160,7 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
     }
 
     if (in->have_sender_playback && in->late_gate != 0 &&
-            in->sender_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
+            receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_cdg_batch_jitter_frame *oldest = dashcdg_cdg_batch_jitter_oldest(jb);
 
         if (oldest != NULL && oldest->packet_start_index > jb->next_packet_index) {
@@ -162,17 +172,28 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
             *out_missing_skips_delta = skipped_batches;
             jb->next_packet_index = oldest->packet_start_index;
             jb->next_playback_ms = dashcdg_packet_count_to_ms(oldest->packet_start_index);
-        } else {
+        } else if (oldest != NULL) {
+            if (in->primed_decode == 0) {
+                return DASHCDG_CDG_BATCH_DRAIN_STOP;
+            }
             uint64_t skipped_packet_index = jb->next_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
 
             *out_missing_skips_delta = 1U;
             jb->next_packet_index = skipped_packet_index;
             jb->next_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
+        } else if (in->primed_decode != 0) {
+            uint64_t skipped_packet_index = jb->next_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
+
+            *out_missing_skips_delta = 1U;
+            jb->next_packet_index = skipped_packet_index;
+            jb->next_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
+        } else {
+            return DASHCDG_CDG_BATCH_DRAIN_STOP;
         }
         return DASHCDG_CDG_BATCH_DRAIN_SKIP;
     }
 
-    if (in->have_sender_playback && in->late_gate != 0 && in->ms_since_prior_cdg_apply != 0U &&
+    if (in->primed_decode != 0 && in->have_sender_playback && in->late_gate != 0 && in->ms_since_prior_cdg_apply != 0U &&
             in->ms_since_prior_cdg_apply >= (uint64_t) DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS &&
             dashcdg_cdg_batch_jitter_oldest(jb) == NULL) {
         uint64_t skipped_packet_index = jb->next_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;

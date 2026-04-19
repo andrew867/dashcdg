@@ -40,11 +40,17 @@ audio jitter contract in [`audio-jitter-playout-boundary.md`](audio-jitter-playo
 ### Drain policy (late / gap)
 
 When the next batch is missing and **late** conditions hold (host supplies
-sender playback clock, grace window, and a gate bit equivalent to “bootstrap
-complete” on the receiver), the buffer either **jumps** to the **oldest**
+sender playback clock, announced playout delay, grace window, and a gate bit
+equivalent to “bootstrap complete” on the receiver), the buffer either **jumps** to the **oldest**
 pending batch start or advances **`next_packet_index` by one nominal batch
 stride** (`DASHCDG_MAX_CDG_BATCH_PACKETS`) when no older batch exists—matching
 prior `app_rx.c` behavior.
+
+Late detection must use **receiver playout time**, not raw sender playback:
+subtract `announced_playout_delay_ms` from `sender_playback_now_ms` before
+comparing against `jb->next_playback_ms`. This keeps video drain aligned with
+the same delayed playout boundary as audio and avoids treating the whole
+startup preroll as already-late content.
 
 ## Host responsibilities
 

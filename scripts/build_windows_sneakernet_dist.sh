@@ -22,7 +22,8 @@
 #   DASHCDG_SNEAKENET_ZIP_FAST=1  — use `zip -1` if available (faster, slightly larger .zip).
 #   DASHCDG_KILL_RUNNING_DESKTOP_BINS=1 — taskkill desktop-*.exe before packaging
 #   SKIP_MINGW32_P3_VENDOR=1      — skip rebuilding PIII vendor codecs
-#   SKIP_P3_DISASM=1              — skip objdump PIII gate (not recommended)
+#   RUN_P3_DISASM=1               — run full objdump PIII gate on dist + build trees (slow; CI / release)
+#   SKIP_P3_DISASM=1              — force-skip objdump gate (overrides RUN_P3_DISASM; default is already skip)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -248,13 +249,15 @@ copy_p3_codec_dlls "${DIST_ROOT}/windows-x86-retro"
 write_readme
 
 if [[ "${SKIP_P3_DISASM:-0}" == "1" ]]; then
-  echo "[sneakernet-dist] SKIP_P3_DISASM=1 — not running PIII disassembly scan (not recommended)" >&2
+  echo "[sneakernet-dist] SKIP_P3_DISASM=1 — skipping objdump PIII gate" >&2
+elif [[ "${RUN_P3_DISASM:-0}" != "1" ]]; then
+  echo "[sneakernet-dist] skipping objdump PIII gate (set RUN_P3_DISASM=1 to run verify_p3_pe_pentium3.sh)" >&2
 elif command -v objdump >/dev/null 2>&1; then
-  echo "[sneakernet-dist] objdump: full PIII gate on every .exe/.dll in dist + PIII vendor + build/x86*/bin…"
+  echo "[sneakernet-dist] RUN_P3_DISASM=1: objdump full PIII gate on every .exe/.dll in dist + PIII vendor + build/x86*/bin…"
   export P3_STRICT_MINGW_DLLS="${P3_STRICT_MINGW_DLLS:-0}"
   bash "${SCRIPT_DIR}/verify_p3_pe_pentium3.sh" "${DIST_ROOT}" || exit 1
 else
-  echo "[sneakernet-dist] FATAL: objdump not on PATH (mingw-w64-i686-binutils). Set SKIP_P3_DISASM=1 to override (not recommended)." >&2
+  echo "[sneakernet-dist] FATAL: RUN_P3_DISASM=1 but objdump not on PATH (mingw-w64-i686-binutils)." >&2
   exit 1
 fi
 

@@ -134,6 +134,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         uint64_t *out_missing_skips_delta
 ) {
     struct dashcdg_audio_jitter_frame *frame;
+    uint64_t receiver_playback_now_ms = 0U;
 
     if (jb == NULL || in == NULL || out_frame == NULL || out_missing_skips_delta == NULL) {
         return DASHCDG_AUDIO_DRAIN_STOP;
@@ -146,6 +147,15 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         return DASHCDG_AUDIO_DRAIN_STOP;
     }
 
+    if (in->have_sender_playback) {
+        receiver_playback_now_ms = in->sender_playback_now_ms;
+        if (receiver_playback_now_ms > (uint64_t) in->announced_playout_delay_ms) {
+            receiver_playback_now_ms -= (uint64_t) in->announced_playout_delay_ms;
+        } else {
+            receiver_playback_now_ms = 0U;
+        }
+    }
+
     frame = dashcdg_audio_jitter_find(jb, jb->next_media_sequence);
     if (frame != NULL) {
         *out_frame = frame;
@@ -155,7 +165,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
     if (in->have_sender_playback && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
                     in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
-            in->sender_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
+            receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
 
         if (oldest != NULL && oldest->media_sequence > jb->next_media_sequence) {
@@ -163,18 +173,21 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             jb->next_media_sequence = oldest->media_sequence;
             jb->next_playback_ms = oldest->playback_ms;
         } else if (oldest != NULL) {
+            if (in->primed_decode == 0) {
+                return DASHCDG_AUDIO_DRAIN_STOP;
+            }
             *out_missing_skips_delta = 1U;
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
-        } else {
+        } else if (in->primed_decode != 0) {
             /*
              * Nothing buffered ahead of next_media_sequence: advancing the sequence without a
              * queued frame is only justified when sender media time proves this slot is very
              * stale (severe loss after join). Join skew between clock_sync and jitter playback
              * stays below this gap while packets drain.
              */
-            uint64_t skew = (in->sender_playback_now_ms > jb->next_playback_ms)
-                    ? (in->sender_playback_now_ms - jb->next_playback_ms)
+            uint64_t skew = (receiver_playback_now_ms > jb->next_playback_ms)
+                    ? (receiver_playback_now_ms - jb->next_playback_ms)
                     : 0U;
             uint64_t threshold = (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS;
             uint64_t ms_since = in->ms_since_prior_audio_apply;
@@ -202,6 +215,8 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             *out_missing_skips_delta = 1U;
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+        } else {
+            return DASHCDG_AUDIO_DRAIN_STOP;
         }
         return DASHCDG_AUDIO_DRAIN_SKIP;
     }
@@ -211,7 +226,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
      * gate above never opens and skew stays 0. Same empty buffer + loss as hole recovery, but
      * driven by wall time since last decode.
      */
-    if (in->announced_audio_frame_ms > 0 &&
+    if (in->primed_decode != 0 && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
                     in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
             in->ms_since_prior_audio_apply != 0U &&

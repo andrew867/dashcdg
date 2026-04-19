@@ -32,6 +32,8 @@ Manual and automated checks for v4 audio codec selection and session metadata.
 
 - Join v4 session; confirm **song title** matches TX `song-id` / library metadata after **first v4 session info** (not `<unknown>`).
 - Switch TX codec between two narrowband ids; confirm RX **reconfigures** without crash (may reset audio pipeline).
+- While TX is running steadily with one codec, leave RX up for at least 2 minutes and confirm periodic `v4_session_info` does **not** repeatedly reset the output device, drop back into `wait-preroll`, or flush buffered audio.
+- Switch TX codec with TTY `c`; confirm RX either follows the preceding `v4_session_info` or reconciles from the first `v4_audio_chunk.codec_id` if session_info is delayed/lost, and does not stay silent on the old decoder.
 
 ## Future — native codec rows
 

@@ -33,10 +33,13 @@ struct dashcdg_cdg_batch_jitter_buffer {
 struct dashcdg_cdg_batch_jitter_drain_input {
     int have_sender_playback;
     uint64_t sender_playback_now_ms;
+    uint16_t announced_playout_delay_ms;
     uint32_t late_grace_ms;
     int late_gate;
     /* 0 = omit (stall-loss recovery disabled). */
     uint64_t ms_since_prior_cdg_apply;
+    /* Same contract as audio_jitter_drain_input.primed_decode — set after first CDG batch APPLY. */
+    int primed_decode;
 };
 
 enum dashcdg_cdg_batch_drain_step {

@@ -76,7 +76,7 @@ struct dashcdg_audio_jitter_drain_input {
     int have_sender_playback;
     uint64_t sender_playback_now_ms;
     uint8_t announced_audio_frame_ms;
-    uint8_t announced_playout_delay_ms;
+    uint16_t announced_playout_delay_ms;
     int audio_stream_started;       /* former g_audio_stream_started */
     int audio_device_null;        /* g_audio == NULL */
     uint32_t audio_buffered_ms;   /* device queue depth in ms */
@@ -98,6 +98,8 @@ enum dashcdg_audio_drain_step {
 **SKIP path:** Jitter updates `next_media_sequence` / `next_playback_ms` exactly as legacy skip branches; `*out_missing_skips_delta` is the increment for RX aggregate stats (0 or gap size).
 
 **Empty-buffer skip guard:** When the next `media_sequence` is missing and **no** buffered frame exists ahead of it (`dashcdg_audio_jitter_oldest` would advance reorder only when `oldest->media_sequence > next`), advancing the sequence without a queued packet is allowed only if **sender playback minus `jb->next_playback_ms` ≥ `DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS`** (see `audio_jitter.h`). Otherwise return **STOP** so join skew between `clock_sync` and drained packet timestamps cannot ghost-skip in-flight frames (regression: one blip of audio then silence).
+
+**Playout-delay alignment:** The drain step must compare `jb->next_playback_ms` against the **receiver local playout target**, not raw sender playback. Implementations therefore subtract `announced_playout_delay_ms` from `sender_playback_now_ms` before deciding a frame is late. Without that subtraction, the receiver treats every packet as late by roughly the entire preroll and burns through startup audio immediately.
 
 ## Invariants (MUST hold)
 
