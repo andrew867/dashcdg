@@ -7,29 +7,40 @@ Multiple receivers (for example Windows 11 + PortAudio and Windows XP + WinMM) m
 - Slow divergence (~tens of seconds) between clients while each sounded “fine” locally.
 - Word/line-level errors versus **expected** MP3+G authoring when **network playback**, **decoder tags**, and **local DAC-derived time** disagreed.
 
-## Three design options (and why one wins)
+## Canonical policies (two modes)
+
+Implementation and CLI (`--rx-graphics-clock`) distinguish:
+
+### Mode 1 — DAC-primary graphics (default `dac`)
+
+**Goal:** On **each** receiver, lyrics match **heard** audio on that machine (karaoke correctness).
+
+1. Once the output stream is running and `g_audio->timestamp_ms` is valid, **`dashcdg_rx_playback_ms_for_graphics_locked`** prefers **`dashcdg_rx_local_audio_playback_now_locked`** (DAC-aligned time).
+2. Before audio timestamps exist, fall back to **`dashcdg_rx_sender_playback_now_locked`** (clock_sync bootstrap).
+
+This matches **[v4-display-audio-sync.md](v4-display-audio-sync.md)** § “RX: single clock for A/V”.
+
+### Mode 2 — Sender-primary graphics (`sender`)
+
+**Goal:** All receivers paint the **same** raster for the same **network media timeline** (multi-receiver parity / monitoring).
+
+When clock_sync has established `playback_base_*`, **`dashcdg_rx_playback_ms_for_graphics_locked`** prefers **`dashcdg_rx_sender_playback_now_locked`** even if DAC time is available.
+
+Use this mode when comparing **multiple RX screens** to each other or to **encoder-tagged** analytics — not when tuning “lip-sync” vs local speakers.
+
+## Historical design options (reference)
 
 ### A — Session wall clock only
 
-**Idea:** Drive `playback_ms` in clock_sync/beacons from `dashcdg_tx_current_playback_ms_locked()` (playback anchor + elapsed wall time).
+**Failure mode:** Encoder media time and wall clock diverge under load → stable drift between clock_sync and decoded audio tags.
 
-**Failure mode:** Under scheduling load the MP3 encoder thread advances **media sample time** embedded in frames (`playback_ms` on audio chunks) at a different rate than wall clock advance. Network receivers map **clock_sync.playback_ms** + sender clock extrapolation onto one timeline while decoded audio advances on another → **stable drift** until graphics and lyrics disagree with heard content.
+### B — Graphics follow local DAC only
 
-### B — Graphics follow local DAC “heard” time only
+**Failure mode:** Without a shared toggle, hosts disagree slightly on media time → multi-receiver raster disagreement.
 
-**Idea:** Prefer `g_audio->timestamp_ms` (device clock + latency compensation) for CDG seek on every receiver.
+### C — Encoder-primary network timeline
 
-**Failure mode:** PortAudio vs WinMM use different latency models and chunk sizes; each host computes a slightly different **media time** for the same UDP stream → **clients disagree with each other** even when each feels locally plausible.
-
-### C — Encoder-primary network timeline (chosen)
-
-**Idea:**
-
-1. **TX:** Advertise synchronisation `playback_ms` from the **same conceptual timeline as audio chunks**: while MP3 frames are being produced, use the **start time of the last encoded frame** (`audio_playback_end_ms - DASHCDG_AUDIO_FRAME_MS`), bounded by `duration_ms`. When paused, before the first frame, or CDG-only without encoder progress, fall back to wall playback.
-2. **TX:** **Send gates** (`playback_deadline` in `dashcdg_tx_tick_v4_locked` and legacy audio/CDG loops) stay on **session wall playback** (`dashcdg_tx_current_playback_ms_locked`) plus payout delay. Using encoder-tail time for those gates could stall release when wall playback and encoder progress diverge (startup, seek, scheduling), which starves receivers.
-3. **RX:** When `dashcdg_rx_sender_playback_now_locked()` succeeds (clock_sync established `playback_base_*`), **do not** override with local DAC timestamps — CDG raster uses **sender playback**. If clock is not ready yet, fall back to `g_audio->timestamp_ms`.
-
-**Why this matches product expectations:** All receivers share **one** media timeline tied to **tags on the wire**. Local DAC still drives **when** samples hit the speaker (preroll, jitter buffer); drain order prevents graphics from running ahead of queued PCM.
+**Still required on TX:** `dashcdg_tx_network_playback_ms_locked()` drives **clock_sync / beacon playback_ms** so wire tags match encoded audio chunks. **RX** may **either** follow DAC (Mode 1) or sender (Mode 2); both are valid products of the same TX contract.
 
 ## MP3 leading silence vs CDG packet index
 
@@ -47,7 +58,7 @@ What matters for karaoke is **time alignment** from **t = 0** when both streams 
 
 ## Relation to VLC-style CDG
 
-Consumer players typically mux audio + subchannel and drive subtitles from **one demux clock**. Our stack separates **encoder sample timeline** (audio chunk `playback_ms`) and **network mapping** (`clock_sync`). Aligning **clock_sync** with **encoder tags** reproduces that single-clock behaviour across the network without inventing per-client offsets.
+Consumer players typically mux audio + subchannel and drive subtitles from **one demux clock**. Our stack separates **encoder sample timeline** (audio chunk `playback_ms`) and **network mapping** (`clock_sync`). Aligning **clock_sync** with **encoder tags** reproduces that single-clock behaviour on the wire; **RX Mode 2** preserves client-to-client raster lock, while **RX Mode 1** optimises local lipsync.
 
 ## Implementation map
 
@@ -57,7 +68,8 @@ Consumer players typically mux audio + subchannel and drive subtitles from **one
 | TX clock_sync payload | `dashcdg_tx_send_v4_clock_sync_locked()` |
 | TX legacy beacon | non-v4 branch, `g_tx_state.beacon.playback_ms` |
 | TX send pacing (wall + payout) | `dashcdg_tx_tick_v4_locked()`, legacy audio/CDG loops |
-| RX raster time | `dashcdg_rx_publish_render_snapshot_locked()` — `platform/desktop/src/app_rx.c` |
+| RX raster time + clock mode | `dashcdg_rx_playback_ms_for_graphics_locked()` — `platform/desktop/src/app_rx.c` |
+| Instrumentation | [`docs/specs/av-sync-rx-tx-instrumentation.md`](av-sync-rx-tx-instrumentation.md) |
 
 ## Related documents
 

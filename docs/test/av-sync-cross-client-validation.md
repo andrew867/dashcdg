@@ -21,11 +21,20 @@ Manual test; no mocks. Goal: confirm **two receivers** stay on the **same lyric/
 - No **systematic** disagreement between clients (one word/line ahead of the other) at any checkpoint.
 - No growing offset between **clock_sync-derived display time** and **heard** content that indicates a separate bug (single-client “DAC feels late” within one preroll is acceptable; **between** clients they must agree).
 
+## Same-host TX preview vs RX (local lip-sync)
+
+1. Start **TX** with GL/GDI preview and **one** **RX** on the same machine (or two windows you can see at once).
+2. Set both to the same v4 session; use **default** RX graphics clock (`--rx-graphics-clock=dac`) to test “heard on RX vs CDG on RX.”
+3. With **TX preview HUD** on, read `pv:r=…` (raster seek time) and compare to **RX** `--rx-av-sync-log-ms 1000` line: `snapshot_playback_ms` should track **heard** content in default mode; expect up to **~1–2 CDG packet times** (≈3.3–6.7 ms) mechanical difference from frame quantisation, not **hundreds of ms** unless buffers are abnormally full.
+4. Repeat with `--rx-graphics-clock=sender` on both A and B to test **multi-receiver** agreement; use the same flag on all clients under test.
+
 ## Failure triage
 
-- **A and B disagree:** Re-check RX is not overriding sender time with DAC for display; re-check TX `clock_sync.playback_ms` vs audio chunk tags.
+- **A and B disagree:** If using **DAC** mode, some mismatch is expected for **pixel** comparability; use **sender** mode on all RX. Re-check TX `clock_sync.playback_ms` vs audio chunk tags.
+- **A and B disagree in sender mode:** Re-check clock_sync bootstrap and jitter drops.
 - **Both agree but lyrics wrong vs recording:** Likely **ZIP/CDG authoring** (silence, offset); fix asset or mux, not protocol.
 
 ## References
 
 - `docs/specs/av-sync-network-clients.md`
+- `docs/specs/av-sync-rx-tx-instrumentation.md`

@@ -48,7 +48,7 @@ Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `
 
 ## Multi-receiver policy
 
-See **`docs/specs/av-sync-network-clients.md`** (encoder-primary timeline, MP3 silence vs CDG authoring).
+See **`docs/specs/av-sync-network-clients.md`**. The wire timeline remains **encoder-primary** on TX; receivers may use **DAC-primary** (default) or **sender-primary** graphics via `--rx-graphics-clock` for multi-client raster parity — see **`docs/specs/av-sync-rx-tx-instrumentation.md`**.
 
 ## Audio jitter empty skip (v4)
 
