@@ -4695,6 +4695,9 @@ static void dashcdg_tx_preview_display(void) {
         int64_t cdg_lead_ms;
         const struct dashcdg_tx_track *track = NULL;
         uint32_t available_prefix_bytes = 0;
+        uint64_t hud_pv_lag_ms = dashcdg_tx_preview_delay_effective_ms_locked();
+        uint64_t hud_pv_raster_ms =
+                g_tx_state.paused ? 0ULL : (playback_ms > hud_pv_lag_ms ? playback_ms - hud_pv_lag_ms : 0ULL);
 
         fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
         audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
@@ -4724,7 +4727,7 @@ static void dashcdg_tx_preview_display(void) {
         snprintf(
                 hud_line_b,
                 sizeof(hud_line_b),
-                "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s",
+                "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s |pv r:%llu lag:%llu pb:%llu",
                 (unsigned long long) g_tx_state.asset_loops_completed,
                 g_tx_state.next_asset_offset,
                 g_tx_state.cdg_snapshot_offset,
@@ -4732,7 +4735,10 @@ static void dashcdg_tx_preview_display(void) {
                 (long long) cdg_lead_ms,
                 (unsigned int) g_tx_state.announce.audio_fec_group_size,
                 (unsigned int) g_tx_state.announce.cdg_fec_group_size,
-                track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
+                track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only",
+                (unsigned long long) hud_pv_raster_ms,
+                (unsigned long long) hud_pv_lag_ms,
+                (unsigned long long) playback_ms
         );
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
@@ -4947,6 +4953,9 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
             int64_t cdg_lead_ms;
             const struct dashcdg_tx_track *track = dashcdg_tx_current_track();
             uint32_t available_prefix_bytes = 0;
+            uint64_t hud_pv_lag_ms = dashcdg_tx_preview_delay_effective_ms_locked();
+            uint64_t hud_pv_raster_ms =
+                    g_tx_state.paused ? 0ULL : (playback_ms > hud_pv_lag_ms ? playback_ms - hud_pv_lag_ms : 0ULL);
 
             fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
             audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_ms);
@@ -4974,7 +4983,7 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
             snprintf(
                     hud_line_b,
                     sizeof(hud_line_b),
-                    "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s",
+                    "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s |pv r:%llu lag:%llu pb:%llu",
                     (unsigned long long) g_tx_state.asset_loops_completed,
                     g_tx_state.next_asset_offset,
                     g_tx_state.cdg_snapshot_offset,
@@ -4982,7 +4991,10 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
                     (long long) cdg_lead_ms,
                     (unsigned int) g_tx_state.announce.audio_fec_group_size,
                     (unsigned int) g_tx_state.announce.cdg_fec_group_size,
-                    track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only"
+                    track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only",
+                    (unsigned long long) hud_pv_raster_ms,
+                    (unsigned long long) hud_pv_lag_ms,
+                    (unsigned long long) playback_ms
             );
         } else {
             hud_line_a[0] = '\0';

@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -280,6 +281,10 @@ static struct in_addr g_endpoint_in_addr;
 static int g_endpoint_is_multicast;
 static int g_endpoint_is_broadcast;
 static uint32_t g_rx_stats_interval_ms = DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS;
+static uint32_t g_rx_av_sync_log_ms = 0U;
+static uint64_t g_rx_last_av_sync_log_ms = 0U;
+static int g_rx_graphics_clock_sender = 0;
+static int32_t g_rx_graphics_trim_ms = 0;
 static dashcdg_socket_t g_rx_stats_sockfd = DASHCDG_INVALID_SOCKET;
 static struct sockaddr_in g_rx_stats_dest;
 static int g_headless = 0;
@@ -631,13 +636,19 @@ static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
     fprintf(
             stderr,
-            "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
+            "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
+            "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
             argv0
     );
     fprintf(stderr, "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
     fprintf(stderr, "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
 #else
-    fprintf(stderr, "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [endpoint-address] [port]\n", argv0);
+    fprintf(
+            stderr,
+            "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
+            "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [endpoint-address] [port]\n",
+            argv0
+    );
 #endif
     fprintf(
             stderr,
@@ -655,7 +666,8 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
     fprintf(
             stdout,
-            "Synopsis: %s [--help] [--headless] [--win-gdi|--gdi] [endpoint-address] [port]\n\n",
+            "Synopsis: %s [--help] [--headless] [--rx-av-sync-log-ms <ms>] [--rx-graphics-clock dac|sender] "
+            "[--win-gdi|--gdi] [endpoint-address] [port]\n\n",
             prog
     );
     fprintf(
@@ -683,6 +695,12 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
             "\n--rx-stats-ms <ms>: v4 only; send periodic observability to the session endpoint "
             "(default %u ms; 0 disables). Transmitters listen on the same UDP port (PTP path) and count them.\n",
             (unsigned) DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS
+    );
+    fprintf(
+            stdout,
+            "\n--rx-av-sync-log-ms <ms>: stderr timeline line every N ms (0 = off) — dac vs sender vs snapshot.\n"
+            "--rx-graphics-clock dac|sender: dac = local heard-time lyrics (default); sender = network timeline.\n"
+            "--rx-graphics-trim-ms <n>: add n ms to raster playback before seek (fine sync).\n"
     );
 }
 
@@ -1500,20 +1518,43 @@ static int dashcdg_rx_local_audio_playback_now_locked(uint64_t *out_playback_ms)
  * heard phonemes match. Before audio timestamps exist, fall back to sender-derived
  * playback from v4 clock_sync / beacon bootstrap.
  */
+static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
+    int64_t v = (int64_t) playback_ms + (int64_t) g_rx_graphics_trim_ms;
+
+    if (v < 0) {
+        return 0;
+    }
+    if (v > (int64_t) INT_MAX) {
+        return INT_MAX;
+    }
+    return (int) v;
+}
+
 static int dashcdg_rx_playback_ms_for_graphics_locked(struct receiver_state *state, uint64_t local_now_ms) {
     uint64_t local_audio_playback_ms = 0U;
     uint64_t sender_playback_ms = 0U;
+    int base = -1;
 
     if (state == NULL) {
         return -1;
     }
-    if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
-        return (int) local_audio_playback_ms;
+    if (g_rx_graphics_clock_sender) {
+        if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
+            base = (int) sender_playback_ms;
+        } else if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
+            base = (int) local_audio_playback_ms;
+        }
+    } else {
+        if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
+            base = (int) local_audio_playback_ms;
+        } else if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
+            base = (int) sender_playback_ms;
+        }
     }
-    if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
-        return (int) sender_playback_ms;
+    if (base < 0) {
+        return -1;
     }
-    return -1;
+    return dashcdg_rx_apply_graphics_trim_ms(base);
 }
 
 /*
@@ -1556,11 +1597,35 @@ static void dashcdg_rx_seed_live_state_before_first_wire_delta_locked(
 static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
     struct dashcdg_rx_render_snapshot snapshot;
     int playback_ms;
+    uint64_t dac_ms = 0U;
+    uint64_t snd_ms = 0U;
+    int have_dac;
+    int have_snd;
 
     memset(&snapshot, 0, sizeof(snapshot));
     playback_ms = dashcdg_rx_playback_ms_for_graphics_locked(&g_receiver, local_now_ms);
     if (playback_ms < 0) {
         playback_ms = 0;
+    }
+
+    if (g_rx_av_sync_log_ms > 0U && g_audio != NULL) {
+        if (g_rx_last_av_sync_log_ms == 0U ||
+                local_now_ms - g_rx_last_av_sync_log_ms >= (uint64_t) g_rx_av_sync_log_ms) {
+            g_rx_last_av_sync_log_ms = local_now_ms;
+            have_dac = dashcdg_rx_local_audio_playback_now_locked(&dac_ms);
+            have_snd = dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &snd_ms);
+            fprintf(
+                    stderr,
+                    "[rx-av-sync] dac=%d:%" DASHCDG_RX_PRIu64 " sender=%d:%" DASHCDG_RX_PRIu64 " snap=%d q=%ums clock=%s\n",
+                    have_dac,
+                    (unsigned long long) dac_ms,
+                    have_snd,
+                    (unsigned long long) snd_ms,
+                    playback_ms,
+                    (unsigned int) dashcdg_desktop_audio_buffered_ms(g_audio),
+                    g_rx_graphics_clock_sender ? "sender" : "dac"
+            );
+        }
     }
 
     snapshot.valid = 1;
@@ -3911,6 +3976,44 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
                 return 1;
             }
             g_rx_stats_interval_ms = (uint32_t) strtoul(argv[i], NULL, 10);
+            continue;
+        }
+        if (strcmp(argv[i], "--rx-av-sync-log-ms") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --rx-av-sync-log-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                return 1;
+            }
+            ++i;
+            if (!dashcdg_rx_is_number(argv[i])) {
+                fprintf(stderr, "%s: --rx-av-sync-log-ms expects a non-negative integer\n", argv[0]);
+                return 1;
+            }
+            g_rx_av_sync_log_ms = (uint32_t) strtoul(argv[i], NULL, 10);
+            continue;
+        }
+        if (strcmp(argv[i], "--rx-graphics-clock") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --rx-graphics-clock requires dac or sender\n", argv[0]);
+                return 1;
+            }
+            ++i;
+            if (strcmp(argv[i], "dac") == 0) {
+                g_rx_graphics_clock_sender = 0;
+            } else if (strcmp(argv[i], "sender") == 0) {
+                g_rx_graphics_clock_sender = 1;
+            } else {
+                fprintf(stderr, "%s: --rx-graphics-clock: expected dac or sender\n", argv[0]);
+                return 1;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--rx-graphics-trim-ms") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --rx-graphics-trim-ms requires an integer\n", argv[0]);
+                return 1;
+            }
+            ++i;
+            g_rx_graphics_trim_ms = (int32_t) strtol(argv[i], NULL, 10);
             continue;
         }
         if (strcmp(argv[i], "--headless") == 0) {
