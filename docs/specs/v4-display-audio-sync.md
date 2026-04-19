@@ -50,6 +50,10 @@ Hot-swapping the v4 audio codec reopens the MP3 path; the decoder **seeks** to `
 
 See **`docs/specs/av-sync-network-clients.md`**. The wire timeline remains **encoder-primary** on TX; receivers may use **DAC-primary** (default) or **sender-primary** graphics via `--rx-graphics-clock` for multi-client raster parity — see **`docs/specs/av-sync-rx-tx-instrumentation.md`**.
 
+## Comparing TX preview to RX (two windows on one PC)
+
+The **TX GDI/GL preview** seeks CDG at **`playback_ms − effective_preview_lag`** (default **~500 ms**) so the operator sees roughly what a **remote listener** hears. The **RX** window (default graphics clock) seeks at **local DAC / heard** `playback_ms`. For the same wall‑clock moment, the **media times** you see are therefore **not the same number**: TX `|pv r:…` is usually **hundreds of ms less** than RX’s timeline when the one‑way path is **shorter** than the preview lag — RX lyrics can look **“ahead”** of TX preview even when both are “correct” for their roles. Use RX HUD **`sk:`** (sender minus DAC, ms) to read clock skew, and use **`--rx-graphics-trim-ms`** (try **negative** values) only if you intentionally want the RX **raster** to line up with the **TX preview** for side‑by‑side visuals (that can pull lyrics **away** from heard audio on the RX).
+
 ## Audio jitter empty skip (v4)
 
 Loss recovery **SKIP** in `dashcdg_audio_jitter_drain_step` must not advance `next_media_sequence` against an **empty** buffer until sender-vs-slot skew exceeds **`DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS`** — otherwise late **clock_sync** vs early packets caused **ghost skips** and one-blip-then-silence. See **[audio-jitter-playout-boundary.md](audio-jitter-playout-boundary.md)**.

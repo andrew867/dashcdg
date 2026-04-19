@@ -19,8 +19,8 @@ Encoder bitrate `bitrate_bps` comes from TX session / CLI (see [`docs/specs/v4-a
 
 | Condition | `OPUS_APPLICATION_*` | `OPUS_SIGNAL_*` | Bandwidth | Notes |
 |-----------|----------------------|-----------------|-------------|-------|
-| `bitrate_bps <= 64000` | `OPUS_APPLICATION_AUDIO` | **`OPUS_SIGNAL_VOICE`** | `OPUS_BANDWIDTH_FULLBAND` via **AUTO** (`opus_encoder_ctl(..., OPUS_SET_BANDWIDTH(OPUS_AUTO))`) | Speech/karaoke primary; constrained VBR stays enabled where already set |
-| `bitrate_bps > 64000` | `OPUS_APPLICATION_AUDIO` | **`OPUS_SIGNAL_MUSIC`** | `OPUS_AUTO` | Music / wide programme |
+| `bitrate_bps <= 96000` | `OPUS_APPLICATION_AUDIO` | **`OPUS_SIGNAL_VOICE`** | `OPUS_BANDWIDTH_FULLBAND` via **AUTO** (`opus_encoder_ctl(..., OPUS_SET_BANDWIDTH(OPUS_AUTO))`) | Covers default **80 kbit/s** desktop MP3+G path; speech/karaoke; constrained VBR stays enabled where already set |
+| `bitrate_bps > 96000` | `OPUS_APPLICATION_AUDIO` | **`OPUS_SIGNAL_MUSIC`** | `OPUS_AUTO` | High-bitrate music programme |
 
 **FEC / DTX:** Defaults remain **FEC off**, **DTX off** for realtime multicast stability unless a separate “bad net” profile explicitly enables them (`docs/specs/bad-network-audio-profiles.md`).
 

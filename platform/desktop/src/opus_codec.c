@@ -125,7 +125,11 @@ int dashcdg_opus_encoder_init(
      * Karaoke default: moderate bitrates favour speech (intelligibility); higher bitrates
      * favour music programme. Policy: docs/specs/opus-desktop-encoding-policy.md
      */
-    if (bitrate_bps > 0 && bitrate_bps <= 64000) {
+    /*
+     * Desktop default Opus is 80 kbit/s (see DASHCDG_AUDIO_BITRATE_KBPS). Treat ≤96 kbit/s as
+     * speech/karaoke; only higher bitrates use the music signal hint.
+     */
+    if (bitrate_bps > 0 && bitrate_bps <= 96000) {
         opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     } else {
         opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));

@@ -3534,6 +3534,10 @@ static void dashcdg_rx_fill_hud_lines_locked(
     char render_gate[64];
     int muted = g_audio != NULL ? dashcdg_desktop_audio_is_muted(g_audio) : g_audio_muted;
     uint32_t audio_buf_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+    int hud_clock_skew_ms = 0;
+    uint64_t hud_dac_playback_ms = 0U;
+    uint64_t hud_snd_playback_ms = 0U;
+    char hud_skew_str[20];
 
     if (hud_line_a == NULL || hud_line_a_size == 0U || hud_line_b == NULL || hud_line_b_size == 0U) {
         return;
@@ -3555,6 +3559,14 @@ static void dashcdg_rx_fill_hud_lines_locked(
     dashcdg_rx_format_audio_gate_locked(&g_receiver, local_now_ms, audio_gate, sizeof(audio_gate));
     dashcdg_rx_format_render_gate_locked(&g_receiver, render_gate, sizeof(render_gate));
 
+    if (dashcdg_rx_local_audio_playback_now_locked(&hud_dac_playback_ms) &&
+            dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &hud_snd_playback_ms)) {
+        hud_clock_skew_ms = (int) ((int64_t) hud_snd_playback_ms - (int64_t) hud_dac_playback_ms);
+        snprintf(hud_skew_str, sizeof(hud_skew_str), "%d", hud_clock_skew_ms);
+    } else {
+        snprintf(hud_skew_str, sizeof(hud_skew_str), "na");
+    }
+
     if (g_receiver.announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4) {
         snprintf(
                 hud_line_a,
@@ -3574,9 +3586,9 @@ static void dashcdg_rx_fill_hud_lines_locked(
         snprintf(
                 hud_line_b,
                 hud_line_b_size,
-                "c%u p%u buf:%ums pend:%u/%u hot:%u/%u mute:%s | %.20s | %.20s"
+                "c%u p%u buf:%ums pend:%u/%u hot:%u/%u mute:%s | %.18s | %.18s"
                 " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%" DASHCDG_RX_PRIu64
-                "ms dg:%" DASHCDG_RX_PRIu64 "ms st:%" DASHCDG_RX_PRIu64 "ms pre:%u/%u",
+                "ms dg:%" DASHCDG_RX_PRIu64 "ms st:%" DASHCDG_RX_PRIu64 "ms pre:%u/%u sk:%s",
                 (unsigned int) g_receiver.announced_audio_codec_id,
                 (unsigned int) g_receiver.announced_audio_profile_id,
                 (unsigned int) audio_buf_ms,
@@ -3593,7 +3605,8 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 (unsigned long long) hud_since_last_dg_ms,
                 (unsigned long long) hud_stall_ms,
                 (unsigned int) hud_prefix_bytes,
-                (unsigned int) g_receiver.asset_size
+                (unsigned int) g_receiver.asset_size,
+                hud_skew_str
         );
     } else {
         snprintf(
