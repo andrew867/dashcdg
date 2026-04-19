@@ -123,6 +123,10 @@ If desktop `v4` is unstable, the firmware project inherits unstable semantics an
 
 - Update spec docs where implementation assumptions are still implicit.
 - Land core jitter tests for the exact cold-start and empty-skip regressions.
+- Land desktop narrowband audio-quality remediation in the shared 48 kHz adapter path:
+  - exact-ratio anti-alias decimation for 48 -> 8/16 kHz before AMR / EVRC / QCELP / Bluetooth SBC encode,
+  - regression tests that prove high-frequency alias-prone content is rejected instead of folded into the narrowband band,
+  - follow-up item still open: replace the current 8/16 -> 48 kHz expansion with the final chosen band-limited interpolation path if subjective validation shows residual harshness.
 - Fix desktop RX/TX runtime until:
   - audio starts once and stays started
   - video does not go black on cold join

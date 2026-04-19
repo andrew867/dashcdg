@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| **Status** | **Draft for review** — spec and test plan only; no implementation in this tranche. |
+| **Status** | **Implemented in part** — exact-ratio anti-alias decimation for desktop 48 kHz -> 8/16 kHz narrowband adapters is now in-tree; jitter PLC and TX live-device resample work remain follow-up items. |
 | **Scope** | Desktop TX/RX for **v4 narrowband family** (wire ids 2–7) and, where relevant, **Opus at very low bitrates**; “choppy / not continuous / shrill or harsh” reports. |
 | **Related** | [v4-audio-codecs.md](v4-audio-codecs.md), [bad-network-audio-profiles.md](bad-network-audio-profiles.md), [audio-jitter-playout-boundary.md](audio-jitter-playout-boundary.md) |
 
@@ -107,10 +107,14 @@
 
 ### Phase B — **Band-limited resampling (desktop, shared)**
 
-- Replace **cubic** for 48↔8 and 48↔16 with a **true resampler** with anti-imaging and anti-aliasing:  
-  - **Option B1 (desktop):** **libsamplerate** (SRC) or **Speex resampler** — high quality, maintained.  
-  - **Option B2 (embedded / MCU):** **fixed-point polyphase** FIR for **rational 6:1 and 3:1** only (tuned taps), to avoid full FP.  
-- Run **ab tests** in §6.1; pick default quality vs CPU budget.  
+- Implemented first tranche: exact-ratio **FIR low-pass decimation** for **48 -> 8 kHz** and **48 -> 16 kHz** inside `pcm_rate_convert.c`, keeping the existing API used by AMR / EVRC / QCELP / SBC wrappers. This removes the worst alias source before narrowband encode without forcing a desktop dependency bump.  
+- Added a regression test binary that asserts:
+  - DC survives exact-ratio decimation unchanged.
+  - A deliberately alias-prone alternating 48 kHz pattern is strongly rejected in the interior of the 8/16 kHz outputs.
+- Remaining follow-up:
+  - replace the current **8/16 -> 48 kHz** cubic expansion with a similarly band-limited interpolation path,
+  - decide whether desktop should later move to **libsamplerate / Speex** or keep the in-tree exact-ratio FIR implementation,
+  - evaluate whether **NB-IMA** should share the same front-end decimator.
 - **Unify** NB-IMA: either (i) pre-filter + keep current int 6:1, or (ii) feed **8 k** from a shared 48→8 **band-limited** path into NB-IMA **instead of** the in-file weighted downsample, if wire format and bit-exact interop with older peers allow (may require a **bump** or a **“codec profile”** flag; **spec decision**).  
 
 ### Phase C — **Jitter: concealment, not just delay**
