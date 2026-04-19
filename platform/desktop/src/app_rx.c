@@ -1419,22 +1419,15 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
     snapshot.valid = 1;
     snapshot.playback_ms = playback_ms;
     /*
-     * Prefer live CDG from the network once any batches have been applied. The
-     * local reader+seek(audio) path can overshoot the asset's packet timeline at
-     * song start (audio clock ahead of buffered subchannel), which clears the GL
-     * / GDI framebuffer until a later keyframe.
+     * Once the full asset is local, render from the reader using sender-synced
+     * playback_ms. This gives deterministic graphics even if the live v4 CDG
+     * jitter path wedges later due to packet loss/skip recovery. Before asset-ready,
+     * fall back to the live incremental canvas to avoid cold-start black frames.
      */
-    if (g_receiver.reader_ready &&
-            !g_receiver.playback_paused &&
-            g_receiver.live_packets_applied == 0U &&
-            g_receiver.cdg_snapshots_applied == 0U) {
-        if (g_receiver.v4_bridge_cdg_valid) {
-            snapshot.state = g_receiver.v4_bridge_cdg;
-        } else {
-            packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
-            dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
-            snapshot.state = g_receiver.reader.state;
-        }
+    if (g_receiver.reader_ready && !g_receiver.playback_paused) {
+        packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
+        dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
+        snapshot.state = g_receiver.reader.state;
     } else {
         snapshot.state = g_receiver.live_state;
     }
