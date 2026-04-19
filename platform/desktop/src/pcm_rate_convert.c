@@ -234,8 +234,25 @@ void dashcdg_pcm_stereo_interleaved_to_mono48(
     }
 
     for (i = 0U; i < frame_count; ++i) {
-        int32_t s = (int32_t) pcm48_interleaved[i * 2U] + (int32_t) pcm48_interleaved[i * 2U + 1U];
+        int32_t l = (int32_t) pcm48_interleaved[i * 2U];
+        int32_t r = (int32_t) pcm48_interleaved[i * 2U + 1U];
+        int32_t mid = (l + r) / 2;
+        int32_t abs_l = l < 0 ? -l : l;
+        int32_t abs_r = r < 0 ? -r : r;
+        int32_t abs_mid = mid < 0 ? -mid : mid;
+        int32_t peak = abs_l > abs_r ? abs_l : abs_r;
 
-        mono48_out[i] = (int16_t) (s / 2);
+        /*
+         * Straight stereo averaging is mathematically correct for coherent mono content,
+         * but wide karaoke/music masters can carry enough L/R phase difference to cancel
+         * badly when folded to mono. That makes every narrowband mono codec sound broken
+         * even before encode. Keep the normal mid mix when it retains most of the channel
+         * energy; otherwise fall back to the stronger channel for this sample.
+         */
+        if (abs_mid * 2 < peak) {
+            mono48_out[i] = (int16_t) (abs_l >= abs_r ? l : r);
+        } else {
+            mono48_out[i] = (int16_t) mid;
+        }
     }
 }

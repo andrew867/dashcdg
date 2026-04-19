@@ -1369,8 +1369,12 @@ static void dashcdg_rx_format_render_gate_locked(
     } else if (state->announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4 &&
             state->v4_loading_screen_active && state->cdg_snapshots_applied == 0) {
         snprintf(buffer, buffer_size, "loading-screen");
+    } else if (state->live_packets_applied > 0U) {
+        snprintf(buffer, buffer_size, "live");
+    } else if (state->v4_bridge_cdg_valid) {
+        snprintf(buffer, buffer_size, "anchor-ready");
     } else if (state->reader_ready) {
-        snprintf(buffer, buffer_size, "asset-ready");
+        snprintf(buffer, buffer_size, "asset-cache-ready");
     } else if (state->asset_size == 0 || state->chunk_count == 0) {
         snprintf(buffer, buffer_size, "wait-announce");
     } else if (state->cdg_snapshots_applied > 0) {
@@ -1464,20 +1468,24 @@ static void dashcdg_rx_seed_live_state_before_first_wire_delta_locked(
 ) {
     int playback_ms;
 
-    if (state == NULL || !state->reader_ready || state->playback_paused || state->live_packets_applied != 0U) {
+    if (state == NULL || state->playback_paused || state->live_packets_applied != 0U) {
         return;
     }
     if (state->cdg_snapshots_applied > 0U) {
         return;
     }
 
-    playback_ms = dashcdg_rx_playback_ms_for_graphics_locked(state, local_now_ms);
-    if (playback_ms < 0) {
+    if (state->v4_bridge_cdg_valid) {
+        state->live_state = state->v4_bridge_cdg;
         return;
     }
 
-    if (state->v4_bridge_cdg_valid) {
-        state->live_state = state->v4_bridge_cdg;
+    if (!state->reader_ready) {
+        return;
+    }
+
+    playback_ms = dashcdg_rx_playback_ms_for_graphics_locked(state, local_now_ms);
+    if (playback_ms < 0) {
         return;
     }
 
