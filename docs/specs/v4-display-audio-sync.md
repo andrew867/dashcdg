@@ -38,8 +38,9 @@ Headless TX does not render; the setting is ignored.
 
 1. **Drain order** (`dashcdg_rx_drain_media_locked`): **audio jitter is drained before CDG**. If the PCM ring is full, CDG does not advance that tick — avoids graphics leading audio by the entire buffer depth.
 2. **Software ring** (`dashcdg_rx_network_stream_ring_ms()`): bounded (~500–1100 ms wideband, higher for narrowband codecs) instead of multi-second queues.
-3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): when `dashcdg_rx_sender_playback_now_locked()` succeeds (v4 clock_sync established **playback_base_***), **CDG uses sender-derived `playback_ms`** so every receiver agrees. Local `g_audio->timestamp_ms` is **not** applied on top — PortAudio vs WinMM differ and would split multi-client displays. Before sender playback is available, falls back to `g_audio->timestamp_ms` when set.
+3. **Render snapshot** (`dashcdg_rx_publish_render_snapshot_locked`): once the local output stream is running and `g_audio->timestamp_ms` is valid, **CDG follows the local DAC-aligned playback timestamp** so the visible lyric matches the emitted audio on that receiver. Before local audio time is available, fall back to sender-derived playback from `playback_base_*`.
 4. **Output device start** (`dashcdg_rx_claim_audio_start_locked`): WinMM/PortAudio opens once the software PCM ring reaches **half** of `announced_playout_delay_ms`. We **do not** also require `sender_time >= session_start_ms`; that comparison could block late joiners on XP until the next track even though decode preroll was healthy.
+5. **Live CDG drain clock**: the receiver still drains **audio jitter** against sender playback minus playout delay so PCM enters the queue in time, but **CDG batch drain** switches to the **local audio playback timestamp** once available. This keeps the live incremental canvas on the same audible playout timeline instead of the earlier queue-fill timeline.
 
 ## TX codec cycle (`c`) and the media timeline
 

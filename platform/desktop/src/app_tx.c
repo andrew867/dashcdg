@@ -1553,7 +1553,6 @@ static const char *dashcdg_tx_v4_codec_cli_name(uint8_t codec_id) {
 static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) || defined(DASHCDG_DESKTOP_NO_OPUS)
     static const uint8_t cycle[] = {
-            DASHCDG_V4_AUDIO_CODEC_SBC_LIKE,
             DASHCDG_V4_AUDIO_CODEC_AMR_WB,
             DASHCDG_V4_AUDIO_CODEC_AMR_NB,
             DASHCDG_V4_AUDIO_CODEC_EVRC,
@@ -1565,7 +1564,6 @@ static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
             DASHCDG_V4_AUDIO_CODEC_AMR_WB,
             DASHCDG_V4_AUDIO_CODEC_OPUS,
             DASHCDG_V4_AUDIO_CODEC_AMR_NB,
-            DASHCDG_V4_AUDIO_CODEC_SBC_LIKE,
             DASHCDG_V4_AUDIO_CODEC_EVRC,
             DASHCDG_V4_AUDIO_CODEC_CELP13K,
             DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC,

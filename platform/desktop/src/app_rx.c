@@ -1412,27 +1412,42 @@ static int dashcdg_rx_sender_playback_now_locked(
     return 1;
 }
 
+static int dashcdg_rx_local_audio_playback_now_locked(uint64_t *out_playback_ms) {
+    int audio_ts;
+
+    if (out_playback_ms == NULL || g_audio == NULL || !g_audio_stream_started) {
+        return 0;
+    }
+
+    audio_ts = DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
+    if (audio_ts < 0) {
+        return 0;
+    }
+
+    *out_playback_ms = (uint64_t) audio_ts;
+    return 1;
+}
+
 /*
  * CDG frame selection for both GL and Win32 GDI uses the same render snapshot.
- * Use the sender-derived media timeline when clock_sync has established
- * playback_base_* so every receiver shows the same lyrics/raster for the same song
- * position (TX clock_sync playback_ms matches audio chunk playback_ms tags). Local
- * DAC timestamps differ between PortAudio and WinMM and must not override that.
- * When no sender playback is available yet, fall back to g_audio->timestamp_ms.
- * Separately, dashcdg_rx_drain_media_locked drains audio jitter before CDG and stalls
- * CDG when the PCM queue is back-pressured so video cannot run ahead of buffered audio.
+ * Karaoke correctness on one receiver takes priority over cross-receiver wall-clock
+ * sameness: once the local output stream is running and exposes a DAC-aligned
+ * timestamp, the screen must follow that local audio-emission time so lyrics and
+ * heard phonemes match. Before audio timestamps exist, fall back to sender-derived
+ * playback from v4 clock_sync / beacon bootstrap.
  */
 static int dashcdg_rx_playback_ms_for_graphics_locked(struct receiver_state *state, uint64_t local_now_ms) {
+    uint64_t local_audio_playback_ms = 0U;
     uint64_t sender_playback_ms = 0U;
 
     if (state == NULL) {
         return -1;
     }
+    if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
+        return (int) local_audio_playback_ms;
+    }
     if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
         return (int) sender_playback_ms;
-    }
-    if (!state->playback_paused && g_audio != NULL && DASHCDG_ATOMIC_GET(g_audio->timestamp_ms) >= 0) {
-        return DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
     }
     return -1;
 }
@@ -2094,6 +2109,8 @@ static void dashcdg_rx_apply_cdg_batch_locked(
 static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t local_now_ms) {
     uint64_t sender_playback_now_ms = 0U;
     int have_sender_playback = 0;
+    uint64_t local_audio_playback_now_ms = 0U;
+    int have_local_audio_playback = 0;
     size_t combined_steps = 0U;
 
     if (state == NULL) {
@@ -2101,6 +2118,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
     }
 
     have_sender_playback = dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_now_ms);
+    have_local_audio_playback = dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_now_ms);
 
     /*
      * Drain audio before CDG: if the PCM ring is full we must not apply CDG for the same
@@ -2170,9 +2188,15 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             int cdg_skip_hold_active = 0;
 
             memset(&cdg_din, 0, sizeof(cdg_din));
-            cdg_din.have_sender_playback = have_sender_playback;
-            cdg_din.sender_playback_now_ms = sender_playback_now_ms;
-            cdg_din.announced_playout_delay_ms = state->announced_playout_delay_ms;
+            if (have_local_audio_playback) {
+                cdg_din.have_sender_playback = 1;
+                cdg_din.sender_playback_now_ms = local_audio_playback_now_ms;
+                cdg_din.announced_playout_delay_ms = 0U;
+            } else {
+                cdg_din.have_sender_playback = have_sender_playback;
+                cdg_din.sender_playback_now_ms = sender_playback_now_ms;
+                cdg_din.announced_playout_delay_ms = state->announced_playout_delay_ms;
+            }
             cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
             cdg_din.late_gate = (state->cdg_snapshots_applied > 0 || state->live_packets_applied > 0) ? 1 : 0;
             cdg_din.ms_since_prior_cdg_apply = 0U;
