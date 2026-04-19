@@ -912,19 +912,15 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
         return 0;
     }
     if (!state->playback_paused &&
-            state->live_packets_applied > 0 &&
+            state->cdg_snapshots_applied > 0 &&
             state->cdg_batch_jitter.initialized &&
             state->active_snapshot_packet_index < state->cdg_batch_jitter.next_packet_index) {
         /*
-         * Never rewind the live CDG cursor once wire deltas have already advanced it.
-         * TX snapshots/anchors describe the canvas at packet_index == "next batch to
-         * send", so a late first anchor can arrive after RX has already applied later
-         * live packets. Resetting next_packet_index backward in that case turns the
-         * already-consumed gap into a permanent missing range and skip counters explode.
-         *
-         * The cold-start black-screen regression came from deferring before any live
-         * packets had applied; keep that path allowed by gating only on
-         * live_packets_applied > 0.
+         * Never rewind the live CDG cursor after bootstrap has already established a
+         * snapshot/anchor boundary for this session. TX anchors describe the sender's
+         * current "next batch to send" boundary; once RX has a live epoch, applying an
+         * older boundary recreates a permanently-missing gap and the skip/drop counters
+         * explode.
          */
         return 0;
     }
@@ -953,8 +949,8 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
      */
     dashcdg_cdg_batch_jitter_apply_snapshot_seek(&state->cdg_batch_jitter, state->active_snapshot_packet_index);
     state->live_packets_applied = 0U;
-    state->jitter_cdg_decode_primed = 0;
-    state->last_cdg_jitter_apply_local_ms = 0U;
+    state->jitter_cdg_decode_primed = 1;
+    state->last_cdg_jitter_apply_local_ms = local_now_ms;
     state->cdg_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
             local_now_ms,
             dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms)
@@ -962,6 +958,66 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
     state->cdg_snapshots_applied++;
     state->last_progress_local_ms = local_now_ms;
     return 1;
+}
+
+static int dashcdg_rx_load_active_snapshot_state_locked(struct receiver_state *state, struct dashcdg_cdg_state *out_state) {
+    size_t offset = 0U;
+
+    if (state == NULL || out_state == NULL || state->active_snapshot_total_bytes != DASHCDG_CDG_SNAPSHOT_STATE_BYTES) {
+        return 0;
+    }
+
+    memset(out_state, 0, sizeof(*out_state));
+    out_state->ts = state->active_snapshot_packet_index;
+    out_state->display_h_offset = state->active_snapshot_bytes[offset++];
+    out_state->display_v_offset = state->active_snapshot_bytes[offset++];
+    memcpy(out_state->transparency, state->active_snapshot_bytes + offset, DASHCDG_COLORS);
+    offset += DASHCDG_COLORS;
+    for (size_t i = 0; i < DASHCDG_COLORS; ++i) {
+        out_state->color_table[i] = (int) dashcdg_rx_read_u32(state->active_snapshot_bytes + offset);
+        offset += 4U;
+    }
+    memcpy(
+            out_state->framebuffer,
+            state->active_snapshot_bytes + offset,
+            DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT
+    );
+    return 1;
+}
+
+static int dashcdg_rx_should_apply_v4_anchor_locked(const struct receiver_state *state, uint64_t anchor_packet_index) {
+    uint64_t local_now_ms;
+    uint64_t stall_ms;
+    uint64_t repair_stall_threshold_ms;
+
+    if (state == NULL) {
+        return 0;
+    }
+    if (state->playback_paused) {
+        return 1;
+    }
+    if (!state->cdg_batch_jitter.initialized) {
+        return 0;
+    }
+    if (anchor_packet_index < state->cdg_batch_jitter.next_packet_index) {
+        return 0;
+    }
+
+    /*
+     * Periodic v4 anchors track the sender's current batch boundary, which is ahead of
+     * local playout by the announced preroll. Applying every refresh in steady state
+     * yanks the live cursor forward and makes subsequent in-order deltas look stale.
+     * Treat later anchors as repair-only unless the live path has actually stalled.
+     */
+    local_now_ms = dashcdg_clock_now_ms();
+    stall_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_progress_local_ms);
+    repair_stall_threshold_ms = state->announced_playout_delay_ms > 0U ?
+            (uint64_t) state->announced_playout_delay_ms * 2U : 1000U;
+    if (repair_stall_threshold_ms < 1000U) {
+        repair_stall_threshold_ms = 1000U;
+    }
+
+    return stall_ms >= repair_stall_threshold_ms ? 1 : 0;
 }
 
 static void dashcdg_rx_handle_snapshot_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -1028,6 +1084,7 @@ static void dashcdg_rx_begin_v4_anchor_locked(
 }
 
 static int dashcdg_rx_decode_v4_anchor_locked(struct receiver_state *state) {
+    struct dashcdg_cdg_state bridge_state;
     uint32_t expected_bytes;
     size_t src_offset = 4;
     size_t dst_offset = 0;
@@ -1062,6 +1119,14 @@ static int dashcdg_rx_decode_v4_anchor_locked(struct receiver_state *state) {
     state->active_snapshot_received_bytes = expected_bytes;
     state->active_snapshot_received_chunks = DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT;
     memset(state->active_snapshot_chunk_seen, 1, sizeof(state->active_snapshot_chunk_seen));
+    if (!dashcdg_rx_load_active_snapshot_state_locked(state, &bridge_state)) {
+        return 0;
+    }
+    state->v4_bridge_cdg = bridge_state;
+    state->v4_bridge_cdg_valid = 1;
+    if (!dashcdg_rx_should_apply_v4_anchor_locked(state, state->active_v4_anchor_packet_index)) {
+        return 1;
+    }
     return dashcdg_rx_apply_snapshot_locked(state);
 }
 
@@ -1407,7 +1472,6 @@ static void dashcdg_rx_seed_live_state_before_first_wire_delta_locked(
 
 static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
     struct dashcdg_rx_render_snapshot snapshot;
-    uint64_t packet_ts = 0U;
     int playback_ms;
 
     memset(&snapshot, 0, sizeof(snapshot));
@@ -1418,16 +1482,8 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
 
     snapshot.valid = 1;
     snapshot.playback_ms = playback_ms;
-    /*
-     * Once the full asset is local, render from the reader using sender-synced
-     * playback_ms. This gives deterministic graphics even if the live v4 CDG
-     * jitter path wedges later due to packet loss/skip recovery. Before asset-ready,
-     * fall back to the live incremental canvas to avoid cold-start black frames.
-     */
-    if (g_receiver.reader_ready && !g_receiver.playback_paused) {
-        packet_ts = dashcdg_ms_to_packet_count((uint64_t) playback_ms);
-        dashcdg_cdg_reader_seek(&g_receiver.reader, packet_ts);
-        snapshot.state = g_receiver.reader.state;
+    if (g_receiver.live_packets_applied == 0U && g_receiver.v4_bridge_cdg_valid) {
+        snapshot.state = g_receiver.v4_bridge_cdg;
     } else {
         snapshot.state = g_receiver.live_state;
     }
@@ -2118,7 +2174,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             cdg_din.sender_playback_now_ms = sender_playback_now_ms;
             cdg_din.announced_playout_delay_ms = state->announced_playout_delay_ms;
             cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
-            cdg_din.late_gate = (state->cdg_snapshots_applied == 0 || state->live_packets_applied > 0) ? 1 : 0;
+            cdg_din.late_gate = (state->cdg_snapshots_applied > 0 || state->live_packets_applied > 0) ? 1 : 0;
             cdg_din.ms_since_prior_cdg_apply = 0U;
             if (state->last_cdg_jitter_apply_local_ms != 0U) {
                 cdg_din.ms_since_prior_cdg_apply = dashcdg_rx_elapsed_ms_safe(

@@ -923,9 +923,9 @@ static void test_cdg_batch_jitter_apply_note_and_drain_skip(void) {
     din.late_gate = 1;
     din.primed_decode = 1;
     step = dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss);
-    assert(step == DASHCDG_CDG_BATCH_DRAIN_SKIP);
-    assert(miss == 1U);
-    assert(jb.next_packet_index == 11U + (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS);
+    assert(step == DASHCDG_CDG_BATCH_DRAIN_STOP);
+    assert(miss == 0U);
+    assert(jb.next_packet_index == 11U);
 }
 
 static void test_cdg_batch_jitter_sender_playback_respects_announced_preroll(void) {
@@ -988,6 +988,47 @@ static void test_cdg_batch_jitter_does_not_jump_to_oldest_without_real_wait(void
     assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_SKIP);
     assert(miss == 1U);
     assert(jb.next_packet_index == 12U);
+}
+
+static void test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
+    struct dashcdg_cdg_batch_jitter_drain_input din;
+    uint8_t packets[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    uint64_t miss = 0U;
+
+    memset(packets, 0x66, sizeof(packets));
+    dashcdg_cdg_batch_jitter_init(&jb);
+
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 0U, 4U, packets, 0) == 1);
+    memset(&din, 0, sizeof(din));
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    dashcdg_cdg_batch_jitter_note_applied(&jb, batch);
+    assert(jb.next_packet_index == 4U);
+
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 8U, 2U, packets, 0) == 1);
+
+    miss = 0U;
+    batch = NULL;
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.sender_playback_now_ms = 500U;
+    din.announced_playout_delay_ms = 240U;
+    din.late_grace_ms = 0U;
+    din.late_gate = 1;
+    din.primed_decode = 1;
+    din.ms_since_prior_cdg_apply = 300U;
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_SKIP);
+    assert(miss == 1U);
+    assert(jb.next_packet_index == 8U);
+
+    miss = 0U;
+    batch = NULL;
+    memset(&din, 0, sizeof(din));
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    assert(batch != NULL);
+    assert(batch->packet_start_index == 8U);
+    assert(batch->packet_count == 2U);
 }
 
 static void test_cdg_batch_jitter_snapshot_seek_purges_old_slots(void) {
@@ -1112,6 +1153,7 @@ int main(void) {
     test_cdg_batch_jitter_apply_note_and_drain_skip();
     test_cdg_batch_jitter_sender_playback_respects_announced_preroll();
     test_cdg_batch_jitter_does_not_jump_to_oldest_without_real_wait();
+    test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start();
     test_cdg_batch_jitter_snapshot_seek_purges_old_slots();
     test_fec_recovery();
     test_nb_ima_codec_roundtrip();

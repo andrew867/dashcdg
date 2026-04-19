@@ -41,10 +41,12 @@ audio jitter contract in [`audio-jitter-playout-boundary.md`](audio-jitter-playo
 
 When the next batch is missing and **late** conditions hold (host supplies
 sender playback clock, announced playout delay, grace window, and a gate bit
-equivalent to “bootstrap complete” on the receiver), the buffer either **jumps** to the **oldest**
-pending batch start or advances **`next_packet_index` by one nominal batch
-stride** (`DASHCDG_MAX_CDG_BATCH_PACKETS`) when no older batch exists—matching
-prior `app_rx.c` behavior.
+equivalent to “bootstrap complete” on the receiver), the buffer must prefer the
+**oldest pending real batch start** when one exists at `packet_start_index >
+next_packet_index`. Empty-buffer late detection by itself is not sufficient
+evidence to free-run the cursor forward; if no pending future batch exists, the
+buffer waits for a real batch or for higher-level recovery to provide a new
+boundary.
 
 Late detection must use **receiver playout time**, not raw sender playback:
 subtract `announced_playout_delay_ms` from `sender_playback_now_ms` before

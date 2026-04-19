@@ -3,8 +3,8 @@ name: ESP32 embedded enterprise plan
 overview: "Deliver a spec-first, tranche-based ESP-IDF + FreeRTOS receiver for the Freenove ESP32 CYD 3.2\" (ST7789), but do it on top of a restored and measurable desktop `protocol v4` baseline first. Extend `platform/espidf/` into buildable firmware with simulation layers, CI, commits per major milestone, **preferred wire codecs** (Opus, Bluetooth SBC, AMR-WB/NB, EVRC, QCELP), **not** NB-IMA-led, and **battery-aware power management**. Treat desktop `v4` A/V correctness, startup, and late-join behaviour as tranche-zero engineering prerequisites because the embedded receiver can only inherit a protocol/runtime that already works."
 todos:
   - id: tr0a-v4-stabilize
-    content: "Freeze and document the desktop `protocol v4` receiver contract first: audio-device reconfigure rules, `clock_sync` / `playback_base_*` ownership, first-keyframe / first-delta video seeding, jitter priming / skip policy, codec switch behaviour, and recovery telemetry. Update docs/specs + tests before firmware work depends on them."
-    status: pending
+    content: "Freeze and document the desktop `protocol v4` receiver contract first: audio-device reconfigure rules, `clock_sync` / `playback_base_*` ownership, first-keyframe / first-delta video seeding, jitter priming / skip policy, codec switch behaviour, and recovery telemetry. Explicitly require that steady-state v4 video remains live-path owned after bootstrap and that CDG recovery converges to real sender batch boundaries, not an `asset-ready` reader fallback. Update docs/specs + tests before firmware work depends on them."
+    status: in_progress
   - id: tr0-specs
     content: Author ESP32 REQ/traceability docs (esp32-rx-requirements, freertos-architecture, test-strategy), **esp32-audio-codecs.md** + **esp32-power-management.md**, link from platform/espidf/README.md; revise embedded-rx-audio-profile stance for MCU (NB-IMA last-resort only); explicitly inherit only the stabilized `v4` subset from `tr0a-v4-stabilize`
     status: pending
@@ -81,17 +81,27 @@ Before any ESP-IDF tranche uses `v4` as a stable transport, complete this **desk
    Files: [`platform/desktop/src/app_rx.c`](platform/desktop/src/app_rx.c)
    Acceptance: one helper decides graphics playback time; all render publication and first-delta seed logic call it.
 
-5. **Reconcile `clock_sync` ownership with audio chunk tags.**
+5. **Keep steady-state v4 rendering live-owned even after `asset-ready`.**
+   Current risk: a broken live cursor can be masked by switching render ownership to the fully rebuilt asset reader, which makes the UI appear fixed while violating the live-stream protocol contract.
+   Files: [`platform/desktop/src/app_rx.c`](platform/desktop/src/app_rx.c), [`docs/specs/v4-live-video-playout.md`](docs/specs/v4-live-video-playout.md)
+   Acceptance: `asset-ready` never becomes the primary renderer during active v4 playback; anchors/snapshots remain bootstrap/recovery only.
+
+6. **Reconcile `clock_sync` ownership with audio chunk tags.**
    Current risk: receiver behaviour silently degrades if `playback_base_*` is missing or stale during startup / codec switch.
    Files: [`platform/desktop/src/app_rx.c`](platform/desktop/src/app_rx.c), [`platform/desktop/src/app_tx.c`](platform/desktop/src/app_tx.c)
    Acceptance: `v4_clock_sync` owns the sender-derived playback base; first audio chunk may bootstrap only until the next valid clock sync.
 
-6. **Codify codec-switch reset rules.**
+7. **Make CDG loss recovery converge to actual sender batch starts.**
+   Current risk: `core/src/cdg_batch_jitter.c` can recover by advancing `next_packet_index` with a fixed nominal stride even when the oldest pending future batch proves the sender is on a different boundary, causing long-play video stalls while audio continues.
+   Files: [`core/src/cdg_batch_jitter.c`](core/src/cdg_batch_jitter.c), [`tests/test_core.c`](tests/test_core.c), [`docs/specs/cdg-batch-jitter-playout-boundary.md`](docs/specs/cdg-batch-jitter-playout-boundary.md)
+   Acceptance: late recovery jumps to the oldest pending real batch start whenever present; unit tests cover variable `packet_count` batches.
+
+8. **Codify codec-switch reset rules.**
    Current risk: TX can change codec/profile while RX keeps stale decoder/jitter/FEC state, producing decode failures or silent wedged playback.
    Files: [`platform/desktop/src/app_tx.c`](platform/desktop/src/app_tx.c), [`platform/desktop/src/app_rx.c`](platform/desktop/src/app_rx.c)
    Acceptance: codec/profile switch resets exactly the necessary decoder + jitter + parity state, and no more.
 
-7. **Capture proof-grade validation for the repaired path.**
+9. **Capture proof-grade validation for the repaired path.**
    Files: add/update docs under [`docs/test/`](docs/test/)
    Acceptance: at minimum a repeatable matrix for steady-state, track restart, late join, codec cycle, impairment, and cross-client A/V sync.
 

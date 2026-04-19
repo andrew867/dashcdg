@@ -38,6 +38,9 @@ The refactor must make this class of failure structurally harder to create.
 - a missing `AUDIO_FRAME` may be repaired, skipped after deadline, or reported as lost
 - a missing `CDG_BATCH` may be repaired, skipped after deadline, or reported as lost
 - once the deadline has passed, the next expected cursor must advance
+- for CDG, deadline recovery must converge to a real sender batch boundary when
+  one is already pending; otherwise RX can keep receiving valid deltas forever
+  without ever matching `next_packet_index` again
 
 ### 5. Snapshot handling cannot block first live progression
 
