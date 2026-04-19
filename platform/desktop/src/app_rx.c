@@ -289,6 +289,55 @@ static int g_hud_visible = 0;
 static int g_audio_muted = 0;
 static pthread_mutex_t g_render_mutex;
 static struct dashcdg_rx_render_snapshot g_render_snapshot;
+static FILE *g_rx_pcm_dump_file;
+static size_t g_rx_pcm_dump_frames_written;
+static size_t g_rx_pcm_dump_frame_limit;
+static int g_rx_pcm_dump_init_attempted;
+
+static void dashcdg_rx_dump_pcm48_stereo(const int16_t *pcm, size_t frame_count) {
+    const char *dump_dir;
+    char path[1024];
+    size_t frames_to_write;
+
+    if (pcm == NULL || frame_count == 0U) {
+        return;
+    }
+
+    if (!g_rx_pcm_dump_init_attempted) {
+        const char *seconds_env;
+
+        g_rx_pcm_dump_init_attempted = 1;
+        dump_dir = getenv("DASHCDG_PCM_DUMP_DIR");
+        seconds_env = getenv("DASHCDG_PCM_DUMP_SECONDS");
+        g_rx_pcm_dump_frame_limit = DASHCDG_AUDIO_SAMPLE_RATE * 10U;
+        if (seconds_env != NULL) {
+            long seconds = strtol(seconds_env, NULL, 10);
+            if (seconds > 0) {
+                g_rx_pcm_dump_frame_limit = (size_t) seconds * DASHCDG_AUDIO_SAMPLE_RATE;
+            }
+        }
+        if (dump_dir != NULL && dump_dir[0] != '\0') {
+            snprintf(path, sizeof(path), "%s/rx-stereo48-s16le.raw", dump_dir);
+            g_rx_pcm_dump_file = fopen(path, "wb");
+        }
+    }
+
+    if (g_rx_pcm_dump_file == NULL || g_rx_pcm_dump_frames_written >= g_rx_pcm_dump_frame_limit) {
+        return;
+    }
+
+    frames_to_write = frame_count;
+    if (frames_to_write > g_rx_pcm_dump_frame_limit - g_rx_pcm_dump_frames_written) {
+        frames_to_write = g_rx_pcm_dump_frame_limit - g_rx_pcm_dump_frames_written;
+    }
+    if (frames_to_write == 0U) {
+        return;
+    }
+
+    fwrite(pcm, sizeof(*pcm) * DASHCDG_AUDIO_CHANNELS, frames_to_write, g_rx_pcm_dump_file);
+    fflush(g_rx_pcm_dump_file);
+    g_rx_pcm_dump_frames_written += frames_to_write;
+}
 
 static void dashcdg_rx_fill_rect(
         struct dashcdg_cdg_state *state,
@@ -2081,6 +2130,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return -1;
     }
 
+    dashcdg_rx_dump_pcm48_stereo(pcm, (size_t) decoded_frames);
     queued_frames = dashcdg_desktop_audio_queue_frames(
             g_audio,
             pcm,

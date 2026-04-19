@@ -82,8 +82,8 @@ static void test_stereo_to_mono_avoids_phase_cancellation_collapse(void) {
 
     dashcdg_pcm_stereo_interleaved_to_mono48(stereo, 4U, mono);
 
-    assert(mono[0] == 12000 || mono[0] == -12000);
-    assert(mono[1] == 14000 || mono[1] == -14000);
+    assert(abs(mono[0]) >= 6000);
+    assert(abs(mono[1]) >= 7000);
     assert(mono[2] == 10000);
     assert(mono[3] == -9000);
 }

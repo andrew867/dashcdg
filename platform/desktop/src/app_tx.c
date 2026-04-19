@@ -288,6 +288,10 @@ struct dashcdg_tx_console_state {
 };
 
 static struct dashcdg_tx_console_state g_tx_console;
+static FILE *g_tx_pcm_dump_file;
+static size_t g_tx_pcm_dump_frames_written;
+static size_t g_tx_pcm_dump_frame_limit;
+static int g_tx_pcm_dump_init_attempted;
 
 static const struct {
     char c;
@@ -1779,6 +1783,51 @@ static int16_t *dashcdg_tx_resample_pcm(
 
     *output_frames = frames_out;
     return output;
+}
+
+static void dashcdg_tx_dump_pcm48_mono(const int16_t *pcm, size_t frame_count) {
+    const char *dump_dir;
+    char path[1024];
+    size_t frames_to_write;
+
+    if (pcm == NULL || frame_count == 0U) {
+        return;
+    }
+
+    if (!g_tx_pcm_dump_init_attempted) {
+        const char *seconds_env;
+
+        g_tx_pcm_dump_init_attempted = 1;
+        dump_dir = getenv("DASHCDG_PCM_DUMP_DIR");
+        seconds_env = getenv("DASHCDG_PCM_DUMP_SECONDS");
+        g_tx_pcm_dump_frame_limit = DASHCDG_AUDIO_SAMPLE_RATE * 10U;
+        if (seconds_env != NULL) {
+            long seconds = strtol(seconds_env, NULL, 10);
+            if (seconds > 0) {
+                g_tx_pcm_dump_frame_limit = (size_t) seconds * DASHCDG_AUDIO_SAMPLE_RATE;
+            }
+        }
+        if (dump_dir != NULL && dump_dir[0] != '\0') {
+            snprintf(path, sizeof(path), "%s/tx-mono48-s16le.raw", dump_dir);
+            g_tx_pcm_dump_file = fopen(path, "wb");
+        }
+    }
+
+    if (g_tx_pcm_dump_file == NULL || g_tx_pcm_dump_frames_written >= g_tx_pcm_dump_frame_limit) {
+        return;
+    }
+
+    frames_to_write = frame_count;
+    if (frames_to_write > g_tx_pcm_dump_frame_limit - g_tx_pcm_dump_frames_written) {
+        frames_to_write = g_tx_pcm_dump_frame_limit - g_tx_pcm_dump_frames_written;
+    }
+    if (frames_to_write == 0U) {
+        return;
+    }
+
+    fwrite(pcm, sizeof(*pcm), frames_to_write, g_tx_pcm_dump_file);
+    fflush(g_tx_pcm_dump_file);
+    g_tx_pcm_dump_frames_written += frames_to_write;
 }
 
 static void dashcdg_tx_free_live_media_locked(void) {
@@ -3355,6 +3404,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 if (fifo_frames + resampled_frames > DASHCDG_TX_PCM_FIFO_FRAMES) {
                     resampled_frames = DASHCDG_TX_PCM_FIFO_FRAMES - fifo_frames;
                 }
+                dashcdg_tx_dump_pcm48_mono(resampled_pcm, resampled_frames);
                 memcpy(
                         pcm_fifo + (fifo_frames * DASHCDG_AUDIO_CHANNELS),
                         resampled_pcm,

@@ -227,32 +227,62 @@ void dashcdg_pcm_stereo_interleaved_to_mono48(
         size_t frame_count,
         int16_t *mono48_out
 ) {
-    size_t i;
+    const size_t block_frames = 240U;
+    size_t block_start;
 
     if (pcm48_interleaved == NULL || mono48_out == NULL) {
         return;
     }
 
-    for (i = 0U; i < frame_count; ++i) {
-        int32_t l = (int32_t) pcm48_interleaved[i * 2U];
-        int32_t r = (int32_t) pcm48_interleaved[i * 2U + 1U];
-        int32_t mid = (l + r) / 2;
-        int32_t abs_l = l < 0 ? -l : l;
-        int32_t abs_r = r < 0 ? -r : r;
-        int32_t abs_mid = mid < 0 ? -mid : mid;
-        int32_t peak = abs_l > abs_r ? abs_l : abs_r;
+    for (block_start = 0U; block_start < frame_count; block_start += block_frames) {
+        size_t block_end = block_start + block_frames;
+        double energy_l = 0.0;
+        double energy_r = 0.0;
+        double energy_mid = 0.0;
+        double preferred_weight = 0.0;
 
-        /*
-         * Straight stereo averaging is mathematically correct for coherent mono content,
-         * but wide karaoke/music masters can carry enough L/R phase difference to cancel
-         * badly when folded to mono. That makes every narrowband mono codec sound broken
-         * even before encode. Keep the normal mid mix when it retains most of the channel
-         * energy; otherwise fall back to the stronger channel for this sample.
-         */
-        if (abs_mid * 2 < peak) {
-            mono48_out[i] = (int16_t) (abs_l >= abs_r ? l : r);
-        } else {
-            mono48_out[i] = (int16_t) mid;
+        if (block_end > frame_count) {
+            block_end = frame_count;
+        }
+
+        for (size_t i = block_start; i < block_end; ++i) {
+            double l = (double) pcm48_interleaved[i * 2U];
+            double r = (double) pcm48_interleaved[i * 2U + 1U];
+            double mid = (l + r) * 0.5;
+
+            energy_l += l * l;
+            energy_r += r * r;
+            energy_mid += mid * mid;
+        }
+
+        if (energy_l > 1.0 || energy_r > 1.0) {
+            double peak_energy = energy_l > energy_r ? energy_l : energy_r;
+            double mid_ratio_sq = energy_mid / peak_energy;
+
+            /*
+             * Keep normal mono sum for coherent stereo. When the mid channel loses
+             * a lot of energy over a short window, blend toward the stronger channel
+             * for the whole block instead of flipping source every sample.
+             */
+            if (mid_ratio_sq < (0.85 * 0.85)) {
+                preferred_weight = ((0.85 * 0.85) - mid_ratio_sq) / ((0.85 * 0.85) - (0.25 * 0.25));
+                if (preferred_weight < 0.0) {
+                    preferred_weight = 0.0;
+                }
+                if (preferred_weight > 1.0) {
+                    preferred_weight = 1.0;
+                }
+            }
+        }
+
+        for (size_t i = block_start; i < block_end; ++i) {
+            double l = (double) pcm48_interleaved[i * 2U];
+            double r = (double) pcm48_interleaved[i * 2U + 1U];
+            double mid = (l + r) * 0.5;
+            double preferred = energy_l >= energy_r ? l : r;
+            double mixed = mid * (1.0 - preferred_weight) + preferred * preferred_weight;
+
+            mono48_out[i] = dashcdg_f32_to_i16((float) mixed);
         }
     }
 }
