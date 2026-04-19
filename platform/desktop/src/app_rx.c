@@ -1124,6 +1124,17 @@ static int dashcdg_rx_decode_v4_anchor_locked(struct receiver_state *state) {
     }
     state->v4_bridge_cdg = bridge_state;
     state->v4_bridge_cdg_valid = 1;
+    if (state->live_packets_applied > 0U && state->cdg_snapshots_applied == 0U && !state->reader_ready) {
+        /*
+         * Late joins can receive live deltas before the first v4 anchor arrives.
+         * Those deltas may have already advanced live_packets_applied on top of a
+         * blank canvas, which makes the renderer ignore the newly decoded bridge
+         * forever. Re-arm the live path from the bridge so the next deltas apply
+         * onto a valid picture instead of a permanently black one.
+         */
+        state->live_state = bridge_state;
+        state->live_packets_applied = 0U;
+    }
     if (!dashcdg_rx_should_apply_v4_anchor_locked(state, state->active_v4_anchor_packet_index)) {
         return 1;
     }

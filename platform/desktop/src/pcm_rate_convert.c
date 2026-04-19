@@ -256,3 +256,37 @@ void dashcdg_pcm_stereo_interleaved_to_mono48(
         }
     }
 }
+
+void dashcdg_pcm_interleaved_to_mono(
+        const int16_t *pcm_interleaved,
+        size_t frame_count,
+        uint32_t channel_count,
+        int16_t *mono_out
+) {
+    if (pcm_interleaved == NULL || mono_out == NULL || channel_count == 0U) {
+        return;
+    }
+
+    if (channel_count == 1U) {
+        memcpy(mono_out, pcm_interleaved, frame_count * sizeof(*mono_out));
+        return;
+    }
+
+    if (channel_count >= 2U) {
+        for (size_t i = 0U; i < frame_count; ++i) {
+            int32_t l = (int32_t) pcm_interleaved[i * (size_t) channel_count];
+            int32_t r = (int32_t) pcm_interleaved[i * (size_t) channel_count + 1U];
+            int32_t mid = (l + r) / 2;
+            int32_t abs_l = l < 0 ? -l : l;
+            int32_t abs_r = r < 0 ? -r : r;
+            int32_t abs_mid = mid < 0 ? -mid : mid;
+            int32_t peak = abs_l > abs_r ? abs_l : abs_r;
+
+            if (abs_mid * 2 < peak) {
+                mono_out[i] = (int16_t) (abs_l >= abs_r ? l : r);
+            } else {
+                mono_out[i] = (int16_t) mid;
+            }
+        }
+    }
+}

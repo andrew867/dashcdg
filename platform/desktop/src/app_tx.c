@@ -59,6 +59,7 @@
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
+#include "dashcdg/pcm_rate_convert.h"
 #include "dashcdg/protocol.h"
 #include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
@@ -1716,21 +1717,6 @@ static const struct dashcdg_tx_track *dashcdg_tx_current_track(void) {
     return &g_tx_state.playlist.tracks[g_tx_state.playlist.current_index];
 }
 
-static int16_t dashcdg_tx_clamp_i16(int32_t sample) {
-    if (sample > 32767) {
-        return 32767;
-    }
-    if (sample < -32768) {
-        return -32768;
-    }
-
-    return (int16_t) sample;
-}
-
-static int16_t dashcdg_tx_mix_to_mono_i16(int16_t left, int16_t right) {
-    return dashcdg_tx_clamp_i16(((int32_t) left + (int32_t) right) / 2);
-}
-
 static int16_t *dashcdg_tx_resample_pcm(
         const int16_t *input,
         size_t input_frames,
@@ -1740,6 +1726,8 @@ static int16_t *dashcdg_tx_resample_pcm(
         size_t *output_frames
 ) {
     int16_t *output;
+    int16_t *mono_input;
+    int16_t *mono_output;
     size_t frames_out;
 
     if (output_frames == NULL || input == NULL || input_frames == 0U || input_rate <= 0 ||
@@ -1747,79 +1735,46 @@ static int16_t *dashcdg_tx_resample_pcm(
         return NULL;
     }
 
-    if (input_rate == (int) DASHCDG_AUDIO_SAMPLE_RATE) {
-        output = (int16_t *) malloc(input_frames * (size_t) output_channels * sizeof(int16_t));
-        if (output == NULL) {
-            return NULL;
-        }
-
-        for (size_t frame_index = 0; frame_index < input_frames; ++frame_index) {
-            int16_t left;
-            int16_t right;
-
-            if (input_channels == 1) {
-                left = input[frame_index];
-                right = left;
-            } else {
-                left = input[frame_index * (size_t) input_channels];
-                right = input[frame_index * (size_t) input_channels + 1U];
-            }
-
-            output[frame_index * (size_t) output_channels] = output_channels == 1 ?
-                    dashcdg_tx_mix_to_mono_i16(left, right) :
-                    left;
-            if (output_channels > 1) {
-                output[frame_index * (size_t) output_channels + 1U] = right;
-            }
-        }
-        *output_frames = input_frames;
-        return output;
-    }
-
     frames_out = (input_frames * (size_t) DASHCDG_AUDIO_SAMPLE_RATE + (size_t) input_rate - 1U) / (size_t) input_rate;
+    mono_input = (int16_t *) malloc(input_frames * sizeof(*mono_input));
     output = (int16_t *) malloc(frames_out * (size_t) output_channels * sizeof(int16_t));
-    if (output == NULL) {
+    mono_output = output_channels == 1 ? output : (int16_t *) malloc(frames_out * sizeof(*mono_output));
+    if (mono_input == NULL || output == NULL || mono_output == NULL) {
+        free(mono_input);
+        if (mono_output != output) {
+            free(mono_output);
+        }
+        free(output);
         return NULL;
     }
 
+    dashcdg_pcm_interleaved_to_mono(
+            input,
+            input_frames,
+            (uint32_t) input_channels,
+            mono_input
+    );
+    dashcdg_pcm_mono_resample_cubic(
+            mono_input,
+            input_frames,
+            (uint32_t) input_rate,
+            mono_output,
+            frames_out,
+            DASHCDG_AUDIO_SAMPLE_RATE
+    );
+    free(mono_input);
+
     for (size_t out_index = 0; out_index < frames_out; ++out_index) {
-        uint64_t source_num = (uint64_t) out_index * (uint64_t) input_rate;
-        size_t left_index = (size_t) (source_num / DASHCDG_AUDIO_SAMPLE_RATE);
-        size_t right_index = left_index + 1U;
-        uint64_t frac = source_num % DASHCDG_AUDIO_SAMPLE_RATE;
+        int16_t mono = mono_output[out_index];
 
-        if (left_index >= input_frames) {
-            left_index = input_frames - 1U;
+        output[out_index * (size_t) output_channels] = mono;
+
+        for (int channel = 1; channel < output_channels; ++channel) {
+            output[out_index * (size_t) output_channels + (size_t) channel] = mono;
         }
-        if (right_index >= input_frames) {
-            right_index = input_frames - 1U;
-        }
-
-        for (int channel = 0; channel < output_channels; ++channel) {
-            if (output_channels == 1 && input_channels > 1) {
-                int32_t left_a = input[left_index * (size_t) input_channels];
-                int32_t left_b = input[left_index * (size_t) input_channels + 1U];
-                int32_t right_a = input[right_index * (size_t) input_channels];
-                int32_t right_b = input[right_index * (size_t) input_channels + 1U];
-                int32_t mono_left = (left_a + left_b) / 2;
-                int32_t mono_right = (right_a + right_b) / 2;
-                int32_t mixed = (int32_t) ((((int64_t) mono_left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
-                        ((int64_t) mono_right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
-
-                output[out_index * (size_t) output_channels] = dashcdg_tx_clamp_i16(mixed);
-                break;
-            }
-
-            {
-                int source_channel = input_channels == 1 ? 0 : channel;
-                int32_t left = input[left_index * (size_t) input_channels + (size_t) source_channel];
-                int32_t right = input[right_index * (size_t) input_channels + (size_t) source_channel];
-                int32_t mixed = (int32_t) ((((int64_t) left * (int64_t) (DASHCDG_AUDIO_SAMPLE_RATE - frac)) +
-                        ((int64_t) right * (int64_t) frac)) / (int64_t) DASHCDG_AUDIO_SAMPLE_RATE);
-
-                output[out_index * (size_t) output_channels + (size_t) channel] = dashcdg_tx_clamp_i16(mixed);
-            }
-        }
+    }
+    if (mono_output != output) {
+        free(mono_output);
     }
 
     *output_frames = frames_out;

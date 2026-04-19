@@ -88,9 +88,21 @@ static void test_stereo_to_mono_avoids_phase_cancellation_collapse(void) {
     assert(mono[3] == -9000);
 }
 
+static void test_interleaved_to_mono_copies_single_channel_input(void) {
+    int16_t mono_in[5] = { 100, -200, 300, -400, 500 };
+    int16_t mono_out[5] = { 0 };
+
+    dashcdg_pcm_interleaved_to_mono(mono_in, 5U, 1U, mono_out);
+
+    for (size_t i = 0U; i < 5U; ++i) {
+        assert(mono_out[i] == mono_in[i]);
+    }
+}
+
 int main(void) {
     test_dc_is_preserved_on_exact_narrowband_decimation();
     test_alias_prone_high_frequency_is_rejected();
     test_stereo_to_mono_avoids_phase_cancellation_collapse();
+    test_interleaved_to_mono_copies_single_channel_input();
     return 0;
 }

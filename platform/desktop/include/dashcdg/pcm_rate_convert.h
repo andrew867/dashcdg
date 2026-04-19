@@ -23,4 +23,11 @@ void dashcdg_pcm_stereo_interleaved_to_mono48(
         int16_t *mono48_out
 );
 
+void dashcdg_pcm_interleaved_to_mono(
+        const int16_t *pcm_interleaved,
+        size_t frame_count,
+        uint32_t channel_count,
+        int16_t *mono_out
+);
+
 #endif
