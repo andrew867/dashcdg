@@ -49,6 +49,37 @@ fi
 
 cd "${REPO_ROOT}"
 
+# MSYS2 root: CI runners (msys2/setup-msys2) are not always at /c/msys64 — resolve from mingw64 gcc on PATH.
+dashcdg_resolve_msys2_root() {
+  local r gcc64 bin64
+  r="${MSYS2_ROOT:-}"
+  if [[ -n "$r" ]] && [[ -d "$r/mingw64/bin" ]] && [[ -d "$r/mingw32/bin" ]]; then
+    echo "${r%/}"
+    return 0
+  fi
+  gcc64="$(command -v x86_64-w64-mingw32-gcc 2>/dev/null || true)"
+  if [[ -n "$gcc64" ]]; then
+    bin64="$(cd "$(dirname "$gcc64")" && pwd)"
+    (cd "$bin64/../.." && pwd)
+    return 0
+  fi
+  for r in /c/msys64 /c/msys2; do
+    if [[ -d "$r/mingw64/bin" && -d "$r/mingw32/bin" ]]; then
+      echo "$r"
+      return 0
+    fi
+  done
+  echo ""
+  return 1
+}
+
+DASHCDG_MSYS2_ROOT="$(dashcdg_resolve_msys2_root || true)"
+if [[ -z "$DASHCDG_MSYS2_ROOT" ]]; then
+  echo "[sneakernet-dist] could not find MSYS2 root (install mingw64+mingw32 toolchains or set MSYS2_ROOT)" >&2
+  exit 1
+fi
+export MSYS2_ROOT="$DASHCDG_MSYS2_ROOT"
+
 run_make_variant() {
   local label="$1"
   local arch="$2"
@@ -57,8 +88,8 @@ run_make_variant() {
   local toolchain_bin=""
 
   case "${arch}" in
-    mingw64) toolchain_bin="/c/msys64/mingw64/bin" ;;
-    mingw32) toolchain_bin="/c/msys64/mingw32/bin" ;;
+    mingw64) toolchain_bin="${DASHCDG_MSYS2_ROOT}/mingw64/bin" ;;
+    mingw32) toolchain_bin="${DASHCDG_MSYS2_ROOT}/mingw32/bin" ;;
     *)
       echo "[sneakernet-dist] unknown toolchain arch: ${arch}" >&2
       return 1
