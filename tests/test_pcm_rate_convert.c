@@ -241,6 +241,72 @@ static void test_overlap_chunk0_matches_isolated_resample(void) {
     assert(max_diff <= 4);
 }
 
+static void test_mono_overlap_exact_ratio_48k_to_8k_matches_contiguous(void) {
+    enum { chunks = 5U, chunk_in = 960U, chunk_out = 160U };
+    const size_t total_in = (size_t) chunks * (size_t) chunk_in;
+    const size_t total_out = (size_t) chunks * (size_t) chunk_out;
+    int16_t *full = (int16_t *) malloc(total_in * sizeof(int16_t));
+    int16_t *ref = (int16_t *) malloc(total_out * sizeof(int16_t));
+    int16_t tail[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t tv = 0U;
+    int16_t work_in[2048];
+    int16_t work_out[2048];
+    size_t ci;
+    size_t ref_off = 0U;
+    int max_diff = 0;
+
+    assert(full != NULL && ref != NULL);
+
+    for (ci = 0U; ci < total_in; ++ci) {
+        double t = (double) ci / 48000.0;
+        double s = 12000.0 * sin(2.0 * 3.141592653589793 * 110.0 * t)
+                + 7000.0 * sin(2.0 * 3.141592653589793 * 880.0 * t);
+
+        full[ci] = (int16_t) s;
+    }
+
+    dashcdg_pcm_mono_resample_cubic(full, total_in, 48000U, ref, total_out, 8000U);
+
+    memset(tail, 0, sizeof(tail));
+    for (ci = 0U; ci < (size_t) chunks; ++ci) {
+        int16_t chunk_out_buf[chunk_out];
+        size_t j;
+
+        dashcdg_pcm_mono_resample_overlap(
+                tail,
+                &tv,
+                (uint64_t) (ci * (size_t) chunk_in),
+                full + ci * (size_t) chunk_in,
+                chunk_in,
+                48000U,
+                chunk_out_buf,
+                chunk_out,
+                8000U,
+                work_in,
+                work_out,
+                2048U
+        );
+
+        for (j = 0U; j < chunk_out; ++j) {
+            int d = (int) chunk_out_buf[j] - (int) ref[ref_off + j];
+
+            if (d < 0) {
+                d = -d;
+            }
+            if (d > max_diff) {
+                max_diff = d;
+            }
+        }
+        ref_off += chunk_out;
+    }
+
+    assert(ref_off == total_out);
+    assert(max_diff <= 4);
+
+    free(full);
+    free(ref);
+}
+
 static void test_overlap_stereo_48k_to_441_chunks_match_long_buffer(void) {
     enum { chunks = 5U, chunk_in = 960U };
     const size_t total_in = (size_t) chunks * (size_t) chunk_in;
@@ -346,6 +412,7 @@ int main(void) {
     test_interleaved_to_mono_copies_single_channel_input();
     test_interleaved_to_mono_averages_stereo_input();
     test_overlap_chunk0_matches_isolated_resample();
+    test_mono_overlap_exact_ratio_48k_to_8k_matches_contiguous();
     test_overlap_stereo_48k_to_441_chunks_match_long_buffer();
     return 0;
 }

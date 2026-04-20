@@ -20,7 +20,6 @@ static size_t dashcdg_pcm_output_frames_for_stream_position(uint64_t in_samples,
     return (size_t)((in_samples * (uint64_t) out_rate + (uint64_t) in_rate - 1ULL) / (uint64_t) in_rate);
 }
 
-#if !defined(DASHCDG_HAVE_LIBSOXR)
 /*
  * Exact-ratio low-pass FIR taps for the narrowband codec adapters.
  * These paths are the critical ones for v4 low-bitrate codecs:
@@ -150,8 +149,6 @@ static void dashcdg_pcm_mono_resample_lanczos(
     }
 }
 
-#endif /* !defined(DASHCDG_HAVE_LIBSOXR) */
-
 void dashcdg_pcm_mono_resample_cubic(
         const int16_t *in,
         size_t in_len,
@@ -161,20 +158,6 @@ void dashcdg_pcm_mono_resample_cubic(
         uint32_t out_rate
 ) {
 
-#if defined(DASHCDG_HAVE_LIBSOXR)
-    if (in == NULL || out == NULL || in_len == 0U || out_len == 0U || in_rate == 0U || out_rate == 0U) {
-        return;
-    }
-
-    if (in_rate == out_rate && in_len == out_len) {
-        memcpy(out, in, out_len * sizeof(*out));
-        return;
-    }
-
-    if (dashcdg_soxr_mono_i16_oneshot(in, in_len, in_rate, out, out_len, out_rate) != 0) {
-        memset(out, 0, out_len * sizeof(*out));
-    }
-#else
     if (in == NULL || out == NULL || in_len == 0U || out_len == 0U || in_rate == 0U || out_rate == 0U) {
         return;
     }
@@ -220,6 +203,11 @@ void dashcdg_pcm_mono_resample_cubic(
         return;
     }
 
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    if (dashcdg_soxr_mono_i16_oneshot(in, in_len, in_rate, out, out_len, out_rate) != 0) {
+        memset(out, 0, out_len * sizeof(*out));
+    }
+#else
     /*
      * Fallback: Lanczos sinc (a=4) approximates SoX-quality band-limited resampling for
      * arbitrary ratios (e.g. 44.1 kHz microphone → 48 kHz session).
@@ -478,14 +466,7 @@ void dashcdg_pcm_mono_resample_overlap(
     memcpy(work_in, tail, prepend * sizeof(int16_t));
     memcpy(work_in + prepend, in, in_frames * sizeof(int16_t));
 
-#if defined(DASHCDG_HAVE_LIBSOXR)
-    if (dashcdg_soxr_mono_i16_oneshot(work_in, ext_in, in_rate, work_out, ext_out, out_rate) != 0) {
-        memset(out, 0, out_frames * sizeof(int16_t));
-        goto update_tail;
-    }
-#else
     dashcdg_pcm_mono_resample_cubic(work_in, ext_in, in_rate, work_out, ext_out, out_rate);
-#endif
 
     memcpy(out, work_out + skip_out, out_frames * sizeof(int16_t));
 
