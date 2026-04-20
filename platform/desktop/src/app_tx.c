@@ -3581,6 +3581,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
         {
             struct dashcdg_tx_audio_frame frame;
             int16_t pcm[DASHCDG_AUDIO_FRAME_SAMPLES * DASHCDG_AUDIO_CHANNELS];
+            int16_t mono_pcm[DASHCDG_AUDIO_FRAME_SAMPLES];
             size_t copy_frames = fifo_frames > DASHCDG_AUDIO_FRAME_SAMPLES ? DASHCDG_AUDIO_FRAME_SAMPLES : fifo_frames;
             int encoded_length;
 
@@ -3598,6 +3599,11 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             if (copy_frames > 0U) {
                 memcpy(pcm, pcm_fifo, copy_frames * DASHCDG_AUDIO_CHANNELS * sizeof(int16_t));
             }
+            if (copy_frames > 0U && DASHCDG_AUDIO_CHANNELS >= 2U) {
+                dashcdg_pcm_stereo_interleaved_to_mono48(pcm, copy_frames, mono_pcm);
+            } else if (copy_frames > 0U) {
+                memcpy(mono_pcm, pcm, copy_frames * sizeof(int16_t));
+            }
 
             if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
                 encoded_length = dashcdg_opus_encode_frame(
@@ -3609,21 +3615,21 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
                 encoded_length = dashcdg_amr_wb_encoder_run(
                         amr_wb_encoder,
-                        pcm,
+                        mono_pcm,
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
                 );
             } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
                 encoded_length = dashcdg_amr_nb_encoder_run(
                         amr_nb_encoder,
-                        pcm,
+                        mono_pcm,
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
                 );
             } else if (dashcdg_v4_audio_codec_is_nb_ima_payload((uint8_t) current_codec_id)) {
                 encoded_length = dashcdg_nb_ima_encode_pcm48_mono_frame(
                         &nb_ima_encoder,
-                        pcm,
+                        mono_pcm,
                         DASHCDG_AUDIO_FRAME_SAMPLES,
                         frame.encoded_bytes,
                         sizeof(frame.encoded_bytes)
@@ -3692,6 +3698,11 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 encoded_length = -1;
             }
             if (encoded_length <= 0) {
+                if (copy_frames > 0U) {
+                    dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
+                    next_playback_ms += DASHCDG_AUDIO_FRAME_MS;
+                    frame_index++;
+                }
                 if (encoded_length < 0 && current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
                     dashcdg_sleep_ms(2);
                     continue;

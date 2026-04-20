@@ -190,38 +190,6 @@ static void test_sinc_resample_preserves_linearity_on_hot_programme(void) {
     assert(max_diff <= 48);
 }
 
-static void test_narrowband_compander_roundtrip_preserves_shape(void) {
-    int16_t pcm[320];
-    int16_t ref[320];
-    int max_diff = 0;
-    size_t i;
-
-    for (i = 0U; i < 320U; ++i) {
-        double t = (double) i / 16000.0;
-        double s = 22000.0 * sin(2.0 * 3.141592653589793 * 80.0 * t) +
-                7000.0 * sin(2.0 * 3.141592653589793 * 1300.0 * t);
-
-        pcm[i] = (int16_t) s;
-        ref[i] = pcm[i];
-    }
-
-    dashcdg_pcm_mono_narrowband_compand(pcm, 320U, 0);
-    dashcdg_pcm_mono_narrowband_compand(pcm, 320U, 1);
-
-    for (i = 0U; i < 320U; ++i) {
-        int diff = (int) ref[i] - (int) pcm[i];
-
-        if (diff < 0) {
-            diff = -diff;
-        }
-        if (diff > max_diff) {
-            max_diff = diff;
-        }
-    }
-
-    assert(max_diff <= 900);
-}
-
 static void test_overlap_chunk0_matches_isolated_resample(void) {
     int16_t pcm[960 * 2];
     int16_t out_iso[882 * 2];
@@ -373,7 +341,6 @@ int main(void) {
     test_dc_preserved_on_8k_to_48k_upsample();
     test_sinc_resample_441_to_480_yields_sine_energy();
     test_sinc_resample_preserves_linearity_on_hot_programme();
-    test_narrowband_compander_roundtrip_preserves_shape();
     test_alias_prone_high_frequency_is_rejected();
     test_stereo_to_mono_uses_linear_average();
     test_interleaved_to_mono_copies_single_channel_input();

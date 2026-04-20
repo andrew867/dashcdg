@@ -87,14 +87,4 @@ void dashcdg_pcm_mono_resample_overlap(
         size_t work_cap
 );
 
-/*
- * Reversible narrowband conditioning for speech codecs that misbehave on full-scale music.
- * `expand = 0` compresses peaks before encode; `expand != 0` restores dynamics after decode.
- */
-void dashcdg_pcm_mono_narrowband_compand(
-        int16_t *samples,
-        size_t sample_count,
-        int expand
-);
-
 #endif
