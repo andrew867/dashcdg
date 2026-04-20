@@ -86,6 +86,11 @@ int dashcdg_desktop_audio_init_stream(
         uint32_t buffer_ms
 );
 int dashcdg_desktop_audio_start_stream(struct dashcdg_desktop_audio *audio);
+/*
+ * After start_stream failed: last diagnostic string (may be empty if failure had no PaError).
+ * Valid until the next open attempt. Always NUL-terminated.
+ */
+const char *dashcdg_desktop_audio_last_stream_open_error(void);
 void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio);
 size_t dashcdg_desktop_audio_queue_frames(
         struct dashcdg_desktop_audio *audio,

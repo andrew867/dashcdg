@@ -3992,12 +3992,19 @@ static void dashcdg_rx_start_audio_async(void) {
         g_audio_stream_started = 1;
         g_rx_audio_start_fail_log_ms = 0U;
     } else {
+        const char *pa_detail = dashcdg_desktop_audio_last_stream_open_error();
+
         g_audio_stream_started = 0;
         if (g_rx_audio_start_fail_log_ms == 0U || now_ms - g_rx_audio_start_fail_log_ms >= 5000U) {
-            fprintf(
-                    stderr,
-                    "[rx] audio: output device start failed (see PortAudio message above); retrying ~10 ms\n"
-            );
+            if (pa_detail != NULL && pa_detail[0] != '\0') {
+                fprintf(stderr, "[rx] audio: output device start failed: %s\n", pa_detail);
+            } else {
+                fprintf(
+                        stderr,
+                        "[rx] audio: output device start failed (no driver detail — "
+                        "WinMM build, stderr fully buffered, or early return before Pa_OpenStream)\n"
+                );
+            }
             fflush(stderr);
             g_rx_audio_start_fail_log_ms = now_ms;
         }
