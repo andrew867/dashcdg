@@ -50,6 +50,9 @@ static void dashcdg_pcm_buffer_free(struct dashcdg_pcm_buffer *pcm) {
 }
 
 #if DASHCDG_HAVE_PORTAUDIO
+#if defined(_WIN32)
+#include <pa_win_wasapi.h>
+#endif
 static pthread_mutex_t g_dashcdg_pa_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_dashcdg_pa_refcount = 0;
 static char g_dashcdg_pa_last_stream_open_fail[256];
@@ -330,6 +333,36 @@ static PaDeviceIndex dashcdg_pa_preferred_default_output_device(void) {
     return (PaDeviceIndex) hai->defaultOutputDevice;
 }
 
+#if defined(_WIN32)
+/*
+ * WASAPI shared mode: when our rate/layout differs from the system mixer, ISimpleAudioVolume /
+ * Audio Engine may accept the stream yet route nothing audible without the auto-converter.
+ * (Observed with Realtek + multicast RX: OpenStream succeeds, HUD/ring healthy, silence.)
+ */
+static void dashcdg_pa_attach_wasapi_auto_convert_for_stream(
+        PaStreamParameters *out_params,
+        const PaDeviceInfo *dev_info,
+        int network_stream_mode,
+        PaWasapiStreamInfo *wasapi
+) {
+    const PaHostApiInfo *hai;
+
+    if (out_params == NULL || dev_info == NULL || wasapi == NULL || !network_stream_mode) {
+        return;
+    }
+    hai = Pa_GetHostApiInfo(dev_info->hostApi);
+    if (hai == NULL || hai->type != paWASAPI) {
+        return;
+    }
+    memset(wasapi, 0, sizeof(*wasapi));
+    wasapi->size = sizeof(PaWasapiStreamInfo);
+    wasapi->hostApiType = paWASAPI;
+    wasapi->version = 1;
+    wasapi->flags = paWinWasapiAutoConvert;
+    out_params->hostApiSpecificStreamInfo = wasapi;
+}
+#endif
+
 static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *audio) {
     PaError err;
     int sample_rate;
@@ -338,6 +371,9 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     const PaDeviceInfo *dev_info;
     PaDeviceIndex out_dev;
     double host_latency_s;
+#if defined(_WIN32)
+    PaWasapiStreamInfo wasapi_stream_info;
+#endif
 
     dashcdg_pa_clear_stream_open_fail();
 
@@ -419,6 +455,14 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     }
     out_params.suggestedLatency = host_latency_s;
     out_params.hostApiSpecificStreamInfo = NULL;
+#if defined(_WIN32)
+    dashcdg_pa_attach_wasapi_auto_convert_for_stream(
+            &out_params,
+            dev_info,
+            audio->mode == DASHCDG_AUDIO_MODE_STREAM,
+            &wasapi_stream_info
+    );
+#endif
 
     err = Pa_OpenStream(
             &audio->stream,
@@ -465,10 +509,15 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
 
         fprintf(
                 stdout,
-                "[desktop-audio] output stream: PaDeviceIndex=%d api=%s device=\"%s\"\n",
+                "[desktop-audio] output stream: PaDeviceIndex=%d api=%s device=\"%s\"%s\n",
                 (int) out_dev,
                 hai_api != NULL ? hai_api->name : "?",
-                dev_info->name != NULL ? dev_info->name : "?"
+                dev_info->name != NULL ? dev_info->name : "?",
+#if defined(_WIN32)
+                out_params.hostApiSpecificStreamInfo != NULL ? " [WASAPI AutoConvert]" : ""
+#else
+                ""
+#endif
         );
         fflush(stdout);
     }
