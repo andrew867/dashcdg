@@ -3832,35 +3832,11 @@ static void *network_thread(void *user_data) {
     return NULL;
 }
 
-static void *dashcdg_rx_audio_start_thread_main(void *user_data) {
-    struct dashcdg_desktop_audio *audio = (struct dashcdg_desktop_audio *) user_data;
-    int started_ok = 0;
-
-    if (audio != NULL) {
-        started_ok = dashcdg_desktop_audio_start_stream(audio);
-    }
-
-    pthread_mutex_lock(&g_receiver.mutex);
-    g_audio_start_inflight = 0;
-    /*
-     * claim_audio_start_locked sets g_audio_stream_started before this thread runs.
-     * If Pa_OpenStream / waveOut fails, jitter + HUD would think the DAC is live while silent.
-     * Clear the flag so preroll can satisfy claim again and we retry open.
-     */
-    if (audio != NULL && !started_ok) {
-        g_audio_stream_started = 0;
-        fprintf(stderr, "[rx] audio: output device start failed; will retry when buffer refills\n");
-        fflush(stderr);
-    }
-    pthread_mutex_unlock(&g_receiver.mutex);
-    return NULL;
-}
-
 static int dashcdg_rx_claim_audio_start_locked(void);
 
 static void dashcdg_rx_start_audio_async(void) {
-    pthread_t thread;
     struct dashcdg_desktop_audio *audio = NULL;
+    int started_ok = 0;
 
     pthread_mutex_lock(&g_receiver.mutex);
     if (!g_audio_start_inflight && g_audio != NULL) {
@@ -3873,21 +3849,21 @@ static void dashcdg_rx_start_audio_async(void) {
         return;
     }
 
-    if (pthread_create(&thread, NULL, dashcdg_rx_audio_start_thread_main, audio) != 0) {
-        int started_ok = dashcdg_desktop_audio_start_stream(audio);
+    started_ok = dashcdg_desktop_audio_start_stream(audio);
 
-        pthread_mutex_lock(&g_receiver.mutex);
-        g_audio_start_inflight = 0;
-        if (!started_ok) {
-            g_audio_stream_started = 0;
-            fprintf(stderr, "[rx] audio: output device start failed (sync open); will retry when buffer refills\n");
-            fflush(stderr);
-        }
-        pthread_mutex_unlock(&g_receiver.mutex);
-        return;
+    pthread_mutex_lock(&g_receiver.mutex);
+    g_audio_start_inflight = 0;
+    /*
+     * claim_audio_start_locked sets g_audio_stream_started before start_stream runs. If the host
+     * open/start fails, clear the flag so preroll can satisfy claim again and RX retries on the
+     * next media-thread pass.
+     */
+    if (!started_ok) {
+        g_audio_stream_started = 0;
+        fprintf(stderr, "[rx] audio: output device start failed; will retry when buffer refills\n");
+        fflush(stderr);
     }
-
-    pthread_detach(thread);
+    pthread_mutex_unlock(&g_receiver.mutex);
 }
 
 static void *dashcdg_rx_media_thread_main(void *unused) {
