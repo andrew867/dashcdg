@@ -292,6 +292,7 @@ TEST_BIN := $(BIN_DIR)/test-core
 TEST_TRANSPORT_UDP_BIN := $(BIN_DIR)/test-transport-udp
 TEST_PCM_RATE_CONVERT_BIN := $(BIN_DIR)/test-pcm-rate-convert
 TEST_OPUS_ROUNDTRIP_BIN := $(BIN_DIR)/test-opus-roundtrip
+TEST_NB_CODEC_ADAPTERS_BIN := $(BIN_DIR)/test-nb-codec-adapters
 PLAYER_BIN := $(BIN_DIR)/desktop-player
 TX_BIN := $(BIN_DIR)/desktop-tx
 RX_BIN := $(BIN_DIR)/desktop-rx
@@ -524,6 +525,9 @@ $(OBJ_DIR)/test_pcm_rate_convert.o: tests/test_pcm_rate_convert.c
 $(OBJ_DIR)/test_opus_roundtrip.o: tests/test_opus_roundtrip.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/test_nb_codec_adapters.o: tests/test_nb_codec_adapters.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/app_desktop_player.o: apps/desktop-player/main.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -549,6 +553,24 @@ $(TEST_PCM_RATE_CONVERT_BIN): $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desk
 
 $(TEST_OPUS_ROUNDTRIP_BIN): $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJECT)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJECT) $(OPUS_LINK) -lm
+
+$(TEST_NB_CODEC_ADAPTERS_BIN): \
+	$(OBJ_DIR)/test_nb_codec_adapters.o \
+	$(OBJ_DIR)/desktop_pcm_rate_convert.o \
+	$(OBJ_DIR)/desktop_nb_evrc_codec.o \
+	$(OBJ_DIR)/desktop_nb_sbc_codec.o \
+	$(CODEC_EVRCC_OBJS) \
+	$(CODEC_SBC_OBJS) \
+	$(TEST_PCM_RATE_CONVERT_EXTRA_OBJS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ \
+		$(OBJ_DIR)/test_nb_codec_adapters.o \
+		$(OBJ_DIR)/desktop_pcm_rate_convert.o \
+		$(OBJ_DIR)/desktop_nb_evrc_codec.o \
+		$(OBJ_DIR)/desktop_nb_sbc_codec.o \
+		$(CODEC_EVRCC_OBJS) \
+		$(CODEC_SBC_OBJS) \
+		$(TEST_PCM_RATE_CONVERT_EXTRA_OBJS) \
+		$(SOXR_LINK) -lm
 
 $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_TX_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_TX_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(LDLIBS_DESKTOP) $(NET_LIBS) $(WINDOWS_GDI_LIBS)
@@ -609,11 +631,12 @@ endif
 	@if [ "$(MINGW_ARCH)" = "mingw32" ] && [ -f "$(BIN_DIR)/libopus.dll" ] && [ ! -f "$(BIN_DIR)/libopus-0.dll" ]; then cp -f "$(BIN_DIR)/libopus.dll" "$(BIN_DIR)/libopus-0.dll"; fi
 endif
 
-test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN) $(TEST_TRANSPORT_UDP_BIN) $(TEST_PCM_RATE_CONVERT_BIN) $(TEST_OPUS_ROUNDTRIP_BIN)
+test: dirs $(CORE_LIB) $(PROTO_LIB) $(TEST_BIN) $(TEST_TRANSPORT_UDP_BIN) $(TEST_PCM_RATE_CONVERT_BIN) $(TEST_OPUS_ROUNDTRIP_BIN) $(TEST_NB_CODEC_ADAPTERS_BIN)
 	$(TEST_BIN)
 	$(TEST_TRANSPORT_UDP_BIN)
 	$(TEST_PCM_RATE_CONVERT_BIN)
 	$(TEST_OPUS_ROUNDTRIP_BIN)
+	$(TEST_NB_CODEC_ADAPTERS_BIN)
 
 package: debug
 ifneq ($(WINDOWS_RUNTIME_DLLS),)

@@ -24,6 +24,8 @@ struct dashcdg_evrc_codec {
     int16_t work_out[EVRC_RESAMPLE_WORK];
 };
 
+static int g_dashcdg_evrc_decoder_sentinel;
+
 static struct dashcdg_evrc_codec *g_dashcdg_evrc_shared_encoder;
 static unsigned int g_dashcdg_evrc_shared_encoder_refs;
 static struct dashcdg_evrc_codec *g_dashcdg_evrc_shared_decoder;
@@ -79,7 +81,7 @@ int dashcdg_evrc_encoder_create(void **out_ctx) {
     if (c == NULL) {
         return 0;
     }
-    c->enc = evrc_encoder_init(4, 4, 0);
+    c->enc = evrc_encoder_init(4, 4, 1);
     if (c->enc == NULL) {
         free(c);
         return 0;
@@ -173,11 +175,13 @@ int dashcdg_evrc_decoder_create(void **out_ctx) {
     if (c == NULL) {
         return 0;
     }
-    c->dec = evrc_decoder_init();
-    if (c->dec == NULL) {
-        free(c);
-        return 0;
-    }
+    /*
+     * The vendored EVRC decoder initializes global/static decode state but returns NULL.
+     * Its decode entrypoints still reject a NULL context pointer, even though they do not
+     * dereference it. Keep a stable non-NULL sentinel as the wrapper-visible decoder handle.
+     */
+    (void) evrc_decoder_init();
+    c->dec = &g_dashcdg_evrc_decoder_sentinel;
     g_dashcdg_evrc_shared_decoder = c;
     g_dashcdg_evrc_shared_decoder_refs = 1U;
     *out_ctx = c;

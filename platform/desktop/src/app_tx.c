@@ -3700,11 +3700,6 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 encoded_length = -1;
             }
             if (encoded_length <= 0) {
-                if (copy_frames > 0U) {
-                    dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
-                    next_playback_ms += DASHCDG_AUDIO_FRAME_MS;
-                    frame_index++;
-                }
                 if (encoded_length < 0 && current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
                     dashcdg_sleep_ms(2);
                     continue;

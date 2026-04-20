@@ -35,16 +35,17 @@ static int dashcdg_sbc_open_common(sbc_t *sbc, int encoder) {
     if (err != 0) {
         return 0;
     }
+    sbc->endian = SBC_LE;
+    if (!encoder) {
+        return 1;
+    }
     sbc->frequency = SBC_FREQ_16000;
     sbc->mode = SBC_MODE_MONO;
     sbc->subbands = SBC_SB_8;
     sbc->blocks = SBC_BLK_4;
     sbc->allocation = SBC_AM_LOUDNESS;
     sbc->bitpool = 24;
-    sbc->endian = SBC_BE;
-    (void) encoder;
-    err = sbc_reinit(sbc, 0L);
-    return err == 0 ? 1 : 0;
+    return 1;
 }
 
 int dashcdg_bt_sbc_encoder_create(void **out_ctx) {
@@ -94,6 +95,8 @@ int dashcdg_bt_sbc_encode_pcm48_stereo_frame(
     int16_t mono48[SBC_PCM_FRAME48];
     int16_t mono16[SBC_PCM_MONO16];
     size_t codesize;
+    size_t frame_length;
+    size_t max_frames;
     size_t pos = 1U;
     uint8_t nframes = 0U;
     const uint8_t *pcm_bytes;
@@ -122,11 +125,18 @@ int dashcdg_bt_sbc_encode_pcm48_stereo_frame(
     );
     c->enc_stream48_samples += SBC_PCM_FRAME48;
     codesize = sbc_get_codesize(&c->enc);
+    frame_length = sbc_get_frame_length(&c->enc);
     if (codesize == 0U || codesize > sizeof(mono16)) {
         return -1;
     }
+    if (frame_length == 0U || frame_length > 255U) {
+        return -1;
+    }
+    max_frames = sizeof(mono16) / codesize;
     pcm_bytes = (const uint8_t *) mono16;
-    while (pcm_off + codesize <= sizeof(mono16) && pos + 2U + sbc_get_frame_length(&c->enc) <= out_max && nframes < 8U) {
+    while (pcm_off + codesize <= sizeof(mono16) &&
+            pos + 2U + frame_length <= out_max &&
+            (size_t) nframes < max_frames) {
         ssize_t w = 0;
         ssize_t encsz;
 
@@ -182,10 +192,9 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
     struct dashcdg_bt_sbc_codec *c = (struct dashcdg_bt_sbc_codec *) ctx;
     int16_t mono16[SBC_PCM_MONO16];
     int16_t mono48[SBC_PCM_FRAME48];
-    size_t pcmo = 0U;
+    size_t pcmo_samples = 0U;
     size_t p = 0U;
     uint8_t n;
-    size_t codesize;
 
     if (c == NULL || !c->dec_ok || in == NULL || pcm48_interleaved == NULL) {
         return -1;
@@ -195,8 +204,7 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
     }
     n = in[0];
     p = 1U;
-    codesize = sbc_get_codesize(&c->dec);
-    if (codesize == 0U || n == 0U || n > 8U) {
+    if (n == 0U) {
         return -1;
     }
     memset(mono16, 0, sizeof(mono16));
@@ -208,18 +216,28 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
         if (flen == 0U || p + 1U + flen > in_len) {
             return -1;
         }
-        if (pcmo + codesize > sizeof(mono16)) {
+        if ((pcmo_samples * sizeof(int16_t)) >= sizeof(mono16)) {
             return -1;
         }
-        r = sbc_decode(&c->dec, in + p + 1U, flen, (uint8_t *) mono16 + pcmo, sizeof(mono16) - pcmo, &written);
-        if (r < 0 || written != codesize) {
+        r = sbc_decode(
+                &c->dec,
+                in + p + 1U,
+                flen,
+                (uint8_t *) mono16 + (pcmo_samples * sizeof(int16_t)),
+                sizeof(mono16) - (pcmo_samples * sizeof(int16_t)),
+                &written
+        );
+        if (r < 0 || written == 0U || (written % sizeof(int16_t)) != 0U) {
             return -1;
         }
-        pcmo += written / sizeof(int16_t);
+        if (pcmo_samples + (written / sizeof(int16_t)) > SBC_PCM_MONO16) {
+            return -1;
+        }
+        pcmo_samples += written / sizeof(int16_t);
         p += 1U + flen;
         n--;
     }
-    if (pcmo < SBC_PCM_MONO16) {
+    if (pcmo_samples < SBC_PCM_MONO16) {
         return -1;
     }
     dashcdg_pcm_mono_resample_overlap(
