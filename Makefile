@@ -69,7 +69,9 @@ endif
 endif
 endif
 CFLAGS += $(OPUS_CPPFLAGS) $(PORTAUDIO_CPPFLAGS)
-WINDOWS_MINGW_PREFIX := $(shell if [ -n "$$MSYS2_ROOT" ] && [ -d "$$MSYS2_ROOT/$(MINGW_ARCH)" ]; then echo "$$MSYS2_ROOT/$(MINGW_ARCH)"; elif [ -d /c/msys64/$(MINGW_ARCH) ]; then echo /c/msys64/$(MINGW_ARCH); elif [ -d /c/ProgramData/mingw64/$(MINGW_ARCH) ]; then echo /c/ProgramData/mingw64/$(MINGW_ARCH); elif [ -d /$(MINGW_ARCH) ]; then echo /$(MINGW_ARCH); fi)
+# Only trust MSYS2_ROOT if it looks like a full MSYS2 install (both mingw64 and mingw32).
+# A WinLibs-style tree may have only mingw64/ and would otherwise break GL dev headers for MINGW_ARCH=mingw64.
+WINDOWS_MINGW_PREFIX := $(shell if [ -n "$$MSYS2_ROOT" ] && [ -d "$$MSYS2_ROOT/mingw64/bin" ] && [ -d "$$MSYS2_ROOT/mingw32/bin" ] && [ -d "$$MSYS2_ROOT/$(MINGW_ARCH)/bin" ]; then echo "$$MSYS2_ROOT/$(MINGW_ARCH)"; elif [ -d /c/msys64/$(MINGW_ARCH) ]; then echo /c/msys64/$(MINGW_ARCH); elif [ -d /c/ProgramData/mingw64/$(MINGW_ARCH) ]; then echo /c/ProgramData/mingw64/$(MINGW_ARCH); elif [ -d /$(MINGW_ARCH) ]; then echo /$(MINGW_ARCH); fi)
 WINDOWS_MINGW_PREFIX_WIN := $(shell if [ -n "$(WINDOWS_MINGW_PREFIX)" ]; then cygpath -m "$(WINDOWS_MINGW_PREFIX)"; fi)
 ifneq ($(WINDOWS_MINGW_PREFIX),)
 export PATH := $(WINDOWS_MINGW_PREFIX)/bin:$(PATH)

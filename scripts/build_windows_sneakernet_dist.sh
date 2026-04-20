@@ -50,18 +50,14 @@ fi
 
 cd "${REPO_ROOT}"
 
-# MSYS2 root: CI runners (msys2/setup-msys2) are not always at /c/msys64 — resolve from mingw64 gcc on PATH.
+# MSYS2 root: prefer canonical installs before inferring from PATH. A standalone MinGW-w64
+# tree (e.g. under /c/ProgramData/mingw64) often appears first as x86_64-w64-mingw32-gcc but
+# does not ship MSYS2-style dev packages (GL/glew.h, etc.), which breaks mingw64 GL builds.
 dashcdg_resolve_msys2_root() {
   local r gcc64 bin64
   r="${MSYS2_ROOT:-}"
   if [[ -n "$r" ]] && [[ -d "$r/mingw64/bin" ]] && [[ -d "$r/mingw32/bin" ]]; then
     echo "${r%/}"
-    return 0
-  fi
-  gcc64="$(command -v x86_64-w64-mingw32-gcc 2>/dev/null || true)"
-  if [[ -n "$gcc64" ]]; then
-    bin64="$(cd "$(dirname "$gcc64")" && pwd)"
-    (cd "$bin64/../.." && pwd)
     return 0
   fi
   for r in /c/msys64 /c/msys2; do
@@ -70,6 +66,12 @@ dashcdg_resolve_msys2_root() {
       return 0
     fi
   done
+  gcc64="$(command -v x86_64-w64-mingw32-gcc 2>/dev/null || true)"
+  if [[ -n "$gcc64" ]]; then
+    bin64="$(cd "$(dirname "$gcc64")" && pwd)"
+    (cd "$bin64/../.." && pwd)
+    return 0
+  fi
   echo ""
   return 1
 }
