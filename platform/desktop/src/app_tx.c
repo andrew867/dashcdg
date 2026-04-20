@@ -3306,6 +3306,35 @@ static int dashcdg_tx_audio_open_source(
     return 1;
 }
 
+static int dashcdg_tx_init_audio_encoder_for_codec(
+        uint8_t codec_id,
+        void **amr_wb_encoder,
+        void **amr_nb_encoder,
+        void **evrc_encoder,
+        void **qcelp_encoder,
+        void **sbc_encoder
+) {
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+        dashcdg_amr_wb_encoder_create(amr_wb_encoder);
+        return amr_wb_encoder != NULL && *amr_wb_encoder != NULL;
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        dashcdg_amr_nb_encoder_create(amr_nb_encoder);
+        return amr_nb_encoder != NULL && *amr_nb_encoder != NULL;
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+        return dashcdg_evrc_encoder_create(evrc_encoder);
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+        return dashcdg_qcelp13k_encoder_create(qcelp_encoder);
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+        return dashcdg_bt_sbc_encoder_create(sbc_encoder);
+    }
+
+    return 1;
+}
+
 static void *dashcdg_tx_audio_thread_main(void *unused) {
     struct dashcdg_win32_mmcss_handle mmcss;
     uint64_t local_generation = UINT64_MAX;
@@ -3401,21 +3430,29 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 reached_eof = 1;
             }
             if (mp3_path != NULL) {
+                int codec_ready = 1;
+
                 current_profile_id = configured_profile_id;
                 current_codec_id = configured_codec_id;
                 dashcdg_nb_ima_state_init(&nb_ima_encoder);
-                if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
-                    dashcdg_amr_wb_encoder_create(&amr_wb_encoder);
-                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
-                    dashcdg_amr_nb_encoder_create(&amr_nb_encoder);
-                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
-                    dashcdg_evrc_encoder_create(&evrc_encoder);
-                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
-                    dashcdg_qcelp13k_encoder_create(&qcelp_encoder);
-                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
-                    dashcdg_bt_sbc_encoder_create(&sbc_encoder);
+                if (current_codec_id != DASHCDG_V4_AUDIO_CODEC_OPUS) {
+                    codec_ready = dashcdg_tx_init_audio_encoder_for_codec(
+                            current_codec_id,
+                            &amr_wb_encoder,
+                            &amr_nb_encoder,
+                            &evrc_encoder,
+                            &qcelp_encoder,
+                            &sbc_encoder
+                    );
+                    if (!codec_ready) {
+                        fprintf(
+                                stderr,
+                                "[tx] audio: failed to initialize encoder for codec=%u; waiting for next codec/track change\n",
+                                (unsigned int) current_codec_id
+                        );
+                    }
                 }
-                if (dashcdg_tx_audio_open_source(
+                if (codec_ready && dashcdg_tx_audio_open_source(
                             mp3_path,
                             &source,
                             &encoder,
