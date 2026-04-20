@@ -1596,6 +1596,17 @@ static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
     g_tx_state.last_v4_session_info_ms = 0U;
 }
 
+static int dashcdg_tx_select_v4_audio_codec_locked(uint8_t codec_id) {
+    if (g_tx_state.v4_audio_codec_id == codec_id) {
+        return 0;
+    }
+    g_tx_state.v4_audio_codec_id = codec_id;
+    dashcdg_tx_sync_v4_profile_for_codec_locked();
+    g_tx_state.audio_pipeline_generation++;
+    g_tx_state.last_v4_session_info_ms = 0U;
+    return 1;
+}
+
 static void dashcdg_tx_print_usage(const char *argv0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     fprintf(
@@ -3585,15 +3596,6 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             size_t copy_frames = fifo_frames > DASHCDG_AUDIO_FRAME_SAMPLES ? DASHCDG_AUDIO_FRAME_SAMPLES : fifo_frames;
             int encoded_length;
 
-            /*
-             * Codec/profile can change via TTY cycle while this thread holds stale current_* locals.
-             * Snapshot under mutex immediately before branching to encoders so codec_id matches instances.
-             */
-            pthread_mutex_lock(&g_tx_state.mutex);
-            current_codec_id = g_tx_state.v4_audio_codec_id;
-            current_profile_id = g_tx_state.v4_audio_profile_id;
-            pthread_mutex_unlock(&g_tx_state.mutex);
-
             memset(&frame, 0, sizeof(frame));
             memset(pcm, 0, sizeof(pcm));
             if (copy_frames > 0U) {
@@ -4199,7 +4201,8 @@ static void dashcdg_tx_print_controls_help(void) {
     fprintf(
             stdout,
             "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, "
-            "f=force-broadcast, c=cycle v4 audio codec, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
+            "f=force-broadcast, c=cycle v4 audio codec, 1=opus, 2=amr-nb, 3=evrc, 4=celp13k, 5=bluetooth-sbc, 6=amr-wb, "
+            "s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
     );
     fflush(stdout);
 }
@@ -4275,6 +4278,45 @@ static int dashcdg_tx_handle_command(int command) {
                     "[tx] v4 audio codec -> %s (id %u); session_info sent for receivers\n",
                     dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
                     (unsigned int) g_tx_state.v4_audio_codec_id
+            );
+            fflush(stdout);
+            break;
+        }
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6': {
+            uint8_t session_packet[DASHCDG_MAX_PACKET_SIZE];
+            uint64_t now_ms = dashcdg_clock_now_ms();
+            uint8_t codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+            int changed = 0;
+
+            if (command == '1') {
+                codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+            } else if (command == '2') {
+                codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_NB;
+            } else if (command == '3') {
+                codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+            } else if (command == '4') {
+                codec_id = DASHCDG_V4_AUDIO_CODEC_CELP13K;
+            } else if (command == '5') {
+                codec_id = DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC;
+            } else if (command == '6') {
+                codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_WB;
+            }
+
+            changed = dashcdg_tx_select_v4_audio_codec_locked(codec_id);
+            if (g_tx_state.transport_v4_enabled && changed) {
+                (void) dashcdg_tx_send_v4_session_info_locked(now_ms, session_packet, sizeof(session_packet));
+            }
+            fprintf(
+                    stdout,
+                    "[tx] v4 audio codec -> %s (id %u)%s\n",
+                    dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
+                    (unsigned int) g_tx_state.v4_audio_codec_id,
+                    changed ? "; session_info sent for receivers" : "; unchanged"
             );
             fflush(stdout);
             break;
