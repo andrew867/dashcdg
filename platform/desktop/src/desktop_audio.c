@@ -287,6 +287,18 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     PaDeviceIndex out_dev;
     double host_latency_s;
 
+    /*
+     * Recover from a leaked PaStream / refcount mismatch (e.g. retry after StartStream failure or
+     * interrupted setup). Opening again without closing leaves the device exclusive or inflates
+     * g_dashcdg_pa_refcount past stop_stream's single deinit.
+     */
+    if (audio->stream != NULL) {
+        (void) Pa_StopStream(audio->stream);
+        Pa_CloseStream(audio->stream);
+        audio->stream = NULL;
+        dashcdg_pa_host_deinit();
+    }
+
     if (!dashcdg_pa_host_init()) {
         return 0;
     }
@@ -1121,6 +1133,12 @@ int dashcdg_desktop_audio_start_stream(struct dashcdg_desktop_audio *audio) {
     }
 
     audio->mode = DASHCDG_AUDIO_MODE_STREAM;
+#if DASHCDG_HAVE_PORTAUDIO
+    if (audio->stream != NULL && Pa_IsStreamActive(audio->stream) == 1) {
+        DASHCDG_ATOMIC_SET(audio->playback_running, 1);
+        return 1;
+    }
+#endif
     DASHCDG_ATOMIC_SET(audio->playback_running, 1);
 #if DASHCDG_HAVE_PORTAUDIO
     if (!dashcdg_desktop_audio_create_stream(audio)) {

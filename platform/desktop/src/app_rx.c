@@ -304,6 +304,7 @@ static struct sockaddr_in g_rx_stats_dest;
 static int g_headless = 0;
 static int g_audio_stream_started = 0;
 static int g_audio_start_inflight = 0;
+static uint64_t g_rx_audio_start_fail_log_ms = 0U;
 static int g_hud_visible = 0;
 static int g_audio_muted = 0;
 static volatile int g_rx_shutdown_requested = 0;
@@ -3970,6 +3971,7 @@ static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms);
 static void dashcdg_rx_start_audio_async(void) {
     struct dashcdg_desktop_audio *audio = NULL;
     int started_ok = 0;
+    uint64_t now_ms = dashcdg_clock_now_ms();
 
     pthread_mutex_lock(&g_receiver.mutex);
     if (!g_audio_start_inflight && g_audio != NULL) {
@@ -3986,15 +3988,19 @@ static void dashcdg_rx_start_audio_async(void) {
 
     pthread_mutex_lock(&g_receiver.mutex);
     g_audio_start_inflight = 0;
-    /*
-     * claim_audio_start_locked sets g_audio_stream_started before start_stream runs. If the host
-     * open/start fails, clear the flag so preroll can satisfy claim again and RX retries on the
-     * next media-thread pass.
-     */
-    if (!started_ok) {
+    if (started_ok) {
+        g_audio_stream_started = 1;
+        g_rx_audio_start_fail_log_ms = 0U;
+    } else {
         g_audio_stream_started = 0;
-        fprintf(stderr, "[rx] audio: output device start failed; will retry when buffer refills\n");
-        fflush(stderr);
+        if (g_rx_audio_start_fail_log_ms == 0U || now_ms - g_rx_audio_start_fail_log_ms >= 5000U) {
+            fprintf(
+                    stderr,
+                    "[rx] audio: output device start failed (see PortAudio message above); retrying ~10 ms\n"
+            );
+            fflush(stderr);
+            g_rx_audio_start_fail_log_ms = now_ms;
+        }
     }
     pthread_mutex_unlock(&g_receiver.mutex);
 }
@@ -4226,8 +4232,10 @@ static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms) {
      * two receivers with different local queue-fill speed can both satisfy preroll and begin
      * audible playout at different moments. The first queued frame's playback_ms is the schedule;
      * output latency is the only local allowance.
+     *
+     * g_audio_stream_started is set only after dashcdg_desktop_audio_start_stream succeeds so HUD,
+     * CDG drain, and PortAudio refcount stay consistent when open/start fails.
      */
-    g_audio_stream_started = 1;
     return 1;
 }
 
