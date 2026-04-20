@@ -3082,6 +3082,76 @@ static void dashcdg_rx_configure_audio_locked(
     state->rx_audio_applied_valid = 1;
 }
 
+static void dashcdg_rx_refresh_audio_decode_path_locked(
+        struct receiver_state *state,
+        uint64_t local_now_ms,
+        uint8_t frame_ms,
+        uint8_t audio_profile_id,
+        uint8_t codec_id,
+        int flush_output_ring
+) {
+    if (state == NULL || !state->network_audio_enabled) {
+        return;
+    }
+
+    dashcdg_audio_jitter_clear(&state->audio_jitter);
+    memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+    state->jitter_audio_decode_primed = 0;
+    state->last_audio_jitter_apply_local_ms = 0U;
+    state->audio_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
+            local_now_ms,
+            dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms)
+    );
+    state->pcm_src_overlap_valid = 0;
+    state->pcm_src_stream_in_samples = 0;
+    dashcdg_pcm_soxr_stream_reset();
+
+    if (flush_output_ring && g_audio != NULL) {
+        dashcdg_desktop_audio_flush_stream_ring(g_audio);
+        dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+        g_audio_stream_started = dashcdg_desktop_audio_output_device_ready(g_audio) ? 1 : 0;
+        g_audio_start_inflight = 0;
+    }
+
+    dashcdg_opus_decoder_free(&g_opus_decoder);
+    dashcdg_rx_amr_decoders_release();
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
+        dashcdg_opus_decoder_init(
+                &g_opus_decoder,
+                state->announced_audio_sample_rate,
+                state->announced_audio_channels,
+                frame_ms
+        );
+#endif
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+        dashcdg_amr_wb_decoder_create(&g_amr_wb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        dashcdg_amr_nb_decoder_create(&g_amr_nb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+        dashcdg_evrc_decoder_create(&g_evrc_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+        dashcdg_qcelp13k_decoder_create(&g_qcelp_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+        dashcdg_bt_sbc_decoder_create(&g_bt_sbc_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else {
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    }
+
+    state->announced_audio_frame_ms = frame_ms;
+    state->announced_audio_profile_id = audio_profile_id;
+    state->announced_audio_codec_id = codec_id;
+    state->rx_audio_applied_frame_ms = frame_ms;
+    state->rx_audio_applied_profile_id = audio_profile_id;
+    state->rx_audio_applied_codec_id = codec_id;
+    state->rx_audio_applied_valid = 1;
+}
+
 /*
  * If v4_audio_chunk.codec_id disagrees with what session_info last announced (e.g. session_info
  * dropped), align decoder state with the wire before inserting the frame. See
@@ -3108,19 +3178,13 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
     );
     fflush(stdout);
 
-    state->announced_audio_codec_id = wire_codec_id;
-    state->announced_audio_profile_id = wire_profile_id;
-    state->announced_audio_frame_ms = wire_frame_ms;
-
-    dashcdg_rx_configure_audio_locked(
+    dashcdg_rx_refresh_audio_decode_path_locked(
             state,
             dashcdg_clock_now_ms(),
-            state->announced_audio_sample_rate,
-            state->announced_audio_channels,
             wire_frame_ms,
-            state->announced_playout_delay_ms,
             wire_profile_id,
-            wire_codec_id
+            wire_codec_id,
+            1
     );
 }
 
@@ -3192,6 +3256,8 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     int session_changed;
     int asset_changed;
     int codec_changed;
+    int profile_changed;
+    int frame_changed;
     int has_network_audio;
     int need_audio_device_reconfigure;
 
@@ -3204,11 +3270,15 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
             state->chunk_size != DASHCDG_MAX_V4_BACKFILL_CHUNK;
     codec_changed = state->announced_audio_codec_id != 0 &&
             state->announced_audio_codec_id != view->v4_session_info.audio_codec_id;
+    profile_changed = state->announced_audio_profile_id != 0 &&
+            state->announced_audio_profile_id != view->v4_session_info.audio_profile_id;
+    frame_changed = state->announced_audio_frame_ms != 0 &&
+            state->announced_audio_frame_ms != view->v4_session_info.audio_frame_ms;
     has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
             view->v4_session_info.audio_channels > 0 &&
             view->v4_session_info.audio_frame_ms > 0;
 
-    if (session_changed || codec_changed) {
+    if (session_changed) {
         receiver_state_reset(state);
     }
 
@@ -3240,10 +3310,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
             !state->rx_audio_applied_valid ||
             view->v4_session_info.audio_sample_rate != state->rx_audio_applied_wire_sr ||
             view->v4_session_info.audio_channels != state->rx_audio_applied_wire_ch ||
-            view->v4_session_info.audio_frame_ms != state->rx_audio_applied_frame_ms ||
-            view->v4_session_info.startup_preroll_ms != state->rx_audio_applied_preroll_ms ||
-            view->v4_session_info.audio_profile_id != state->rx_audio_applied_profile_id ||
-            view->v4_session_info.audio_codec_id != state->rx_audio_applied_codec_id;
+            view->v4_session_info.startup_preroll_ms != state->rx_audio_applied_preroll_ms;
 
     strncpy(state->song_id, view->v4_session_info.song_id, sizeof(state->song_id) - 1U);
     state->song_id[sizeof(state->song_id) - 1U] = '\0';
@@ -3264,7 +3331,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     }
     state->network_audio_enabled = has_network_audio;
 
-    if (session_changed || asset_changed || codec_changed || !state->have_clock) {
+    if (session_changed || asset_changed || !state->have_clock) {
         dashcdg_media_clock_anchor(&state->sender_clock, (int64_t) local_now_ms, (int64_t) view->header.sender_time_ms);
         state->have_clock = 1;
         dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
@@ -3280,6 +3347,15 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
                 view->v4_session_info.startup_preroll_ms,
                 view->v4_session_info.audio_profile_id,
                 view->v4_session_info.audio_codec_id
+        );
+    } else if (has_network_audio && (codec_changed || profile_changed || frame_changed)) {
+        dashcdg_rx_refresh_audio_decode_path_locked(
+                state,
+                local_now_ms,
+                view->v4_session_info.audio_frame_ms,
+                view->v4_session_info.audio_profile_id,
+                view->v4_session_info.audio_codec_id,
+                1
         );
     } else if (!has_network_audio && g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
