@@ -1,6 +1,7 @@
 #include "dashcdg/pcm_rate_convert.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -86,6 +87,13 @@ static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
  * Lanczos kernel (order a): band-limited reconstruction for arbitrary resample ratios.
  * Used for desktop TX capture and non–integer-rate paths where cubic interpolation aliases.
  */
+static size_t dashcdg_pcm_output_frames_for_stream_position(uint64_t in_samples, uint32_t in_rate, uint32_t out_rate) {
+    if (in_rate == 0U || out_rate == 0U) {
+        return 0U;
+    }
+    return (size_t)((in_samples * (uint64_t) out_rate + (uint64_t) in_rate - 1ULL) / (uint64_t) in_rate);
+}
+
 static float dashcdg_lanczos_kernel(float x, int a) {
     float ax = fabsf(x);
 
@@ -260,6 +268,142 @@ void dashcdg_pcm_stereo_interleaved_to_mono48(
 
             mono48_out[i] = dashcdg_f32_to_i16((float) mixed);
         }
+    }
+}
+
+void dashcdg_pcm_stereo_interleaved_resample(
+        const int16_t *in,
+        size_t in_frames,
+        uint32_t in_rate,
+        int16_t *out,
+        size_t out_frames,
+        uint32_t out_rate,
+        int16_t *work_left,
+        int16_t *work_right,
+        size_t work_cap
+) {
+    size_t i;
+
+    if (in == NULL || out == NULL || work_left == NULL || work_right == NULL || in_frames == 0U || out_frames == 0U ||
+        in_rate == 0U || out_rate == 0U) {
+        return;
+    }
+    if (work_cap < in_frames || work_cap < out_frames) {
+        /*
+         * Caller bug or dimension slip; never leave out[] uninitialized (would be queued to speakers).
+         */
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        return;
+    }
+
+    if (in_rate == out_rate && in_frames == out_frames) {
+        memcpy(out, in, in_frames * 2U * sizeof(int16_t));
+        return;
+    }
+
+    for (i = 0U; i < in_frames; ++i) {
+        work_left[i] = in[i * 2U];
+    }
+    dashcdg_pcm_mono_resample_cubic(work_left, in_frames, in_rate, work_right, out_frames, out_rate);
+    for (i = 0U; i < out_frames; ++i) {
+        out[i * 2U] = work_right[i];
+    }
+
+    for (i = 0U; i < in_frames; ++i) {
+        work_left[i] = in[i * 2U + 1U];
+    }
+    dashcdg_pcm_mono_resample_cubic(work_left, in_frames, in_rate, work_right, out_frames, out_rate);
+    for (i = 0U; i < out_frames; ++i) {
+        out[i * 2U + 1U] = work_right[i];
+    }
+}
+
+void dashcdg_pcm_stereo_interleaved_resample_overlap(
+        int16_t *tail_l,
+        int16_t *tail_r,
+        size_t *tail_valid,
+        uint64_t stream_in_samples_before_chunk,
+        const int16_t *in,
+        size_t in_frames,
+        uint32_t in_rate,
+        int16_t *out,
+        size_t out_frames,
+        uint32_t out_rate,
+        int16_t *work_left,
+        int16_t *work_right,
+        size_t work_cap
+) {
+    size_t prepend;
+    size_t ext_in;
+    size_t ext_out;
+    size_t skip_out;
+    size_t outs_at_chunk_start;
+    size_t outs_at_ext_base;
+    uint64_t ext_base_in;
+    size_t i;
+    size_t k;
+    size_t overlap_max = (size_t) DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES;
+
+    if (in == NULL || out == NULL || tail_l == NULL || tail_r == NULL || tail_valid == NULL ||
+        work_left == NULL || work_right == NULL || in_frames == 0U || out_frames == 0U ||
+        in_rate == 0U || out_rate == 0U) {
+        return;
+    }
+
+    if (*tail_valid > overlap_max) {
+        *tail_valid = 0U;
+    }
+
+    prepend = *tail_valid;
+
+    if (in_rate == out_rate && in_frames == out_frames) {
+        if (out != in) {
+            memcpy(out, in, in_frames * 2U * sizeof(int16_t));
+        }
+        goto update_tail;
+    }
+
+    ext_in = prepend + in_frames;
+    ext_out = (ext_in * (size_t) out_rate + (size_t) in_rate - 1U) / (size_t) in_rate;
+
+    outs_at_chunk_start = dashcdg_pcm_output_frames_for_stream_position(stream_in_samples_before_chunk, in_rate, out_rate);
+    ext_base_in = stream_in_samples_before_chunk > prepend ? stream_in_samples_before_chunk - prepend : 0ULL;
+    outs_at_ext_base = dashcdg_pcm_output_frames_for_stream_position(ext_base_in, in_rate, out_rate);
+    skip_out = outs_at_chunk_start > outs_at_ext_base ? outs_at_chunk_start - outs_at_ext_base : 0U;
+
+    if (work_cap < ext_in || work_cap < ext_out || skip_out + out_frames > ext_out) {
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        goto update_tail;
+    }
+
+    memcpy(work_left, tail_l, prepend * sizeof(int16_t));
+    for (i = 0U; i < in_frames; ++i) {
+        work_left[prepend + i] = in[i * 2U];
+    }
+    dashcdg_pcm_mono_resample_cubic(work_left, ext_in, in_rate, work_right, ext_out, out_rate);
+    for (k = 0U; k < out_frames; ++k) {
+        out[k * 2U] = work_right[skip_out + k];
+    }
+
+    memcpy(work_left, tail_r, prepend * sizeof(int16_t));
+    for (i = 0U; i < in_frames; ++i) {
+        work_left[prepend + i] = in[i * 2U + 1U];
+    }
+    dashcdg_pcm_mono_resample_cubic(work_left, ext_in, in_rate, work_right, ext_out, out_rate);
+    for (k = 0U; k < out_frames; ++k) {
+        out[k * 2U + 1U] = work_right[skip_out + k];
+    }
+
+update_tail:
+    {
+        size_t start = in_frames >= overlap_max ? in_frames - overlap_max : 0U;
+        size_t ncopy = in_frames >= overlap_max ? overlap_max : in_frames;
+
+        for (i = 0U; i < ncopy; ++i) {
+            tail_l[i] = in[(start + i) * 2U];
+            tail_r[i] = in[(start + i) * 2U + 1U];
+        }
+        *tail_valid = ncopy;
     }
 }
 

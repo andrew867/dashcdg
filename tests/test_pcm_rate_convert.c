@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dashcdg/pcm_rate_convert.h"
 
@@ -126,6 +127,176 @@ static void test_sinc_resample_441_to_480_yields_sine_energy(void) {
     assert(e > 1.0e8);
 }
 
+static void test_sinc_resample_preserves_linearity_on_hot_programme(void) {
+    int16_t in_a[4410];
+    int16_t in_b[4410];
+    int16_t in_sum[4410];
+    int16_t out_a[4800];
+    int16_t out_b[4800];
+    int16_t out_sum[4800];
+    size_t i;
+    int max_diff = 0;
+
+    for (i = 0U; i < 4410U; ++i) {
+        double t = (double) i / 44100.0;
+        double a = 17000.0 * sin(2.0 * 3.141592653589793 * 55.0 * t);
+        double b = 17000.0 * sin(2.0 * 3.141592653589793 * 110.0 * t);
+
+        in_a[i] = (int16_t) a;
+        in_b[i] = (int16_t) b;
+        in_sum[i] = (int16_t) (a + b);
+    }
+
+    dashcdg_pcm_mono_resample_cubic(in_a, 4410U, 44100U, out_a, 4800U, 48000U);
+    dashcdg_pcm_mono_resample_cubic(in_b, 4410U, 44100U, out_b, 4800U, 48000U);
+    dashcdg_pcm_mono_resample_cubic(in_sum, 4410U, 44100U, out_sum, 4800U, 48000U);
+
+    for (i = 0U; i < 4800U; ++i) {
+        int mixed = (int) out_a[i] + (int) out_b[i];
+        int diff = (int) out_sum[i] - mixed;
+
+        if (diff < 0) {
+            diff = -diff;
+        }
+        if (diff > max_diff) {
+            max_diff = diff;
+        }
+    }
+
+    assert(max_diff <= 2);
+}
+
+static void test_overlap_chunk0_matches_isolated_resample(void) {
+    int16_t pcm[960 * 2];
+    int16_t out_iso[882 * 2];
+    int16_t out_ov[882 * 2];
+    int16_t tail_l[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    int16_t tail_r[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t tv = 0;
+    int16_t wl[6144];
+    int16_t wr[6144];
+    size_t i;
+    int max_diff = 0;
+
+    for (i = 0U; i < 960U; ++i) {
+        double t = (double) i / 48000.0;
+
+        pcm[i * 2U] = (int16_t) (2600.0 * sin(2.0 * 3.141592653589793 * 440.0 * t));
+        pcm[i * 2U + 1U] = pcm[i * 2U];
+    }
+
+    dashcdg_pcm_stereo_interleaved_resample(pcm, 960U, 48000U, out_iso, 882U, 44100U, wl, wr, 6144U);
+
+    dashcdg_pcm_stereo_interleaved_resample_overlap(
+            tail_l,
+            tail_r,
+            &tv,
+            0ULL,
+            pcm,
+            960U,
+            48000U,
+            out_ov,
+            882U,
+            44100U,
+            wl,
+            wr,
+            6144U
+    );
+
+    for (i = 0U; i < 882U * 2U; ++i) {
+        int d = (int) out_iso[i] - (int) out_ov[i];
+
+        if (d < 0) {
+            d = -d;
+        }
+        if (d > max_diff) {
+            max_diff = d;
+        }
+    }
+
+    assert(max_diff == 0);
+}
+
+static void test_overlap_stereo_48k_to_441_chunks_match_long_buffer(void) {
+    enum { chunks = 5U, chunk_in = 960U };
+    const size_t total_in = (size_t) chunks * (size_t) chunk_in;
+    size_t total_out = (total_in * 44100U + 48000U - 1U) / 48000U;
+    size_t chunk_out_fc = ((size_t) chunk_in * 44100U + 48000U - 1U) / 48000U;
+    int16_t *full = (int16_t *) malloc(total_in * 2U * sizeof(int16_t));
+    int16_t *ref = (int16_t *) malloc(total_out * 2U * sizeof(int16_t));
+    int16_t tail_l[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    int16_t tail_r[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t tv = 0;
+    int16_t wl[6144];
+    int16_t wr[6144];
+    size_t ci;
+    int max_diff = 0;
+    size_t ref_off = 0;
+
+    assert(full != NULL && ref != NULL);
+
+    for (ci = 0U; ci < total_in; ++ci) {
+        double t = (double) ci / 48000.0;
+        int16_t s = (int16_t) (2800.0 * sin(2.0 * 3.141592653589793 * 523.25 * t));
+
+        full[ci * 2U] = s;
+        full[ci * 2U + 1U] = s;
+    }
+
+    dashcdg_pcm_stereo_interleaved_resample(full, total_in, 48000U, ref, total_out, 44100U, wl, wr, 6144U);
+
+    memset(tail_l, 0, sizeof(tail_l));
+    memset(tail_r, 0, sizeof(tail_r));
+    tv = 0U;
+
+    for (ci = 0U; ci < (size_t) chunks; ++ci) {
+        int16_t chunk_out[882 * 2];
+        size_t j;
+
+        dashcdg_pcm_stereo_interleaved_resample_overlap(
+                tail_l,
+                tail_r,
+                &tv,
+                (uint64_t) ((size_t) ci * (size_t) chunk_in),
+                full + ci * (size_t) chunk_in * 2U,
+                (size_t) chunk_in,
+                48000U,
+                chunk_out,
+                chunk_out_fc,
+                44100U,
+                wl,
+                wr,
+                6144U
+        );
+
+        assert(ref_off + chunk_out_fc <= total_out);
+        for (j = 0U; j < chunk_out_fc; ++j) {
+            int dl = (int) chunk_out[j * 2U] - (int) ref[ref_off * 2U + j * 2U];
+            int dr = (int) chunk_out[j * 2U + 1U] - (int) ref[ref_off * 2U + j * 2U + 1U];
+
+            if (dl < 0) {
+                dl = -dl;
+            }
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dl > max_diff) {
+                max_diff = dl;
+            }
+            if (dr > max_diff) {
+                max_diff = dr;
+            }
+        }
+        ref_off += chunk_out_fc;
+    }
+
+    assert(ref_off == total_out);
+    assert(max_diff <= 48);
+
+    free(full);
+    free(ref);
+}
+
 static void test_interleaved_to_mono_copies_single_channel_input(void) {
     int16_t mono_in[5] = { 100, -200, 300, -400, 500 };
     int16_t mono_out[5] = { 0 };
@@ -141,8 +312,11 @@ int main(void) {
     test_dc_is_preserved_on_exact_narrowband_decimation();
     test_dc_preserved_on_8k_to_48k_upsample();
     test_sinc_resample_441_to_480_yields_sine_energy();
+    test_sinc_resample_preserves_linearity_on_hot_programme();
     test_alias_prone_high_frequency_is_rejected();
     test_stereo_to_mono_avoids_phase_cancellation_collapse();
     test_interleaved_to_mono_copies_single_channel_input();
+    test_overlap_chunk0_matches_isolated_resample();
+    test_overlap_stereo_48k_to_441_chunks_match_long_buffer();
     return 0;
 }
