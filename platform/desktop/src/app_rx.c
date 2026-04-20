@@ -36,6 +36,8 @@
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
+#include "dashcdg/pcm_rate_convert.h"
+#include "dashcdg/pcm_soxr_stream.h"
 #include "dashcdg/protocol.h"
 #include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
@@ -70,7 +72,7 @@
 #define DASHCDG_AUDIO_SAMPLE_RATE 48000U
 #define DASHCDG_AUDIO_CHANNELS 2U
 #define DASHCDG_AUDIO_LATE_GRACE_MS 80U
-#define DASHCDG_CDG_LATE_GRACE_MS 80U
+#define DASHCDG_CDG_LATE_GRACE_MS 120U
 #define DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE 16U
 #define DASHCDG_TRACKED_FEC_GROUPS 32U
 #define DASHCDG_MAX_DRAIN_STEPS_PER_CALL 256U
@@ -189,6 +191,13 @@ struct receiver_state {
     uint8_t announced_audio_codec_id;
     uint8_t announced_audio_fec_group_size;
     uint8_t announced_cdg_fec_group_size;
+    uint16_t rx_audio_applied_wire_sr;
+    uint8_t rx_audio_applied_wire_ch;
+    uint8_t rx_audio_applied_frame_ms;
+    uint16_t rx_audio_applied_preroll_ms;
+    uint8_t rx_audio_applied_profile_id;
+    uint8_t rx_audio_applied_codec_id;
+    int rx_audio_applied_valid;
     uint32_t pending_sync_id;
     uint64_t pending_sync_rx_local_ms;
     uint64_t pending_sync_origin_remote_ms;
@@ -237,6 +246,10 @@ struct receiver_state {
     int jitter_cdg_decode_primed;
     struct dashcdg_rx_fec_group audio_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
     struct dashcdg_rx_fec_group cdg_fec_groups[DASHCDG_TRACKED_FEC_GROUPS];
+    int16_t pcm_src_overlap_l[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    int16_t pcm_src_overlap_r[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t pcm_src_overlap_valid;
+    uint64_t pcm_src_stream_in_samples;
 };
 
 static struct receiver_state g_receiver;
@@ -283,7 +296,7 @@ static int g_endpoint_is_broadcast;
 static uint32_t g_rx_stats_interval_ms = DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS;
 static uint32_t g_rx_av_sync_log_ms = 0U;
 static uint64_t g_rx_last_av_sync_log_ms = 0U;
-static int g_rx_graphics_clock_sender = 0;
+static int g_rx_graphics_clock_sender = 1;
 static int32_t g_rx_graphics_trim_ms = 0;
 static dashcdg_socket_t g_rx_stats_sockfd = DASHCDG_INVALID_SOCKET;
 static struct sockaddr_in g_rx_stats_dest;
@@ -299,12 +312,12 @@ static size_t g_rx_pcm_dump_frames_written;
 static size_t g_rx_pcm_dump_frame_limit;
 static int g_rx_pcm_dump_init_attempted;
 
-static void dashcdg_rx_dump_pcm48_stereo(const int16_t *pcm, size_t frame_count) {
+static void dashcdg_rx_dump_pcm_to_file(const int16_t *pcm, size_t frame_count, unsigned int channels) {
     const char *dump_dir;
     char path[1024];
     size_t frames_to_write;
 
-    if (pcm == NULL || frame_count == 0U) {
+    if (pcm == NULL || frame_count == 0U || channels == 0U) {
         return;
     }
 
@@ -339,7 +352,7 @@ static void dashcdg_rx_dump_pcm48_stereo(const int16_t *pcm, size_t frame_count)
         return;
     }
 
-    fwrite(pcm, sizeof(*pcm) * DASHCDG_AUDIO_CHANNELS, frames_to_write, g_rx_pcm_dump_file);
+    fwrite(pcm, sizeof(*pcm) * channels, frames_to_write, g_rx_pcm_dump_file);
     fflush(g_rx_pcm_dump_file);
     g_rx_pcm_dump_frames_written += frames_to_write;
 }
@@ -699,7 +712,8 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
     fprintf(
             stdout,
             "\n--rx-av-sync-log-ms <ms>: stderr timeline line every N ms (0 = off) — dac vs sender vs snapshot.\n"
-            "--rx-graphics-clock dac|sender: dac = local heard-time lyrics (default); sender = network timeline.\n"
+            "--rx-graphics-clock dac|sender: dac = align raster to locally heard audio; "
+            "sender = network lyrics timeline (default).\n"
             "--rx-graphics-trim-ms <n>: add n ms to raster playback before seek (fine sync).\n"
     );
 }
@@ -815,6 +829,9 @@ static void receiver_state_reset(struct receiver_state *state) {
     dashcdg_cdg_batch_jitter_clear(&state->cdg_batch_jitter);
     memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
     memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
+    state->pcm_src_overlap_valid = 0;
+    state->pcm_src_stream_in_samples = 0;
+    dashcdg_pcm_soxr_stream_reset();
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -1423,8 +1440,14 @@ static void dashcdg_rx_format_audio_gate_locked(
          * After claim_audio_start, the PCM ring often dips below playout_delay/2 while the host
          * buffer drains — that is steady state, not startup preroll. Only !started uses the
          * half-preroll threshold (matches claim_audio_start_locked).
+         * PortAudio/waveOut open runs asynchronously; until the device callback exists we are not
+         * truly "running" from the user's perspective.
          */
-        snprintf(buffer, buffer_size, "running");
+        if (g_audio != NULL && !dashcdg_desktop_audio_output_device_ready(g_audio)) {
+            snprintf(buffer, buffer_size, "starting-dac");
+        } else {
+            snprintf(buffer, buffer_size, "running");
+        }
     } else if (buffered_ms < state->announced_playout_delay_ms / 2U) {
         snprintf(buffer, buffer_size, "wait-preroll %u/%u", (unsigned int) buffered_ms,
                 (unsigned int) (state->announced_playout_delay_ms / 2U));
@@ -1512,12 +1535,17 @@ static int dashcdg_rx_local_audio_playback_now_locked(uint64_t *out_playback_ms)
 
 /*
  * CDG frame selection for both GL and Win32 GDI uses the same render snapshot.
- * Karaoke correctness on one receiver takes priority over cross-receiver wall-clock
- * sameness: once the local output stream is running and exposes a DAC-aligned
- * timestamp, the screen must follow that local audio-emission time so lyrics and
- * heard phonemes match. Before audio timestamps exist, fall back to sender-derived
- * playback from v4 clock_sync / beacon bootstrap.
+ * Default to sender/network timing so one RX tracks the same lyric timeline as
+ * TX preview and other listeners. --rx-graphics-clock dac remains available
+ * when one box's locally-heard audio should drive the lyrics instead.
  */
+static int dashcdg_rx_u64_playback_ms_to_int_safe(uint64_t ms) {
+    if (ms >= (uint64_t) INT_MAX) {
+        return INT_MAX;
+    }
+    return (int) ms;
+}
+
 static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
     int64_t v = (int64_t) playback_ms + (int64_t) g_rx_graphics_trim_ms;
 
@@ -1540,15 +1568,15 @@ static int dashcdg_rx_playback_ms_for_graphics_locked(struct receiver_state *sta
     }
     if (g_rx_graphics_clock_sender) {
         if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
-            base = (int) sender_playback_ms;
+            base = dashcdg_rx_u64_playback_ms_to_int_safe(sender_playback_ms);
         } else if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
-            base = (int) local_audio_playback_ms;
+            base = dashcdg_rx_u64_playback_ms_to_int_safe(local_audio_playback_ms);
         }
     } else {
         if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
-            base = (int) local_audio_playback_ms;
+            base = dashcdg_rx_u64_playback_ms_to_int_safe(local_audio_playback_ms);
         } else if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
-            base = (int) sender_playback_ms;
+            base = dashcdg_rx_u64_playback_ms_to_int_safe(sender_playback_ms);
         }
     }
     if (base < 0) {
@@ -1614,6 +1642,10 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
             g_rx_last_av_sync_log_ms = local_now_ms;
             have_dac = dashcdg_rx_local_audio_playback_now_locked(&dac_ms);
             have_snd = dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &snd_ms);
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat"
+#endif
             fprintf(
                     stderr,
                     "[rx-av-sync] dac=%d:%" DASHCDG_RX_PRIu64 " sender=%d:%" DASHCDG_RX_PRIu64 " snap=%d q=%ums clock=%s\n",
@@ -1625,6 +1657,9 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
                     (unsigned int) dashcdg_desktop_audio_buffered_ms(g_audio),
                     g_rx_graphics_clock_sender ? "sender" : "dac"
             );
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
         }
     }
 
@@ -1916,18 +1951,24 @@ static void dashcdg_rx_try_recover_cdg_group_locked(
     }
 }
 
-static void dashcdg_rx_observe_audio_for_fec_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+static void dashcdg_rx_observe_audio_payload_for_fec_locked(
+        struct receiver_state *state,
+        uint32_t group_id,
+        uint8_t group_index,
+        const uint8_t *encoded_bytes,
+        uint16_t encoded_length
+) {
     struct dashcdg_rx_fec_group *group;
     uint8_t expected_group_size;
 
-    if (state == NULL || view == NULL || state->announced_audio_fec_group_size <= 1 ||
+    if (state == NULL || encoded_bytes == NULL || state->announced_audio_fec_group_size <= 1 ||
             state->announced_audio_fec_group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
-            view->audio_frame.group_index >= state->announced_audio_fec_group_size ||
-            view->audio_frame.encoded_length == 0) {
+            group_index >= state->announced_audio_fec_group_size ||
+            encoded_length == 0) {
         return;
     }
 
-    group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, view->audio_frame.group_id);
+    group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, group_id);
     if (group == NULL) {
         return;
     }
@@ -1936,32 +1977,52 @@ static void dashcdg_rx_observe_audio_for_fec_locked(struct receiver_state *state
     if (group->expected_group_size == 0 || group->expected_group_size > expected_group_size) {
         group->expected_group_size = expected_group_size;
     }
-    if (!group->member_present[view->audio_frame.group_index]) {
-        group->member_present[view->audio_frame.group_index] = 1;
-        group->member_lengths[view->audio_frame.group_index] = view->audio_frame.encoded_length;
+    if (!group->member_present[group_index]) {
+        group->member_present[group_index] = 1;
+        group->member_lengths[group_index] = encoded_length;
         memcpy(
-                group->member_payloads[view->audio_frame.group_index],
-                view->audio_frame.encoded_bytes,
-                view->audio_frame.encoded_length
+                group->member_payloads[group_index],
+                encoded_bytes,
+                encoded_length
         );
     }
 
     dashcdg_rx_try_recover_audio_group_locked(state, group);
 }
 
-static void dashcdg_rx_observe_cdg_for_fec_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+static void dashcdg_rx_observe_audio_for_fec_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL) {
+        return;
+    }
+
+    dashcdg_rx_observe_audio_payload_for_fec_locked(
+            state,
+            view->audio_frame.group_id,
+            view->audio_frame.group_index,
+            view->audio_frame.encoded_bytes,
+            view->audio_frame.encoded_length
+    );
+}
+
+static void dashcdg_rx_observe_cdg_payload_for_fec_locked(
+        struct receiver_state *state,
+        uint32_t group_id,
+        uint8_t group_index,
+        uint8_t packet_count,
+        const uint8_t *packet_bytes
+) {
     struct dashcdg_rx_fec_group *group;
     uint8_t expected_group_size;
     uint16_t payload_length;
 
-    if (state == NULL || view == NULL || state->announced_cdg_fec_group_size <= 1 ||
+    if (state == NULL || packet_bytes == NULL || state->announced_cdg_fec_group_size <= 1 ||
             state->announced_cdg_fec_group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
-            view->cdg_batch.group_index >= state->announced_cdg_fec_group_size ||
-            view->cdg_batch.packet_count == 0) {
+            group_index >= state->announced_cdg_fec_group_size ||
+            packet_count == 0) {
         return;
     }
 
-    group = dashcdg_rx_get_fec_group_locked(state->cdg_fec_groups, view->cdg_batch.group_id);
+    group = dashcdg_rx_get_fec_group_locked(state->cdg_fec_groups, group_id);
     if (group == NULL) {
         return;
     }
@@ -1970,18 +2031,32 @@ static void dashcdg_rx_observe_cdg_for_fec_locked(struct receiver_state *state, 
     if (group->expected_group_size == 0 || group->expected_group_size > expected_group_size) {
         group->expected_group_size = expected_group_size;
     }
-    if (!group->member_present[view->cdg_batch.group_index]) {
-        payload_length = (uint16_t) ((size_t) view->cdg_batch.packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES);
-        group->member_present[view->cdg_batch.group_index] = 1;
-        group->member_lengths[view->cdg_batch.group_index] = payload_length;
+    if (!group->member_present[group_index]) {
+        payload_length = (uint16_t) ((size_t) packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES);
+        group->member_present[group_index] = 1;
+        group->member_lengths[group_index] = payload_length;
         memcpy(
-                group->member_payloads[view->cdg_batch.group_index],
-                view->cdg_batch.packet_bytes,
+                group->member_payloads[group_index],
+                packet_bytes,
                 payload_length
         );
     }
 
     dashcdg_rx_try_recover_cdg_group_locked(state, group);
+}
+
+static void dashcdg_rx_observe_cdg_for_fec_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    if (state == NULL || view == NULL) {
+        return;
+    }
+
+    dashcdg_rx_observe_cdg_payload_for_fec_locked(
+            state,
+            view->cdg_batch.group_id,
+            view->cdg_batch.group_index,
+            view->cdg_batch.packet_count,
+            view->cdg_batch.packet_bytes
+    );
 }
 
 static void dashcdg_rx_observe_fec_parity_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -2074,30 +2149,77 @@ static void dashcdg_rx_pcm48_mono_to_interleaved_stereo(
 }
 
 /*
+ * Session/wire may be mono (TX default). Open the host device as stereo and L=R upmix after decode:
+ * mono Pa_OpenStream on some Windows WASAPI/shared stacks has produced bad routing / overload.
+ * Decoder channel count stays on the wire; only the device ring uses this mapping.
+ */
+static uint16_t dashcdg_rx_portaudio_output_channels(uint8_t wire_channels) {
+    if (wire_channels == 1U) {
+        return 2U;
+    }
+    if (wire_channels == 0U) {
+        return 0U;
+    }
+    return (uint16_t) wire_channels;
+}
+
+/*
  * Returns 1 if PCM was queued (full or partial), 0 if PortAudio took no samples
  * (retry the same jitter frame), -1 if decode failed (caller must advance/drop).
  */
+/* Opus allows up to 120 ms frames @ 48 kHz → 5760 samples/channel (see TX session audio_frame_ms). */
+#define DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES 5760
+#define DASHCDG_RX_PCM_WORK_SAMPLES_MAX (DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES + DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES)
+
 static int dashcdg_rx_apply_audio_frame_locked(
         struct receiver_state *state,
         const struct dashcdg_audio_jitter_frame *frame
 ) {
     int16_t pcm[DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_CHANNELS / 50U];
-    int16_t mono_scratch[960];
+    int16_t mono_scratch[DASHCDG_RX_PCM_WORK_SAMPLES_MAX];
     int decoded_frames;
     size_t queued_frames;
+    size_t expected_queued_fc;
 
     if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio == NULL) {
         return 0;
     }
 
     if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
-        decoded_frames = dashcdg_opus_decode_frame(
-                &g_opus_decoder,
-                frame->encoded_bytes,
-                frame->encoded_length,
-                pcm,
-                sizeof(pcm) / sizeof(pcm[0])
-        );
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
+        if (g_opus_decoder.channels == 1) {
+            decoded_frames = dashcdg_opus_decode_frame(
+                    &g_opus_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    mono_scratch,
+                    sizeof(mono_scratch) / sizeof(mono_scratch[0])
+            );
+            if (decoded_frames > 0 && dashcdg_rx_portaudio_output_channels(state->announced_audio_channels) == 2U) {
+                if ((size_t) decoded_frames * 2U > sizeof(pcm) / sizeof(pcm[0])) {
+                    state->audio_decode_failures++;
+                    return -1;
+                }
+                dashcdg_rx_pcm48_mono_to_interleaved_stereo(
+                        mono_scratch,
+                        pcm,
+                        (size_t) decoded_frames
+                );
+            } else if (decoded_frames > 0) {
+                memcpy(pcm, mono_scratch, (size_t) decoded_frames * sizeof(int16_t));
+            }
+        } else {
+            decoded_frames = dashcdg_opus_decode_frame(
+                    &g_opus_decoder,
+                    frame->encoded_bytes,
+                    frame->encoded_length,
+                    pcm,
+                    sizeof(pcm) / sizeof(pcm[0])
+            );
+        }
+#else
+        decoded_frames = 0;
+#endif
     } else if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
         if (g_amr_wb_decoder == NULL) {
             decoded_frames = 0;
@@ -2195,23 +2317,111 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return -1;
     }
 
-    dashcdg_rx_dump_pcm48_stereo(pcm, (size_t) decoded_frames);
-    queued_frames = dashcdg_desktop_audio_queue_frames(
-            g_audio,
-            pcm,
-            (size_t) decoded_frames,
-            (int64_t) frame->playback_ms
-    );
+    {
+        uint32_t ses_sr;
+        uint32_t out_sr;
+        unsigned int host_ch = (unsigned int) dashcdg_rx_portaudio_output_channels(state->announced_audio_channels);
+        const int16_t *qptr = pcm;
+        size_t qfc = (size_t) decoded_frames;
+        int16_t *rs_tmp = NULL;
+        int16_t wr_r_st[DASHCDG_RX_PCM_WORK_SAMPLES_MAX];
+
+        dashcdg_desktop_audio_refresh_stream_sample_rate(g_audio);
+        ses_sr = dashcdg_desktop_audio_session_sample_rate(g_audio);
+        out_sr = dashcdg_desktop_audio_output_sample_rate(g_audio);
+
+        if (host_ch == 2U && ses_sr != 0U && out_sr != 0U) {
+            size_t out_fc =
+                    ((size_t) decoded_frames * (size_t) out_sr + (size_t) ses_sr - 1U) / (size_t) ses_sr;
+            size_t ext_need = (size_t) decoded_frames + (size_t) DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES;
+            size_t wm = ext_need > out_fc ? ext_need : out_fc;
+            uint64_t stream_in_before = state->pcm_src_stream_in_samples;
+
+            if (wm > (size_t) DASHCDG_RX_PCM_WORK_SAMPLES_MAX) {
+                state->audio_decode_failures++;
+                return -1;
+            }
+
+            if (ses_sr != out_sr) {
+                rs_tmp = (int16_t *) malloc(out_fc * 2U * sizeof(int16_t));
+                if (rs_tmp == NULL) {
+                    state->audio_decode_failures++;
+                    return -1;
+                }
+#if defined(DASHCDG_HAVE_LIBSOXR)
+                if (!dashcdg_pcm_soxr_stream_ensure(ses_sr, out_sr) ||
+                        !dashcdg_pcm_soxr_stream_process_interleaved(
+                                pcm,
+                                (size_t) decoded_frames,
+                                rs_tmp,
+                                out_fc
+                        )) {
+                    free(rs_tmp);
+                    state->audio_decode_failures++;
+                    return -1;
+                }
+#else
+                dashcdg_pcm_stereo_interleaved_resample_overlap(
+                        state->pcm_src_overlap_l,
+                        state->pcm_src_overlap_r,
+                        &state->pcm_src_overlap_valid,
+                        stream_in_before,
+                        pcm,
+                        (size_t) decoded_frames,
+                        ses_sr,
+                        rs_tmp,
+                        out_fc,
+                        out_sr,
+                        mono_scratch,
+                        wr_r_st,
+                        wm
+                );
+#endif
+                qptr = rs_tmp;
+                qfc = out_fc;
+            } else {
+                dashcdg_pcm_stereo_interleaved_resample_overlap(
+                        state->pcm_src_overlap_l,
+                        state->pcm_src_overlap_r,
+                        &state->pcm_src_overlap_valid,
+                        stream_in_before,
+                        pcm,
+                        (size_t) decoded_frames,
+                        ses_sr,
+                        pcm,
+                        (size_t) decoded_frames,
+                        ses_sr,
+                        mono_scratch,
+                        wr_r_st,
+                        wm
+                );
+            }
+        }
+
+        expected_queued_fc = qfc;
+
+        dashcdg_rx_dump_pcm_to_file(qptr, qfc, host_ch);
+
+        queued_frames = dashcdg_desktop_audio_queue_frames(
+                g_audio,
+                qptr,
+                qfc,
+                (int64_t) frame->playback_ms
+        );
+        if (rs_tmp != NULL) {
+            free(rs_tmp);
+        }
+    }
     if (queued_frames == 0U) {
         state->audio_queue_overflows++;
         return 0;
     }
-    if (queued_frames != (size_t) decoded_frames) {
-        /*
-         * PortAudio accepted a prefix of this frame (buffer back-pressure). Treat as
-         * success so the jitter slot can advance; stalling here wedged the pipeline
-         * and caused permanent choppy output while TX showed a=-1 starvation.
-         */
+    state->pcm_src_stream_in_samples += (uint64_t) decoded_frames;
+    /*
+     * PortAudio may accept a prefix under back-pressure; compare against the frame count we offered
+     * (after optional resampling). Partial accept still advances jitter so we do not wedge.
+     */
+    if (queued_frames != expected_queued_fc) {
         state->audio_queue_overflows++;
     }
 
@@ -2237,7 +2447,7 @@ static void dashcdg_rx_apply_cdg_batch_locked(
         state->live_packets_applied++;
     }
     state->v4_bridge_cdg_valid = 0;
-    state->last_progress_local_ms = dashcdg_clock_now_ms();
+    state->last_progress_local_ms = local_now_ms;
 }
 
 static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t local_now_ms) {
@@ -2301,6 +2511,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
                 state->audio_missing_skips += miss_delta;
                 state->last_audio_jitter_apply_local_ms = local_now_ms;
+                state->last_progress_local_ms = local_now_ms;
                 progressed = 1;
             } else if (step == DASHCDG_AUDIO_DRAIN_APPLY && frame != NULL) {
                 uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
@@ -2313,6 +2524,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                     dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
                     state->jitter_audio_decode_primed = 1;
                     state->last_audio_jitter_apply_local_ms = local_now_ms;
+                    state->last_progress_local_ms = local_now_ms;
                     progressed = 1;
                 }
             }
@@ -2353,6 +2565,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
                 state->live_missing_skips += cdg_miss;
                 state->last_cdg_jitter_apply_local_ms = local_now_ms;
+                state->last_progress_local_ms = local_now_ms;
                 progressed = 1;
             } else if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_APPLY && batch != NULL) {
                 dashcdg_rx_apply_cdg_batch_locked(state, batch, local_now_ms);
@@ -2411,6 +2624,10 @@ static void dashcdg_rx_print_status_locked(void) {
     dashcdg_rx_format_audio_gate_locked(&g_receiver, now_ms, audio_gate, sizeof(audio_gate));
     dashcdg_rx_format_render_gate_locked(&g_receiver, render_gate, sizeof(render_gate));
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat"
+#endif
     fprintf(
             stdout,
             "[rx] net: dg=%" DASHCDG_RX_PRIu64 " bytes=%" DASHCDG_RX_PRIu64 " parse_fail=%" DASHCDG_RX_PRIu64
@@ -2507,6 +2724,9 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned int) g_receiver.announced_audio_profile_id,
             (unsigned int) g_receiver.announced_audio_codec_id
     );
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
     fflush(stdout);
 }
 
@@ -2631,25 +2851,34 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
         }
         if (g_audio != NULL) {
             dashcdg_desktop_audio_stop_stream(g_audio);
-            dashcdg_desktop_audio_init_stream(
-                    g_audio,
-                    view->announce.audio_sample_rate,
-                    view->announce.audio_channels,
-                    dashcdg_rx_network_stream_ring_ms(view->announce.playout_delay_ms, DASHCDG_V4_AUDIO_CODEC_OPUS)
-            );
-            dashcdg_opus_decoder_free(&g_opus_decoder);
-            dashcdg_rx_amr_decoders_release();
+            if (!dashcdg_desktop_audio_init_stream(
+                        g_audio,
+                        view->announce.audio_sample_rate,
+                        dashcdg_rx_portaudio_output_channels(view->announce.audio_channels),
+                        dashcdg_rx_network_stream_ring_ms(view->announce.playout_delay_ms, DASHCDG_V4_AUDIO_CODEC_OPUS)
+                )) {
+                fprintf(stderr, "[rx] announce: desktop_audio_init_stream failed\n");
+                fflush(stderr);
+                g_audio_stream_started = 0;
+                g_audio_start_inflight = 0;
+                state->rx_audio_applied_valid = 0;
+                dashcdg_opus_decoder_free(&g_opus_decoder);
+                dashcdg_rx_amr_decoders_release();
+            } else {
+                dashcdg_opus_decoder_free(&g_opus_decoder);
+                dashcdg_rx_amr_decoders_release();
 #if !defined(DASHCDG_DESKTOP_NO_OPUS)
-            dashcdg_opus_decoder_init(
-                    &g_opus_decoder,
-                    view->announce.audio_sample_rate,
-                    view->announce.audio_channels,
-                    view->announce.audio_frame_ms
-            );
+                dashcdg_opus_decoder_init(
+                        &g_opus_decoder,
+                        view->announce.audio_sample_rate,
+                        view->announce.audio_channels,
+                        view->announce.audio_frame_ms
+                );
 #endif
-            dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
-            g_audio_stream_started = 0;
-            g_audio_start_inflight = 0;
+                dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+                g_audio_stream_started = 0;
+                g_audio_start_inflight = 0;
+            }
         }
     }
 
@@ -2674,32 +2903,15 @@ static void dashcdg_rx_configure_audio_locked(
         uint8_t channels,
         uint8_t frame_ms,
         uint16_t playout_delay_ms,
+        uint8_t audio_profile_id,
         uint8_t codec_id
 ) {
     uint32_t buffer_ms;
+    uint16_t host_ch;
 
     if (state == NULL || !state->network_audio_enabled) {
         return;
     }
-
-    fprintf(
-            stdout,
-            "[rx] audio: reinitializing output device (sr=%u ch=%u frame_ms=%u preroll=%u codec=%u)\n",
-            (unsigned int) sample_rate,
-            (unsigned int) channels,
-            (unsigned int) frame_ms,
-            (unsigned int) playout_delay_ms,
-            (unsigned int) codec_id
-    );
-    fflush(stdout);
-
-    /*
-     * Always drop queued frames and FEC trackers when (re)opening decoders so a codec
-     * or format change cannot leave stale media_sequence / parity state wedged.
-     */
-    dashcdg_audio_jitter_clear(&state->audio_jitter);
-    memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
-    state->jitter_audio_decode_primed = 0;
 
     if (g_audio == NULL) {
         g_audio = dashcdg_desktop_audio_new();
@@ -2709,14 +2921,37 @@ static void dashcdg_rx_configure_audio_locked(
     }
 
     buffer_ms = dashcdg_rx_network_stream_ring_ms(playout_delay_ms, codec_id);
+    host_ch = dashcdg_rx_portaudio_output_channels((uint8_t) channels);
 
     dashcdg_desktop_audio_stop_stream(g_audio);
-    dashcdg_desktop_audio_init_stream(
-            g_audio,
-            sample_rate,
-            channels,
-            buffer_ms
-    );
+    state->pcm_src_overlap_valid = 0;
+    state->pcm_src_stream_in_samples = 0;
+    dashcdg_pcm_soxr_stream_reset();
+    if (!dashcdg_desktop_audio_init_stream(
+                g_audio,
+                sample_rate,
+                host_ch,
+                buffer_ms
+        )) {
+        fprintf(
+                stderr,
+                "[rx] audio: init_stream failed (sr=%u host_ch=%u buf_ms=%u)\n",
+                (unsigned int) sample_rate,
+                (unsigned int) host_ch,
+                (unsigned int) buffer_ms
+        );
+        fflush(stderr);
+        state->rx_audio_applied_valid = 0;
+        return;
+    }
+
+    /*
+     * Drop queued frames and FEC trackers only after the ring is allocated so a transient OOM in
+     * init_stream does not wipe jitter while leaving decoders stale.
+     */
+    dashcdg_audio_jitter_clear(&state->audio_jitter);
+    memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+    state->jitter_audio_decode_primed = 0;
     dashcdg_opus_decoder_free(&g_opus_decoder);
     dashcdg_rx_amr_decoders_release();
     if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
@@ -2751,6 +2986,28 @@ static void dashcdg_rx_configure_audio_locked(
             local_now_ms,
             dashcdg_rx_startup_skip_hold_ms(playout_delay_ms)
     );
+
+    fprintf(
+            stdout,
+            "[rx] audio: output ring (session_sr=%u pa_open_request_hz=%u wire_ch=%u host_ch=%u frame_ms=%u preroll=%u prof=%u codec=%u)\n",
+            (unsigned int) sample_rate,
+            (unsigned int) g_audio->stream_sample_rate,
+            (unsigned int) channels,
+            (unsigned int) host_ch,
+            (unsigned int) frame_ms,
+            (unsigned int) playout_delay_ms,
+            (unsigned int) audio_profile_id,
+            (unsigned int) codec_id
+    );
+    fflush(stdout);
+
+    state->rx_audio_applied_wire_sr = sample_rate;
+    state->rx_audio_applied_wire_ch = channels;
+    state->rx_audio_applied_frame_ms = frame_ms;
+    state->rx_audio_applied_preroll_ms = playout_delay_ms;
+    state->rx_audio_applied_profile_id = audio_profile_id;
+    state->rx_audio_applied_codec_id = codec_id;
+    state->rx_audio_applied_valid = 1;
 }
 
 /*
@@ -2790,6 +3047,7 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
             state->announced_audio_channels,
             wire_frame_ms,
             state->announced_playout_delay_ms,
+            wire_profile_id,
             wire_codec_id
     );
 }
@@ -2821,6 +3079,7 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
             state->announced_audio_channels,
             state->announced_audio_frame_ms,
             state->announced_playout_delay_ms,
+            state->announced_audio_profile_id,
             state->announced_audio_codec_id
     );
 }
@@ -2858,14 +3117,26 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
      * (~1 s) — each pass stopped PortAudio, cleared the ring, reset g_audio_stream_started, and
      * HUD fell back to wait-preroll mid-playback.
      */
+    /*
+     * Compare the *incoming* session_info to the last successful audio setup only.
+     * Do not use state->announced_* here: receiver_state_reset() zeroes those while asset_backfill
+     * is still settling, which falsely forced reconfigure on every periodic session_info (~1 Hz).
+     */
+    /*
+     * New session_start_ms (track skip) must reopen the output ring and clear g_audio_stream_started
+     * even when sample rate / codec / preroll are unchanged; otherwise claim_audio_start stays blocked
+     * while the PCM ring drains to zero (silent RX until pause/unpause forces reconfigure).
+     */
     need_audio_device_reconfigure =
+            session_changed ||
             g_audio == NULL ||
-            state->announced_audio_sample_rate != view->v4_session_info.audio_sample_rate ||
-            state->announced_audio_channels != view->v4_session_info.audio_channels ||
-            state->announced_audio_frame_ms != view->v4_session_info.audio_frame_ms ||
-            state->announced_playout_delay_ms != view->v4_session_info.startup_preroll_ms ||
-            state->announced_audio_profile_id != view->v4_session_info.audio_profile_id ||
-            state->announced_audio_codec_id != view->v4_session_info.audio_codec_id;
+            !state->rx_audio_applied_valid ||
+            view->v4_session_info.audio_sample_rate != state->rx_audio_applied_wire_sr ||
+            view->v4_session_info.audio_channels != state->rx_audio_applied_wire_ch ||
+            view->v4_session_info.audio_frame_ms != state->rx_audio_applied_frame_ms ||
+            view->v4_session_info.startup_preroll_ms != state->rx_audio_applied_preroll_ms ||
+            view->v4_session_info.audio_profile_id != state->rx_audio_applied_profile_id ||
+            view->v4_session_info.audio_codec_id != state->rx_audio_applied_codec_id;
 
     strncpy(state->song_id, view->v4_session_info.song_id, sizeof(state->song_id) - 1U);
     state->song_id[sizeof(state->song_id) - 1U] = '\0';
@@ -2877,7 +3148,13 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     state->announced_audio_frame_ms = view->v4_session_info.audio_frame_ms;
     state->announced_audio_profile_id = view->v4_session_info.audio_profile_id;
     state->announced_audio_codec_id = view->v4_session_info.audio_codec_id;
-    state->announced_audio_fec_group_size = view->v4_session_info.audio_join_redundancy > 0 ? 2 : 0;
+    if (view->v4_session_info.repair_mode == DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY) {
+        state->announced_audio_fec_group_size = 5U;
+        state->announced_cdg_fec_group_size = 9U;
+    } else {
+        state->announced_audio_fec_group_size = 0U;
+        state->announced_cdg_fec_group_size = 0U;
+    }
     state->network_audio_enabled = has_network_audio;
 
     if (session_changed || asset_changed || codec_changed || !state->have_clock) {
@@ -2894,6 +3171,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
                 view->v4_session_info.audio_channels,
                 view->v4_session_info.audio_frame_ms,
                 view->v4_session_info.startup_preroll_ms,
+                view->v4_session_info.audio_profile_id,
                 view->v4_session_info.audio_codec_id
         );
     } else if (!has_network_audio && g_audio != NULL) {
@@ -2902,6 +3180,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         dashcdg_rx_amr_decoders_release();
         g_audio_stream_started = 0;
         g_audio_start_inflight = 0;
+        state->rx_audio_applied_valid = 0;
     }
 }
 
@@ -2945,7 +3224,15 @@ static void handle_v4_audio_chunk(struct receiver_state *state, const struct das
         return;
     }
 
-    dashcdg_rx_store_v4_audio_frame_locked(state, view);
+    if (dashcdg_rx_store_v4_audio_frame_locked(state, view)) {
+        dashcdg_rx_observe_audio_payload_for_fec_locked(
+                state,
+                view->v4_audio_chunk.group_id,
+                view->v4_audio_chunk.group_index,
+                view->v4_audio_chunk.encoded_bytes,
+                view->v4_audio_chunk.encoded_length
+        );
+    }
 }
 
 static void handle_v4_video_delta(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -2956,13 +3243,21 @@ static void handle_v4_video_delta(struct receiver_state *state, const struct das
         return;
     }
 
-    dashcdg_rx_insert_cdg_pending_locked(
+    if (dashcdg_rx_insert_cdg_pending_locked(
             state,
             view->v4_video_delta.packet_start_index,
             view->v4_video_delta.packet_count,
             view->v4_video_delta.delta_bytes,
             1
-    );
+    )) {
+        dashcdg_rx_observe_cdg_payload_for_fec_locked(
+                state,
+                view->v4_video_delta.group_id,
+                view->v4_video_delta.group_index,
+                view->v4_video_delta.packet_count,
+                view->v4_video_delta.delta_bytes
+        );
+    }
 }
 
 static void handle_v4_backfill_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -3445,13 +3740,24 @@ static void *network_thread(void *user_data) {
 
 static void *dashcdg_rx_audio_start_thread_main(void *user_data) {
     struct dashcdg_desktop_audio *audio = (struct dashcdg_desktop_audio *) user_data;
+    int started_ok = 0;
 
     if (audio != NULL) {
-        dashcdg_desktop_audio_start_stream(audio);
+        started_ok = dashcdg_desktop_audio_start_stream(audio);
     }
 
     pthread_mutex_lock(&g_receiver.mutex);
     g_audio_start_inflight = 0;
+    /*
+     * claim_audio_start_locked sets g_audio_stream_started before this thread runs.
+     * If Pa_OpenStream / waveOut fails, jitter + HUD would think the DAC is live while silent.
+     * Clear the flag so preroll can satisfy claim again and we retry open.
+     */
+    if (audio != NULL && !started_ok) {
+        g_audio_stream_started = 0;
+        fprintf(stderr, "[rx] audio: output device start failed; will retry when buffer refills\n");
+        fflush(stderr);
+    }
     pthread_mutex_unlock(&g_receiver.mutex);
     return NULL;
 }
@@ -3474,10 +3780,16 @@ static void dashcdg_rx_start_audio_async(void) {
     }
 
     if (pthread_create(&thread, NULL, dashcdg_rx_audio_start_thread_main, audio) != 0) {
+        int started_ok = dashcdg_desktop_audio_start_stream(audio);
+
         pthread_mutex_lock(&g_receiver.mutex);
         g_audio_start_inflight = 0;
+        if (!started_ok) {
+            g_audio_stream_started = 0;
+            fprintf(stderr, "[rx] audio: output device start failed (sync open); will retry when buffer refills\n");
+            fflush(stderr);
+        }
         pthread_mutex_unlock(&g_receiver.mutex);
-        dashcdg_desktop_audio_start_stream(audio);
         return;
     }
 
@@ -3513,6 +3825,14 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
     }
 
     return NULL;
+}
+
+/* Windows snprintf + I64u in format strings confuses -Wformat; HUD only needs 32-bit ms. */
+static unsigned int dashcdg_rx_hud_ms_display_u32(uint64_t ms) {
+    if (ms >= (uint64_t) UINT_MAX) {
+        return UINT_MAX;
+    }
+    return (unsigned int) ms;
 }
 
 static void dashcdg_rx_fill_hud_lines_locked(
@@ -3567,6 +3887,10 @@ static void dashcdg_rx_fill_hud_lines_locked(
         snprintf(hud_skew_str, sizeof(hud_skew_str), "na");
     }
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat"
+#endif
     if (g_receiver.announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4) {
         snprintf(
                 hud_line_a,
@@ -3587,8 +3911,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 hud_line_b,
                 hud_line_b_size,
                 "c%u p%u buf:%ums pend:%u/%u hot:%u/%u mute:%s | %.18s | %.18s"
-                " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%" DASHCDG_RX_PRIu64
-                "ms dg:%" DASHCDG_RX_PRIu64 "ms st:%" DASHCDG_RX_PRIu64 "ms pre:%u/%u sk:%s",
+                " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%ums dg:%ums st:%ums pre:%u/%u sk:%s",
                 (unsigned int) g_receiver.announced_audio_codec_id,
                 (unsigned int) g_receiver.announced_audio_profile_id,
                 (unsigned int) audio_buf_ms,
@@ -3601,9 +3924,9 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 render_gate,
                 (long long) g_receiver.sender_offset_ms,
                 (long long) g_receiver.sender_path_delay_ms,
-                (unsigned long long) clock_hold_ms,
-                (unsigned long long) hud_since_last_dg_ms,
-                (unsigned long long) hud_stall_ms,
+                dashcdg_rx_hud_ms_display_u32(clock_hold_ms),
+                dashcdg_rx_hud_ms_display_u32(hud_since_last_dg_ms),
+                dashcdg_rx_hud_ms_display_u32(hud_stall_ms),
                 (unsigned int) hud_prefix_bytes,
                 (unsigned int) g_receiver.asset_size,
                 hud_skew_str
@@ -3628,8 +3951,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 hud_line_b,
                 hud_line_b_size,
                 "pre:%u/%u pend:%u/%u hot:%u/%u mute:%s | %.20s | %.20s"
-                " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%" DASHCDG_RX_PRIu64
-                "ms dg:%" DASHCDG_RX_PRIu64 "ms st:%" DASHCDG_RX_PRIu64 "ms",
+                " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%ums dg:%ums st:%ums",
                 (unsigned int) hud_prefix_bytes,
                 (unsigned int) g_receiver.asset_size,
                 (unsigned int) pending_audio,
@@ -3641,11 +3963,14 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 render_gate,
                 (long long) g_receiver.sender_offset_ms,
                 (long long) g_receiver.sender_path_delay_ms,
-                (unsigned long long) clock_hold_ms,
-                (unsigned long long) hud_since_last_dg_ms,
-                (unsigned long long) hud_stall_ms
+                dashcdg_rx_hud_ms_display_u32(clock_hold_ms),
+                dashcdg_rx_hud_ms_display_u32(hud_since_last_dg_ms),
+                dashcdg_rx_hud_ms_display_u32(hud_stall_ms)
         );
     }
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
     hud_line_a[hud_line_a_size - 1U] = '\0';
     hud_line_b[hud_line_b_size - 1U] = '\0';
 }
