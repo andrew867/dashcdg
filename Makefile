@@ -269,6 +269,9 @@ CODEC_SBC_OBJS := $(OBJ_DIR)/bt_sbc_sbc.o $(OBJ_DIR)/bt_sbc_sbc_primitives.o
 DESKTOP_NB_CODEC_OBJS := $(OBJ_DIR)/desktop_nb_evrc_codec.o $(OBJ_DIR)/desktop_nb_qcelp_codec.o $(OBJ_DIR)/desktop_nb_sbc_codec.o
 
 DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_soxr_stream.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_win32_timing_boost.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
+ifneq ($(strip $(SOXR_LINK)),)
+DESKTOP_LIB_OBJECTS += $(OBJ_DIR)/desktop_soxr_resample.o
+endif
 DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
 DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
 DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
@@ -399,7 +402,12 @@ $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 	$(CC) $(CFLAGS) $(DESKTOP_AUDIO_CPPFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_pcm_rate_convert.o: platform/desktop/src/pcm_rate_convert.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(SOXR_CPPFLAGS) -c -o $@ $<
+
+ifneq ($(strip $(SOXR_LINK)),)
+$(OBJ_DIR)/desktop_soxr_resample.o: platform/desktop/src/soxr_resample.c
+	$(CC) $(CFLAGS) $(SOXR_CPPFLAGS) -c -o $@ $<
+endif
 
 $(OBJ_DIR)/desktop_pcm_soxr_stream.o: platform/desktop/src/pcm_soxr_stream.c
 	$(CC) $(CFLAGS) $(SOXR_CPPFLAGS) -c -o $@ $<
@@ -529,8 +537,13 @@ $(TEST_BIN): $(OBJ_DIR)/test_core.o $(CORE_LIB) $(PROTO_LIB)
 $(TEST_TRANSPORT_UDP_BIN): $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_transport_udp.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_net_compat.o $(NET_LIBS)
 
-$(TEST_PCM_RATE_CONVERT_BIN): $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o -lm
+TEST_PCM_RATE_CONVERT_EXTRA_OBJS :=
+ifneq ($(strip $(SOXR_LINK)),)
+TEST_PCM_RATE_CONVERT_EXTRA_OBJS += $(OBJ_DIR)/desktop_soxr_resample.o
+endif
+
+$(TEST_PCM_RATE_CONVERT_BIN): $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(TEST_PCM_RATE_CONVERT_EXTRA_OBJS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(TEST_PCM_RATE_CONVERT_EXTRA_OBJS) $(SOXR_LINK) -lm
 
 $(TEST_OPUS_ROUNDTRIP_BIN): $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJECT)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJECT) $(OPUS_LINK) -lm

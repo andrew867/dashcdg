@@ -8,10 +8,10 @@
 #define DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES 96
 
 /*
- * High-quality rate conversion for desktop: exact-ratio polyphase FIR (48↔8/16 kHz),
- * zero-stuff + FIR for integer 8/16 kHz → 48 kHz, and Lanczos band-limited resampling
- * for other ratios (e.g. 44.1 kHz → 48 kHz). Public name is historical (`_cubic`);
- * Catmull–Rom cubics are no longer used in the default path.
+ * High-quality rate conversion for desktop.
+ * With DASHCDG_HAVE_LIBSOXR (MinGW + vendored libsoxr): libsoxr one-shot SRC (VHQ / linear phase).
+ * Otherwise: legacy polyphase FIR + Lanczos paths (same public API).
+ * Public name is historical (`_cubic`); cubics are not used.
  */
 void dashcdg_pcm_mono_resample_cubic(
         const int16_t *in,

@@ -9,6 +9,18 @@
 #define DASHCDG_PCM_PI 3.14159265358979323846
 #endif
 
+#if defined(DASHCDG_HAVE_LIBSOXR)
+#include "dashcdg/soxr_resample.h"
+#endif
+
+static size_t dashcdg_pcm_output_frames_for_stream_position(uint64_t in_samples, uint32_t in_rate, uint32_t out_rate) {
+    if (in_rate == 0U || out_rate == 0U) {
+        return 0U;
+    }
+    return (size_t)((in_samples * (uint64_t) out_rate + (uint64_t) in_rate - 1ULL) / (uint64_t) in_rate);
+}
+
+#if !defined(DASHCDG_HAVE_LIBSOXR)
 /*
  * Exact-ratio low-pass FIR taps for the narrowband codec adapters.
  * These paths are the critical ones for v4 low-bitrate codecs:
@@ -87,13 +99,6 @@ static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
  * Lanczos kernel (order a): band-limited reconstruction for arbitrary resample ratios.
  * Used for desktop TX capture and non–integer-rate paths where cubic interpolation aliases.
  */
-static size_t dashcdg_pcm_output_frames_for_stream_position(uint64_t in_samples, uint32_t in_rate, uint32_t out_rate) {
-    if (in_rate == 0U || out_rate == 0U) {
-        return 0U;
-    }
-    return (size_t)((in_samples * (uint64_t) out_rate + (uint64_t) in_rate - 1ULL) / (uint64_t) in_rate);
-}
-
 static float dashcdg_lanczos_kernel(float x, int a) {
     float ax = fabsf(x);
 
@@ -145,6 +150,8 @@ static void dashcdg_pcm_mono_resample_lanczos(
     }
 }
 
+#endif /* !defined(DASHCDG_HAVE_LIBSOXR) */
+
 void dashcdg_pcm_mono_resample_cubic(
         const int16_t *in,
         size_t in_len,
@@ -154,6 +161,20 @@ void dashcdg_pcm_mono_resample_cubic(
         uint32_t out_rate
 ) {
 
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    if (in == NULL || out == NULL || in_len == 0U || out_len == 0U || in_rate == 0U || out_rate == 0U) {
+        return;
+    }
+
+    if (in_rate == out_rate && in_len == out_len) {
+        memcpy(out, in, out_len * sizeof(*out));
+        return;
+    }
+
+    if (dashcdg_soxr_mono_i16_oneshot(in, in_len, in_rate, out, out_len, out_rate) != 0) {
+        memset(out, 0, out_len * sizeof(*out));
+    }
+#else
     if (in == NULL || out == NULL || in_len == 0U || out_len == 0U || in_rate == 0U || out_rate == 0U) {
         return;
     }
@@ -204,6 +225,7 @@ void dashcdg_pcm_mono_resample_cubic(
      * arbitrary ratios (e.g. 44.1 kHz microphone → 48 kHz session).
      */
     dashcdg_pcm_mono_resample_lanczos(in, in_len, in_rate, out, out_len, out_rate, 4);
+#endif
 }
 
 void dashcdg_pcm_stereo_interleaved_to_mono48(
@@ -254,6 +276,29 @@ void dashcdg_pcm_stereo_interleaved_resample(
         return;
     }
 
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    for (i = 0U; i < in_frames; ++i) {
+        work_left[i] = in[i * 2U];
+    }
+    if (dashcdg_soxr_mono_i16_oneshot(work_left, in_frames, in_rate, work_right, out_frames, out_rate) != 0) {
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        return;
+    }
+    for (i = 0U; i < out_frames; ++i) {
+        out[i * 2U] = work_right[i];
+    }
+
+    for (i = 0U; i < in_frames; ++i) {
+        work_left[i] = in[i * 2U + 1U];
+    }
+    if (dashcdg_soxr_mono_i16_oneshot(work_left, in_frames, in_rate, work_right, out_frames, out_rate) != 0) {
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        return;
+    }
+    for (i = 0U; i < out_frames; ++i) {
+        out[i * 2U + 1U] = work_right[i];
+    }
+#else
     for (i = 0U; i < in_frames; ++i) {
         work_left[i] = in[i * 2U];
     }
@@ -269,6 +314,7 @@ void dashcdg_pcm_stereo_interleaved_resample(
     for (i = 0U; i < out_frames; ++i) {
         out[i * 2U + 1U] = work_right[i];
     }
+#endif
 }
 
 void dashcdg_pcm_stereo_interleaved_resample_overlap(
