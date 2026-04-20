@@ -3547,6 +3547,15 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             size_t copy_frames = fifo_frames > DASHCDG_AUDIO_FRAME_SAMPLES ? DASHCDG_AUDIO_FRAME_SAMPLES : fifo_frames;
             int encoded_length;
 
+            /*
+             * Codec/profile can change via TTY cycle while this thread holds stale current_* locals.
+             * Snapshot under mutex immediately before branching to encoders so codec_id matches instances.
+             */
+            pthread_mutex_lock(&g_tx_state.mutex);
+            current_codec_id = g_tx_state.v4_audio_codec_id;
+            current_profile_id = g_tx_state.v4_audio_profile_id;
+            pthread_mutex_unlock(&g_tx_state.mutex);
+
             memset(&frame, 0, sizeof(frame));
             memset(pcm, 0, sizeof(pcm));
             if (copy_frames > 0U) {
