@@ -30,33 +30,49 @@ dashcdg_p3_safe_tmp() {
 
 # Libtool + MinGW need a single coherent MSYS2 mingw32 toolchain; PATH entries like
 # ProgramData/.../mingw32-make or "C:/Program Files/..." shims break libtool with "C:/Program: No such file".
+dashcdg_try_pin_mingw32_at_base() {
+  local base="$1"
+  local gcc_exe cxx_exe
+  [[ -z "$base" ]] && return 1
+  gcc_exe="$base/mingw32/bin/i686-w64-mingw32-gcc.exe"
+  if [[ ! -f "$gcc_exe" ]]; then
+    gcc_exe="$base/mingw32/bin/i686-w64-mingw32-gcc"
+  fi
+  if [[ ! -f "$gcc_exe" ]]; then
+    return 1
+  fi
+  export DASHCDG_MSYS2_ROOT="$base"
+  export MSYS2_ROOT="$base"
+  export PATH="$base/mingw32/bin:$base/usr/bin:${PATH:-}"
+  export CC="$gcc_exe"
+  cxx_exe="$base/mingw32/bin/i686-w64-mingw32-g++.exe"
+  [[ -f "$cxx_exe" ]] || cxx_exe="$base/mingw32/bin/i686-w64-mingw32-g++"
+  export CXX="$cxx_exe"
+  if [[ -x "$base/mingw32/bin/mingw32-make" || -f "$base/mingw32/bin/mingw32-make.exe" ]]; then
+    export MAKE="$base/mingw32/bin/mingw32-make"
+  else
+    export MAKE="/usr/bin/make"
+  fi
+  # Avoid Git / Windows shims that split on spaces inside libtool wrappers
+  export SHELL="/usr/bin/bash"
+  export CONFIG_SHELL="/usr/bin/bash"
+  return 0
+}
+
 dashcdg_pin_msys2_mingw32_toolchain() {
-  local root base
+  local root base gcc64 bin64 derived
   root="${MSYS2_ROOT:-}"
   for base in "${root}" /c/msys64 /c/msys2; do
     [[ -z "$base" ]] && continue
-    gcc_exe="$base/mingw32/bin/i686-w64-mingw32-gcc.exe"
-    if [[ ! -f "$gcc_exe" ]]; then
-      gcc_exe="$base/mingw32/bin/i686-w64-mingw32-gcc"
-    fi
-    if [[ -f "$gcc_exe" ]]; then
-      export DASHCDG_MSYS2_ROOT="$base"
-      export PATH="$base/mingw32/bin:$base/usr/bin:${PATH:-}"
-      export CC="$gcc_exe"
-      cxx_exe="$base/mingw32/bin/i686-w64-mingw32-g++.exe"
-      [[ -f "$cxx_exe" ]] || cxx_exe="$base/mingw32/bin/i686-w64-mingw32-g++"
-      export CXX="$cxx_exe"
-      if [[ -x "$base/mingw32/bin/mingw32-make" || -f "$base/mingw32/bin/mingw32-make.exe" ]]; then
-        export MAKE="$base/mingw32/bin/mingw32-make"
-      else
-        export MAKE="/usr/bin/make"
-      fi
-      # Avoid Git / Windows shims that split on spaces inside libtool wrappers
-      export SHELL="/usr/bin/bash"
-      export CONFIG_SHELL="/usr/bin/bash"
-      return 0
-    fi
+    dashcdg_try_pin_mingw32_at_base "$base" && return 0
   done
+  # GitHub Actions / portable MSYS2: prefix is not always /c/msys64 — derive from mingw64 gcc on PATH.
+  gcc64="$(command -v x86_64-w64-mingw32-gcc 2>/dev/null || true)"
+  if [[ -n "$gcc64" ]]; then
+    bin64="$(cd "$(dirname "$gcc64")" && pwd)"
+    derived="$(cd "$bin64/../.." && pwd)"
+    dashcdg_try_pin_mingw32_at_base "$derived" && return 0
+  fi
   return 1
 }
 

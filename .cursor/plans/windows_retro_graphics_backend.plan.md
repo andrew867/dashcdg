@@ -9,8 +9,7 @@ story without deleting the modern GL renderer.
 
 ## Phase 0 — Documentation and contracts (done / in progress)
 
-- Spec (archived sketch): `docs/archive/specs/windows-retro-graphics-backend.md`
-- Tests plan (archived): `docs/archive/test/windows-retro-graphics-validation.md`
+- Canonical retro + GDI story: `docs/specs/desktop-platform-support.md`, `docs/specs/win32-gdi-view-backend.md`, `docs/specs/windows-legacy-mingw-build.md` (older sketch docs were removed from `docs/` as non-canonical).
 - XP launch fix: GLUT on **primary thread** (`app_rx.c`, `app_tx.c`)
 
 ## Phase 1 — Shared CPU RGB generator

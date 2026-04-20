@@ -54,6 +54,8 @@ require OpenGL 3**, GLEW, or GLSL. It uses **GDI** (`CreateWindow`, top-down
 
 - Platform matrix (artifacts, sneakernet, retro): [`desktop-platform-support.md`](desktop-platform-support.md)
 - Manual validation: [`../test/win32-gdi-view-validation.md`](../test/win32-gdi-view-validation.md)
-- Historical “retro graphics backends” sketch (DirectDraw-era ideas, not the
-  shipped path): [`../archive/specs/windows-retro-graphics-backend.md`](../archive/specs/windows-retro-graphics-backend.md)
+- Older DirectDraw-era “retro graphics” sketches were removed from `docs/` as
+  non-canonical; **shipped** retro is **Win32 GDI + CPU RGBA** — see
+  [`desktop-platform-support.md`](desktop-platform-support.md) and
+  [`windows-legacy-mingw-build.md`](windows-legacy-mingw-build.md).
 - Plan: [`.cursor/plans/windows_retro_graphics_backend.plan.md`](../../.cursor/plans/windows_retro_graphics_backend.plan.md)

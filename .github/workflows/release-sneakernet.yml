@@ -21,6 +21,7 @@ jobs:
     runs-on: windows-latest
     env:
       ZIP_PATH: build/dist/dashcdg-windows-sneakernet.zip
+      SAMPLES_ZIP_PATH: build/dist/dashcdg-sample-tracks-mp3g.zip
 
     steps:
       - name: Checkout
@@ -59,6 +60,7 @@ jobs:
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-binutils
             mingw-w64-i686-gcc
+            mingw-w64-i686-make
             mingw-w64-i686-cmake
             mingw-w64-i686-ninja
             mingw-w64-i686-binutils
@@ -74,11 +76,30 @@ jobs:
           DASHCDG_SNEAKENET_CLEAN=1 RUN_P3_DISASM=1 bash scripts/build_windows_sneakernet_dist.sh
           test -f "${ZIP_PATH}"
 
+      - name: Package sample MP3+G library (cdg/)
+        shell: msys2 {0}
+        run: |
+          if [[ ! -d cdg ]] || [[ -z "$(ls -A cdg 2>/dev/null)" ]]; then
+            echo "cdg/ missing or empty — cannot build sample zip" >&2
+            exit 1
+          fi
+          mkdir -p build/dist
+          rm -f "${SAMPLES_ZIP_PATH}"
+          (cd cdg && zip -r -q "../${SAMPLES_ZIP_PATH}" .)
+          test -f "${SAMPLES_ZIP_PATH}"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: dashcdg-windows-sneakernet
           path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      - name: Upload sample tracks artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashcdg-sample-tracks-mp3g
+          path: ${{ env.SAMPLES_ZIP_PATH }}
           if-no-files-found: error
 
       - name: Ensure tag exists for manual release
@@ -96,5 +117,7 @@ jobs:
         with:
           tag_name: ${{ steps.release_meta.outputs.release_tag }}
           name: ${{ steps.release_meta.outputs.release_name }}
-          files: ${{ env.ZIP_PATH }}
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.SAMPLES_ZIP_PATH }}
           generate_release_notes: true

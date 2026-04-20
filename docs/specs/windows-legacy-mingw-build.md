@@ -83,6 +83,11 @@ is a frequent first crash after the EXE loads.
 
 **Mitigations:**
 
+0. **Sneakernet / mingw32 product builds** in this fork rebuild **PIII-safe**
+   **`libopus-0.dll`** + **`libportaudio.dll`** under **`build/mingw32-p3-vendor/`**
+   (`scripts/build_mingw32_p3_opus_portaudio_shared.sh`) and copy them next to the
+   i686 EXEs — prefer that layout on real Pentium III hosts instead of stock MSYS2
+   DLLs.
 1. **Rebuild** `opus` (and any other suspect DLL) for the same MinGW32 target
    with `CFLAGS` / `CXXFLAGS` including **`-march=pentium3`** (or your exact
    CPU floor), then replace the DLL next to the EXE.
@@ -193,11 +198,12 @@ Residual XP risks (still worth checking on real hardware):
 - **Missing bundled DLLs** next to the `.exe` still produce a loader dialog on
   XP in most cases, not a silent Watson dump.
 
-For **retro-friendly** receive/transmit without GL or Opus, use the shipped
-**`WINDOWS_RETRO_BUNDLE=1`** build (`desktop-retro-rx.exe` / `desktop-retro-tx.exe`,
-GDI + SBC-like audio). An older DirectDraw / alternate-backend **sketch** lives
-in the archive:
-[`../archive/specs/windows-retro-graphics-backend.md`](../archive/specs/windows-retro-graphics-backend.md).
+For **retro-friendly** receive/transmit **without OpenGL** (but still with **real
+Opus encode/decode + PortAudio** and the same PIII-safe vendored DLLs as other
+mingw32 builds), use **`WINDOWS_RETRO_BUNDLE=1`**: **`desktop-retro-rx.exe`** /
+**`desktop-retro-tx.exe`**. Graphics are **Win32 GDI + CPU RGBA** only; see
+[`win32-gdi-view-backend.md`](win32-gdi-view-backend.md) and
+[`vendored-opus-portaudio-windows.md`](vendored-opus-portaudio-windows.md).
 
 ## Windows 2000 vs OpenGL
 
@@ -247,22 +253,27 @@ Per-arch script invocations copy only the zip that was built. The per-arch
   fallbacks. Unicode Win32 (`CreateWindowExW`, etc.) is used in the GDI view.
 - **`-march=pentium3 -mtune=pentium3`** for dashcdg objects (same pre-SSE2 profile as
   legacy P3 builds; adjust with a custom `-march=` in the Makefile if you need older).
-- **`desktop-retro-rx.exe`**: GDI-only receiver, **no `libopus-0.dll`**, no
-  OpenGL/GLUT/GLEW imports (links `desktop_app_rx_retro_gdi.o` + `opus_codec` stub).
+- **`desktop-retro-rx.exe`**: GDI-only receiver (**`desktop_app_rx_retro_gdi.o`**),
+  **no OpenGL / FreeGLUT / GLEW** imports; links the **real Opus** encoder/decoder
+  object (`desktop_opus_codec.o`) plus PortAudio and **static libsoxr** like other
+  desktop builds. Ships **`libopus-0.dll`** + **`libportaudio.dll`** next to the EXE
+  from **`build/mingw32-p3-vendor/`** when using the vendored mingw32 layout.
 - **`desktop-retro-tx.exe`**: transmitter built with **`DASHCDG_DESKTOP_RETRO_WINDOWS`**
-  (no `--display` / GL preview path; default audio is **SBC-like** / resilience).
-  The same `debug` pass still builds the normal GL/GDI/opus binaries under
-  `build/x86-retro/bin/` for side‑by‑side testing.
+  (no GL preview path). **Default v4 audio:** **quality profile + Opus** (see
+  `platform/desktop/src/app_tx.c` `DASHCDG_DESKTOP_RETRO_WINDOWS` init); cycle codecs
+  with TTY **`c`** or `--v4-audio-codec=` like any other TX build.
 
-Use **`desktop-retro-tx.exe`** with **`--badnet-v4`** (v4 + resilience + default
-`celp13k` id) and/or **`--audio-profile=resilience`** as needed; narrowband audio is
-always **NB-IMA** (`core/src/nb_ima_codec.c`) in this repo. Pair with **`desktop-retro-rx.exe`**
-for testing; Opus-only senders will not produce audio on the retro RX.
+The same `make debug` pass can populate **`build/x86-retro/bin/`** with both the
+**`desktop-retro-*.exe`** pair and the usual **`desktop-*.exe`** names (same tree,
+full link graph); the **sneakernet** script only **packages** the retro EXEs (+ DLLs)
+into `windows-x86-retro/`.
 
 ## Sneakernet bundle (`make dist-windows-sneakernet`)
 
-`make dist-windows-sneakernet` runs `scripts/build_windows_sneakernet_dist.sh` (incremental by default; see **`desktop-platform-support.md`** §Sneakernet for `DASHCDG_SNEAKENET_CLEAN`, parallel jobs, fast zip).
-It performs **four** full `make clean debug` passes and lays out **one** copy‑paste
+`make dist-windows-sneakernet` runs `scripts/build_windows_sneakernet_dist.sh`
+(incremental by default; set **`DASHCDG_SNEAKENET_CLEAN=1`** for CI-style clean
+rebuilds; see **`desktop-platform-support.md`** §Sneakernet for parallel jobs and
+fast zip). It builds **four** `make debug` variants and lays out **one** copy‑paste
 tree you can put on a USB stick:
 
 **Root:** `build/dist/dashcdg-windows-sneakernet/` (see `README.txt` inside)
@@ -272,7 +283,7 @@ tree you can put on a USB stick:
 | `windows-x64/` | mingw64 — standard 64‑bit GL + GDI RX + TX + player |
 | `windows-x86/` | mingw32 — standard 32‑bit GL + GDI RX + TX + player |
 | `windows-x86-legacy-p3/` | mingw32 + `WINDOWS_LEGACY_TARGET=1` (XP PE + `-march=pentium3` on dashcdg objects) |
-| `windows-x86-retro/` | mingw32 + `WINDOWS_RETRO_BUNDLE=1` — `desktop-retro-rx.exe` / `desktop-retro-tx.exe` only (+ minimal DLLs; no Opus / no GL) |
+| `windows-x86-retro/` | mingw32 + `WINDOWS_RETRO_BUNDLE=1` — `desktop-retro-rx.exe` / `desktop-retro-tx.exe` + minimal DLLs (**no GL**; **Opus + PortAudio** via PIII vendor DLLs) |
 
 In each **standard** folder (`windows-x64`, `windows-x86`, `windows-x86-legacy-p3`)
 you get the same **six** test names:

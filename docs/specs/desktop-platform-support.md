@@ -3,8 +3,9 @@
 ## Purpose
 
 Single contract for **what we build**, **where artifacts land**, and **how we
-talk about OS support**. It supersedes ad-hoc “baseline” docs (see
-[`docs/archive/README.md`](../archive/README.md)).
+talk about OS support**. It supersedes ad-hoc baseline notes that used to live
+in scattered markdown; **this file and `windows-legacy-mingw-build.md` are the
+canonical Windows story.**
 
 macOS is still out of scope for this tranche (no build hardware).
 
@@ -57,8 +58,8 @@ Layout:
 
 - `build/dist/dashcdg-windows-sneakernet/windows-x64/`
 - `build/dist/dashcdg-windows-sneakernet/windows-x86/`
-- `build/dist/dashcdg-windows-sneakernet/windows-x86-legacy-p3/` (`WINDOWS_LEGACY_TARGET=1`, Pentium III–oriented **dashcdg** objects; includes MSYS2 **`libopus-0.dll`** / **`libportaudio.dll`** — rebuild for real PIII if needed)
-- `build/dist/dashcdg-windows-sneakernet/windows-x86-retro/` (`WINDOWS_RETRO_BUNDLE=1`: `desktop-retro-*.exe` only + minimal DLLs; **no** bundled Opus/PortAudio/GL)
+- `build/dist/dashcdg-windows-sneakernet/windows-x86-legacy-p3/` (`WINDOWS_LEGACY_TARGET=1`, Pentium III–oriented **dashcdg** objects; **`libopus-0.dll`** / **`libportaudio.dll`** copied from **`build/mingw32-p3-vendor/`** like `windows-x86` — rebuild those DLLs for real PIII if you change Opus/PortAudio flags)
+- `build/dist/dashcdg-windows-sneakernet/windows-x86-retro/` (`WINDOWS_RETRO_BUNDLE=1`): **`desktop-retro-rx.exe`** / **`desktop-retro-tx.exe`** plus minimal runtime DLLs; **no OpenGL / GLEW / FreeGLUT**; **Opus + PortAudio** use the same PIII-safe **`libopus-0.dll`** and **`libportaudio.dll`** copied from `build/mingw32-p3-vendor/` as in `windows-x86` (see `scripts/build_windows_sneakernet_dist.sh` and the tree `README.txt`).
 
 Standard folders ship **`desktop-tx.exe`**, **`desktop-gdi-tx.exe`**, **`desktop-rx.exe`**, a **`desktop-gl-rx.exe`** alias (copy of `desktop-rx.exe`), **`desktop-gdi-rx.exe`**, and **`desktop-player.exe`** (+ legacy `desktop-*-player.exe` copies); see `README.txt` in that tree.
 
@@ -79,7 +80,7 @@ Variables (see `Makefile`):
 
 - `MINGW_ARCH=mingw64` | `mingw32`
 - `WINDOWS_LEGACY_TARGET=1` — XP-oriented PE subsystem flags; on i686 adds `-march=pentium3 -mtune=pentium3` when retro bundle is off.
-- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, same **`-march=pentium3`** object tuning as other pre-SSE2 profiles, `LDLIBS_DESKTOP_RETRO` (no OpenGL/Opus DLLs in the copy list; audio via WinMM).
+- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, same **`-march=pentium3`** object tuning as other pre-SSE2 profiles, `LDLIBS_DESKTOP_RETRO` (no OpenGL stack; **Opus + PortAudio + libsoxr** still linked; runtime DLL copy list matches the retro Makefile rule — see `Makefile` `WINDOWS_RETRO_BUNDLE` / `bundle-runtime`).
 
 **Windows TX/RX:** **`WINMM.dll`** for timer resolution; MMCSS uses **`AVRT.dll`** only when loadable (Vista+); XP/2000 skip AVRT (`win32_timing_boost.c`).
 
