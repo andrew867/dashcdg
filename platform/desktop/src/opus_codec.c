@@ -115,26 +115,47 @@ int dashcdg_opus_encoder_init(
 
     opus_encoder_ctl(encoder->encoder, OPUS_SET_BITRATE(bitrate_bps));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR(1));
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(1));
+    /*
+     * Constrained VBR keeps packet sizes predictable for speech/karaoke; on dense music at 96 kbit/s
+     * it can trade quality for frame-size uniformity and sound like level pumping ("tuned FM").
+     * Unconstrained VBR for the high-bitrate music tier avoids that.
+     */
+    if (bitrate_bps > 0 && bitrate_bps < 96000) {
+        opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(1));
+    } else {
+        opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(0));
+    }
     /*
      * High complexity + in-band FEC can exceed small UDP payloads and peg CPU under load;
      * keep frames compact and encoding cheap for real-time desktop streaming.
      */
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_COMPLEXITY(5));
+    opus_encoder_ctl(
+            encoder->encoder,
+            OPUS_SET_COMPLEXITY((bitrate_bps > 0 && bitrate_bps >= 96000) ? 6 : 5)
+    );
     /*
      * Karaoke default: moderate bitrates favour speech (intelligibility); higher bitrates
      * favour music programme. Policy: docs/specs/opus-desktop-encoding-policy.md
      */
     /*
-     * Desktop default Opus is 80 kbit/s (see DASHCDG_AUDIO_BITRATE_KBPS). Treat ≤96 kbit/s as
-     * speech/karaoke; only higher bitrates use the music signal hint.
+     * Desktop default Opus is 96 kbit/s mono (see DASHCDG_AUDIO_BITRATE_KBPS). Below that,
+     * favour speech (karaoke / narrow sessions); at 96 kbit/s and above use the music programme
+     * hint so brass and dense mixes are less band-limited as "voice".
      */
-    if (bitrate_bps > 0 && bitrate_bps <= 96000) {
+    if (bitrate_bps > 0 && bitrate_bps < 96000) {
         opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+        opus_encoder_ctl(encoder->encoder, OPUS_SET_BANDWIDTH(OPUS_AUTO));
     } else {
         opus_encoder_ctl(encoder->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+        /*
+         * Pin fullband when the session is 48 kHz so AUTO does not hop modes (can add "swish").
+         */
+        if (sample_rate >= 48000) {
+            opus_encoder_ctl(encoder->encoder, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
+        } else {
+            opus_encoder_ctl(encoder->encoder, OPUS_SET_BANDWIDTH(OPUS_AUTO));
+        }
     }
-    opus_encoder_ctl(encoder->encoder, OPUS_SET_BANDWIDTH(OPUS_AUTO));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_INBAND_FEC(0));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_PACKET_LOSS_PERC(0));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_DTX(0));

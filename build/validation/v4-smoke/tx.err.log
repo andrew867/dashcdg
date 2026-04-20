@@ -1,0 +1,7 @@
+usage: C:\Users\andrew\OneDrive - Green O365\Documents\GitHub\dashcdg\build\amd64\bin\desktop-tx.exe [--help] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)
+defaults: endpoint-address=239.255.77.77 port=24684
+default TX library: cdg (reshuffled each time the playlist wraps)
+v4 audio: --v4-audio-codec=opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc
+          --badnet-v4 (resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-evrc
+use --help or -h for full options, defaults, and TTY hotkeys.

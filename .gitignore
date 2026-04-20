@@ -1,10 +1,10 @@
-*.mp3
-*.cdg
+#*.mp3
+#*.cdg
 *.o
-/cdg
+#/cdg
 /.idea
 *.tar
-build/
+#build/
 
 # Local clones / experiments (use scripts/fetch_audio_codec_vendors.sh into audio_modules/*/vendor/)
 third_party/

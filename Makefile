@@ -139,15 +139,26 @@ endif
 else
 WINDOWS_RUNTIME_DLLS :=
 endif
+
+# Static libsoxr (mandatory MinGW desktop link): per-arch tree from scripts/build_soxr_vendor.sh <mingw64|mingw32>
+ifeq ($(MINGW_ARCH),mingw32)
+SOXR_VENDOR_PREFIX ?= build/soxr-vendor-mingw32/install
+else
+SOXR_VENDOR_PREFIX ?= build/soxr-vendor-mingw64/install
+endif
+SOXR_CPPFLAGS := -I$(SOXR_VENDOR_PREFIX)/include -DDASHCDG_HAVE_LIBSOXR=1
+SOXR_LINK := -L$(SOXR_VENDOR_PREFIX)/lib -lsoxr
+CFLAGS += $(SOXR_CPPFLAGS)
+
 LDLIBS_DESKTOP_AUDIO := $(DESKTOP_PORTAUDIO_LINK)
 
 # WinMM for timeBeginPeriod; MMCSS (avrt.dll) is loaded at runtime on Vista+ only — do not link -lavrt (no AVRT on XP/2K). See win32_timing_boost.c
 WINDOWS_STREAMING_TIMING_LIBS := -lwinmm
-LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread
+LDLIBS_DESKTOP := -lopengl32 -lglew32 -lfreeglut $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) $(SOXR_LINK) -lpthread
 NET_LIBS := -lws2_32 -liphlpapi
 WINDOWS_GDI_LIBS := -lgdi32 -luser32
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
-LDLIBS_DESKTOP_RETRO := $(WINDOWS_STREAMING_TIMING_LIBS) $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_RETRO := $(WINDOWS_STREAMING_TIMING_LIBS) $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) $(SOXR_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 endif
 else
 # Linux / non-Windows: optional manual vendored codecs
@@ -168,7 +179,16 @@ endif
 endif
 endif
 CFLAGS += $(OPUS_CPPFLAGS) $(PORTAUDIO_CPPFLAGS)
-LDLIBS_DESKTOP := -lGL -lGLEW -lglut $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) -lpthread -lm
+# Optional libsoxr on non-Windows (same layout as vendor script install)
+SOXR_VENDOR_PREFIX ?= build/soxr-vendor/install
+SOXR_CPPFLAGS :=
+SOXR_LINK :=
+ifneq ($(wildcard $(SOXR_VENDOR_PREFIX)/lib/libsoxr.a),)
+SOXR_CPPFLAGS := -I$(SOXR_VENDOR_PREFIX)/include -DDASHCDG_HAVE_LIBSOXR=1
+SOXR_LINK := -L$(SOXR_VENDOR_PREFIX)/lib -lsoxr
+endif
+CFLAGS += $(SOXR_CPPFLAGS)
+LDLIBS_DESKTOP := -lGL -lGLEW -lglut $(DESKTOP_PORTAUDIO_LINK) $(OPUS_LINK) $(SOXR_LINK) -lpthread -lm
 NET_LIBS :=
 WINDOWS_GDI_LIBS :=
 WINDOWS_RUNTIME_DLLS :=
@@ -176,14 +196,24 @@ WINDOWS_ARCH_LABEL ?= x64
 LDLIBS_DESKTOP_RETRO :=
 endif
 
+.PHONY: dashcdg-check-soxr-lib
+# MinGW desktop requires vendored libsoxr.a (see scripts/build_soxr_vendor.sh). Non-Windows: no-op.
+dashcdg-check-soxr-lib:
+	@SOXR_LIB="$(SOXR_VENDOR_PREFIX)/lib/libsoxr.a"; win=0; \
+	case "$(OS)" in Windows_NT*) win=1 ;; esac; \
+	case "$(UNAME_S)" in MINGW*|MSYS*) win=1 ;; esac; \
+	if [ "$$win" = 1 ]; then \
+	  test -f "$$SOXR_LIB" || { echo "[dashcdg] Missing $$SOXR_LIB — run: bash scripts/build_soxr_vendor.sh $(MINGW_ARCH)" >&2; exit 1; }; \
+	fi
+
 OBJ_DIR := $(BUILD_DIR)/obj
 BIN_DIR := $(BUILD_DIR)/bin
 
 ifneq (,$(filter Windows_NT MINGW64_NT% MINGW32_NT% MSYS_NT%,$(OS) $(UNAME_S)))
 RX_GDI_BIN := $(BIN_DIR)/desktop-gdi-rx.exe
 TX_GDI_BIN := $(BIN_DIR)/desktop-gdi-tx.exe
-LDLIBS_DESKTOP_RX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
-LDLIBS_DESKTOP_TX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_RX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) $(SOXR_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
+LDLIBS_DESKTOP_TX_GDI := $(LDLIBS_DESKTOP_AUDIO) $(WINDOWS_STREAMING_TIMING_LIBS) $(OPUS_LINK) $(SOXR_LINK) -lpthread $(NET_LIBS) $(WINDOWS_GDI_LIBS)
 RETRO_RX_BIN :=
 RETRO_TX_BIN :=
 ifeq ($(WINDOWS_RETRO_BUNDLE),1)
@@ -238,7 +268,7 @@ CODEC_SBC_OBJS := $(OBJ_DIR)/bt_sbc_sbc.o $(OBJ_DIR)/bt_sbc_sbc_primitives.o
 
 DESKTOP_NB_CODEC_OBJS := $(OBJ_DIR)/desktop_nb_evrc_codec.o $(OBJ_DIR)/desktop_nb_qcelp_codec.o $(OBJ_DIR)/desktop_nb_sbc_codec.o
 
-DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_win32_timing_boost.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_soxr_stream.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_win32_timing_boost.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
 DESKTOP_OPUS_OBJECT := $(OBJ_DIR)/desktop_opus_codec.o
 DESKTOP_OPUS_STUB_OBJECT := $(OBJ_DIR)/desktop_opus_codec_stub.o
 DESKTOP_TX_OBJECT := $(OBJ_DIR)/desktop_app_tx.o
@@ -284,7 +314,7 @@ DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
 endif
 
 .PHONY: all debug dirs libs test desktop-apps bundle-runtime check-mingw32-p3-implib \
-	vendor-mingw32-p3-runtime verify-mingw32-p3-dlls verify-p3-mingw32-all \
+	vendor-mingw32-p3-runtime vendor-soxr verify-mingw32-p3-dlls verify-p3-mingw32-all \
 	verify-sneakernet-mingw32-p3 \
 	package package-x64 package-x86 \
 	package-all-windows dist-windows dist-windows-sneakernet desktop-windows-x86-retro release clean
@@ -330,7 +360,7 @@ $(CORE_LIB): $(CORE_OBJECTS)
 $(PROTO_LIB): $(PROTO_OBJECTS)
 	$(AR) rcs $@ $^
 
-$(DESKTOP_LIB): $(DESKTOP_LIB_OBJECTS)
+$(DESKTOP_LIB): $(DESKTOP_LIB_OBJECTS) | dashcdg-check-soxr-lib
 	$(AR) rcs $@ $^
 
 $(OBJ_DIR)/core_cdg.o: core/src/cdg.c
@@ -370,6 +400,9 @@ $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 
 $(OBJ_DIR)/desktop_pcm_rate_convert.o: platform/desktop/src/pcm_rate_convert.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_pcm_soxr_stream.o: platform/desktop/src/pcm_soxr_stream.c
+	$(CC) $(CFLAGS) $(SOXR_CPPFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_opus_codec.o: platform/desktop/src/opus_codec.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -596,9 +629,15 @@ vendor-audio-sources:
 	bash scripts/fetch_opus_portaudio_vendors.sh
 	bash scripts/fetch_audio_codec_vendors.sh
 
+# Static libsoxr per arch (required for MinGW desktop link). Sneakernet runs both before make.
+vendor-soxr:
+	bash scripts/build_soxr_vendor.sh mingw64
+	bash scripts/build_soxr_vendor.sh mingw32
+
 # Build Pentium III–safe shared libopus-0.dll + libportaudio.dll into build/mingw32-p3-vendor/ (run vendor-audio-sources first if trees are missing).
 vendor-mingw32-p3-runtime:
 	bash scripts/build_mingw32_p3_opus_portaudio_shared.sh
+	bash scripts/build_soxr_vendor.sh mingw32
 
 verify-mingw32-p3-dlls:
 	bash scripts/verify_mingw32_p3_codec_dlls.sh

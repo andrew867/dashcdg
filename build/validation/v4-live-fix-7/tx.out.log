@@ -1,0 +1,20 @@
+[tx] scanning folder for random startup window: cdg
+[tx] preparing Metric - Breathing Underwater [SN Karaoke] (queued with warmup)
+[tx] loaded Metric - Breathing Underwater [SN Karaoke] as MP3+G broadcast with warmup
+[tx] track 1/64: Metric - Breathing Underwater [SN Karaoke] | MP3+G | playing | 0/241307ms
+[tx] net: dg=0 fail=0 bytes=0 | pkt ann=0 bc=0 ch=0 aud=0 live=0 snap=0 fec=0/0 ovh=0% prof=5/9 ptp=0/0/0 | asset 0/1737408 bytes prefix, chunks 0/1697 distinct=0 loops=0 src=file sched=386112B lib=64/128 CDG | audq=0 hi=0 ovf=0 gen=0 done=0 lead aud=-1ms live=0ms start_in=1000ms head_off=0 snap_off=64882
+[tx] v4: prof=2 codec=6 (amr-wb) info=0 load=0 anchor=0 audio=0 video=0 repair=0 backfill=0 clock=0 first=0/0/0 peak=0B anchor_off=0/0 state=1
+[tx] broadcasting to 239.255.77.141:24707
+[tx] transport mode: v4 (default)
+[tx] startup seed: 64 paired tracks loaded / 128 .cdg files on disk (window start index 51); background scan continues
+[tx] multicast preferred interface: Ethernet 2 (ethernet 10.201.1.114) (joined PTP listener on 3 interfaces)
+[tx] event=loading_screen mode=v4 now=278391830 playback=0 profile=2 codec=6 (amr-wb) peak_window=286B
+[tx] event=first_anchor mode=v4 now=278391830 playback=0 profile=2 codec=6 (amr-wb) peak_window=848B
+[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, f=force-broadcast, c=cycle v4 audio codec, s=status, i=toggle HUD, v=toggle preview, h=help, q=quit
+[tx] track 1/64: Metric - Breathing Underwater [SN Karaoke] | MP3+G | playing | 0/241307ms
+[tx] net: dg=7 fail=0 bytes=2960 | pkt ann=0 bc=0 ch=0 aud=0 live=0 snap=0 fec=0/0 ovh=0% prof=5/9 ptp=0/0/0 | asset 2048/1737408 bytes prefix, chunks 2/1697 distinct=2 loops=0 src=file sched=386112B lib=64/128 CDG | audq=2 hi=2 ovf=0 gen=2 done=0 lead aud=-1ms live=0ms start_in=992ms head_off=2048 snap_off=64882
+[tx] v4: prof=2 codec=6 (amr-wb) info=1 load=1 anchor=1 audio=0 video=0 repair=0 backfill=2 clock=2 first=278391830/278391830/0 peak=2960B anchor_off=514/514 state=1
+[tx] scan: examined 128/128 .cdg files on disk, playlist 128 paired tracks (64 new)
+[tx] background scan complete: appended 64 paired tracks, playlist 128/128 .cdg on disk (includes periodic or final queue shuffle)
+[tx] event=first_audio mode=v4 now=278392333 playback=0 profile=2 codec=6 (amr-wb) peak_window=62469B
+[tx] event=running mode=v4 now=278392333 playback=0 profile=2 codec=6 (amr-wb) peak_window=64018B
