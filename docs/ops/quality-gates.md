@@ -38,3 +38,12 @@ The repository should eventually enforce:
 - doc checks or review gates for protocol/architecture changes that alter operator-visible behavior
 - artifact retention for test binaries and captured logs
 - no release tag without passing automated tests and updated docs
+
+## `v0.1.0` (proof snapshot)
+
+Tag **`v0.1.0`** is a **first public proof** cut: Windows **sneakernet** packaging is
+built in GitHub Actions (see [`.github/workflows/release-sneakernet.yml`](../../.github/workflows/release-sneakernet.yml))
+and published with **`dashcdg-windows-sneakernet.zip`** plus a separate
+**`dashcdg-sample-tracks-mp3g.zip`** of the in-repo **`cdg/`** test library. Core
+`make test` remains the portable gate for day-to-day development; full Windows builds
+are heavier and run on the release workflow by design.

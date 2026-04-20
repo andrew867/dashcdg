@@ -4,6 +4,14 @@
 
 Single index for **planned but not finished** desktop transport, resilience, TX CD+G, and observability work. Each row links the **normative spec** (what “done” means) and the **test plan** (how we prove it). Implementation order may overlap; dependencies are noted.
 
+## Snapshot: `v0.1.0`
+
+At **`v0.1.0`**, the **desktop Windows** matrix in
+[`desktop-platform-support.md`](desktop-platform-support.md) (GL + GDI + retro +
+sneakernet packaging) matches **what we build and run today**. The rows below are
+still **research / hardening**, not a claim that the tree is broken — they are the
+backlog that keeps “possible” from turning into “mythical”.
+
 ## Workstreams
 
 | Tranche | Spec(s) | Test plan(s) | Notes |

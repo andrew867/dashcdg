@@ -1,7 +1,13 @@
+# Binary media (default: ignore everywhere)
 *.mp3
 *.cdg
+
+# Bundled MP3+G sample library — tracked for TX/player defaults + release zip
+!cdg/
+!cdg/*.mp3
+!cdg/*.cdg
+
 *.o
-/cdg
 /.idea
 *.tar
 build/
@@ -11,4 +17,3 @@ third_party/
 # Optional large upstream clones (see scripts/fetch_opus_portaudio_vendors.sh)
 audio_modules/opus/vendor/
 audio_modules/portaudio/vendor/
-

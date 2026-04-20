@@ -4,6 +4,8 @@ Start here for navigation. The **canonical** desktop Windows story (builds,
 OpenGL vs GDI, retro, USB bundle) lives in **`specs/desktop-platform-support.md`**
 and **`specs/windows-legacy-mingw-build.md`**.
 
+**Why this fork exists** (short, opinionated): [`fork-manifesto.md`](fork-manifesto.md).
+
 ## Architecture
 
 | Document | Contents |
@@ -47,6 +49,7 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`test/cdg-batch-jitter-validation.md`](test/cdg-batch-jitter-validation.md) | CDG batch jitter tests |
 | [`test/desktop-proof-plan.md`](test/desktop-proof-plan.md) | Desktop proof claims |
 | [`test/desktop-impairment-validation.md`](test/desktop-impairment-validation.md) | Impaired network matrix |
+| [`test/sample-media.md`](test/sample-media.md) | **`cdg/`** sample MP3+G library — purpose, release zip, redistribution note |
 | [`test/portability-streaming-validation.md`](test/portability-streaming-validation.md) | Portability / streaming checklist |
 | [`test/bad-network-transport-validation.md`](test/bad-network-transport-validation.md) | v4 transport tests |
 | [`test/long-impairment-soak-validation.md`](test/long-impairment-soak-validation.md) | **Long** impaired soaks, log capture, burst threshold quantification |
@@ -58,7 +61,3 @@ and **`specs/windows-legacy-mingw-build.md`**.
 
 - [`hardware/`](hardware/) — ESP32 / BOM / bringup notes  
 - [`ops/quality-gates.md`](ops/quality-gates.md) — Release criteria  
-
-## Archive
-
-- [`archive/README.md`](archive/README.md) — superseded or research‑only docs (legacy GUI feasibility, old “retro graphics” sketch, etc.)
