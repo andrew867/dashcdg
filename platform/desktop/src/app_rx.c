@@ -2419,19 +2419,11 @@ static int dashcdg_rx_apply_audio_frame_locked(
                     state->audio_decode_failures++;
                     return -1;
                 }
-#if defined(DASHCDG_HAVE_LIBSOXR)
-                if (!dashcdg_pcm_soxr_stream_ensure(ses_sr, out_sr) ||
-                        !dashcdg_pcm_soxr_stream_process_interleaved(
-                                pcm,
-                                (size_t) decoded_frames,
-                                rs_tmp,
-                                out_fc
-                        )) {
-                    free(rs_tmp);
-                    state->audio_decode_failures++;
-                    return -1;
-                }
-#else
+                /*
+                 * The new libsoxr streaming path regressed live RX into "buffer moves, no audible
+                 * audio" on real receivers. Keep the proven overlap SRC here for deterministic
+                 * playout; one-shot/offline conversion can continue to use libsoxr elsewhere.
+                 */
                 dashcdg_pcm_stereo_interleaved_resample_overlap(
                         state->pcm_src_overlap_l,
                         state->pcm_src_overlap_r,
@@ -2447,7 +2439,6 @@ static int dashcdg_rx_apply_audio_frame_locked(
                         wr_r_st,
                         wm
                 );
-#endif
                 qptr = rs_tmp;
                 qfc = out_fc;
             } else {
