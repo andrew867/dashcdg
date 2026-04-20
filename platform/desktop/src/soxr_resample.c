@@ -16,10 +16,9 @@ int dashcdg_soxr_mono_i16_oneshot(
 ) {
     soxr_io_spec_t io;
     soxr_quality_spec_t qs;
-    soxr_error_t cerr;
-    soxr_t r;
-    size_t id_used = 0U;
-    size_t od_total = 0U;
+    soxr_error_t err;
+    size_t idone = 0U;
+    size_t odone = 0U;
 
     if (in == NULL || out == NULL || in_samples == 0U || out_samples == 0U || in_rate == 0U || out_rate == 0U) {
         return -1;
@@ -33,48 +32,30 @@ int dashcdg_soxr_mono_i16_oneshot(
     io.flags = SOXR_NO_DITHER;
     qs = soxr_quality_spec(SOXR_VHQ, SOXR_LINEAR_PHASE);
 
-    r = soxr_create((double) in_rate, (double) out_rate, 1U, &cerr, &io, &qs, NULL);
-    if (r == NULL || cerr != NULL) {
-        if (r != NULL) {
-            soxr_delete(r);
-        }
+    err = soxr_oneshot(
+            (double) in_rate,
+            (double) out_rate,
+            1U,
+            in,
+            in_samples,
+            &idone,
+            out,
+            out_samples,
+            &odone,
+            &io,
+            &qs,
+            NULL
+    );
+    if (err != NULL || idone != in_samples || odone == 0U) {
         return -1;
     }
 
-    while (od_total < out_samples) {
-        size_t id = 0U;
-        size_t od = 0U;
-        const int16_t *pin;
-        size_t ilen;
-        soxr_error_t pe;
+    if (odone < out_samples) {
+        int16_t pad = out[odone - 1U];
 
-        if (id_used < in_samples) {
-            pin = in + id_used;
-            ilen = in_samples - id_used;
-        } else {
-            pin = NULL;
-            ilen = 0U;
+        for (size_t i = odone; i < out_samples; ++i) {
+            out[i] = pad;
         }
-
-        pe = soxr_process(r, pin, ilen, &id, out + od_total, out_samples - od_total, &od);
-        if (pe != NULL) {
-            soxr_delete(r);
-            return -1;
-        }
-
-        id_used += id;
-        od_total += od;
-
-        /* End-of-input flush: no more output available. */
-        if (pin == NULL && od == 0U) {
-            soxr_delete(r);
-            return -1;
-        }
-    }
-
-    soxr_delete(r);
-    if (od_total != out_samples) {
-        return -1;
     }
     return 0;
 }
