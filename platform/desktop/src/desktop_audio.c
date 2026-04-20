@@ -310,6 +310,26 @@ static int dashcdg_pa_callback(
     return paContinue;
 }
 
+/*
+ * On Windows, Pa_GetDefaultOutputDevice() may follow a different host API ordering than the
+ * active playback endpoint users expect (e.g. DirectSound vs WASAPI). Prefer WASAPI's default
+ * output when that API is present so desktop-rx routes to the same "default" device as other apps.
+ */
+static PaDeviceIndex dashcdg_pa_preferred_default_output_device(void) {
+    PaHostApiIndex wasapi_host;
+    const PaHostApiInfo *hai;
+
+    wasapi_host = Pa_HostApiTypeIdToHostApiIndex(paWASAPI);
+    if (wasapi_host < 0) {
+        return Pa_GetDefaultOutputDevice();
+    }
+    hai = Pa_GetHostApiInfo(wasapi_host);
+    if (hai == NULL || hai->defaultOutputDevice < 0) {
+        return Pa_GetDefaultOutputDevice();
+    }
+    return (PaDeviceIndex) hai->defaultOutputDevice;
+}
+
 static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *audio) {
     PaError err;
     int sample_rate;
@@ -349,9 +369,9 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
         return 0;
     }
 
-    out_dev = Pa_GetDefaultOutputDevice();
+    out_dev = dashcdg_pa_preferred_default_output_device();
     if (out_dev == paNoDevice) {
-        dashcdg_pa_log_stream_open_failf("%s", "no default output device (Pa_GetDefaultOutputDevice)");
+        dashcdg_pa_log_stream_open_failf("%s", "no default output device (preferred/WASAPI or Pa_GetDefaultOutputDevice)");
         dashcdg_pa_host_deinit();
         return 0;
     }
@@ -438,6 +458,19 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
         dashcdg_pa_log_stream_open_paerr(err, "Pa_OpenStream");
         dashcdg_pa_host_deinit();
         return 0;
+    }
+
+    if (audio->mode == DASHCDG_AUDIO_MODE_STREAM && dev_info != NULL) {
+        const PaHostApiInfo *hai_api = Pa_GetHostApiInfo(dev_info->hostApi);
+
+        fprintf(
+                stdout,
+                "[desktop-audio] output stream: PaDeviceIndex=%d api=%s device=\"%s\"\n",
+                (int) out_dev,
+                hai_api != NULL ? hai_api->name : "?",
+                dev_info->name != NULL ? dev_info->name : "?"
+        );
+        fflush(stdout);
     }
 
     /*
