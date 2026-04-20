@@ -98,6 +98,8 @@ int dashcdg_qcelp13k_encoder_create(void **out_ctx) {
     c->control.celp_file_format = FORMAT_PACKET;
     trans_fname = NULL;
     tty_option = 0;
+    memset(c->in_workspace, 0, sizeof(c->in_workspace));
+    memset(c->out_speech, 0, sizeof(c->out_speech));
     initialize_encoder_and_decoder(&c->enc_mem, &c->dec_mem, &c->control);
     c->encoder_ready = 1;
     *out_ctx = c;
@@ -152,9 +154,7 @@ int dashcdg_qcelp13k_encode_pcm48_stereo_frame(
             1600U
     );
     c->enc_stream48_samples += 960U;
-    for (i = 0; i < (size_t) (LPCSIZE - FSIZE + LPCOFFSET); ++i) {
-        c->in_workspace[i] = 0.0f;
-    }
+    dashcdg_pcm_mono_narrowband_compand(mono8k, FSIZE, 0);
     for (i = 0; i < FSIZE; ++i) {
         c->in_workspace[(LPCSIZE - FSIZE + LPCOFFSET) + i] = (float) mono8k[i] / 4.0f;
     }
@@ -228,6 +228,24 @@ int dashcdg_qcelp13k_decode_to_pcm48_stereo(
         c->packet.data[j] = (int) w[j];
     }
     decoder(c->out_speech, &c->packet, &c->control, &c->dec_mem);
+    {
+        int16_t mono8k[FSIZE];
+
+        for (j = 0; j < (int) FSIZE; ++j) {
+            float s = c->out_speech[j] * 4.0f;
+
+            if (s > 32767.0f) {
+                s = 32767.0f;
+            } else if (s < -32768.0f) {
+                s = -32768.0f;
+            }
+            mono8k[j] = (int16_t) (s < 0.0f ? s - 0.5f : s + 0.5f);
+        }
+        dashcdg_pcm_mono_narrowband_compand(mono8k, FSIZE, 1);
+        for (j = 0; j < (int) FSIZE; ++j) {
+            c->out_speech[j] = (float) mono8k[j] / 4.0f;
+        }
+    }
     dashcdg_float_mono_8k_to_pcm48_stereo(c, c->out_speech, pcm48_interleaved, 960U * 2U);
     return 960;
 }

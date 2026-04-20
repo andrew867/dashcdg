@@ -59,6 +59,7 @@ int dashcdg_amr_nb_encoder_run(void *opaque, const int16_t *pcm48_960, uint8_t *
             DASHCDG_AMR_NB_RESAMPLE_WORK
     );
     g_amr_nb_enc_stream48_samples += DASHCDG_AMR_NB_PCM48K;
+    dashcdg_pcm_mono_narrowband_compand(pcm8k, DASHCDG_AMR_NB_PCM8K, 0);
     n = Encoder_Interface_Encode(opaque, MR122, pcm8k, out, 0);
     if (n <= 0 || (size_t) n > out_cap) {
         return 0;
@@ -95,6 +96,7 @@ int dashcdg_amr_nb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, i
         memcpy(bits, in, in_len);
         Decoder_Interface_Decode(opaque, bits, pcm8k, 0);
     }
+    dashcdg_pcm_mono_narrowband_compand(pcm8k, DASHCDG_AMR_NB_PCM8K, 1);
     dashcdg_pcm_mono_resample_overlap(
             g_amr_nb_dec_tail8,
             &g_amr_nb_dec_tail8_valid,

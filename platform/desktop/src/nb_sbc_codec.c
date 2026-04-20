@@ -41,7 +41,7 @@ static int dashcdg_sbc_open_common(sbc_t *sbc, int encoder) {
     sbc->blocks = SBC_BLK_4;
     sbc->allocation = SBC_AM_LOUDNESS;
     sbc->bitpool = 24;
-    sbc->endian = SBC_LE;
+    sbc->endian = SBC_BE;
     (void) encoder;
     err = sbc_reinit(sbc, 0L);
     return err == 0 ? 1 : 0;
@@ -121,6 +121,7 @@ int dashcdg_bt_sbc_encode_pcm48_stereo_frame(
             SBC_RESAMPLE_WORK
     );
     c->enc_stream48_samples += SBC_PCM_FRAME48;
+    dashcdg_pcm_mono_narrowband_compand(mono16, SBC_PCM_MONO16, 0);
     codesize = sbc_get_codesize(&c->enc);
     if (codesize == 0U || codesize > sizeof(mono16)) {
         return -1;
@@ -222,6 +223,7 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
     if (pcmo < SBC_PCM_MONO16) {
         return -1;
     }
+    dashcdg_pcm_mono_narrowband_compand(mono16, SBC_PCM_MONO16, 1);
     dashcdg_pcm_mono_resample_overlap(
             c->dec_tail16,
             &c->dec_tail16_valid,

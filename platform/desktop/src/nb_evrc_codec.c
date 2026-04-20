@@ -124,6 +124,7 @@ int dashcdg_evrc_encode_pcm48_stereo_frame(
             EVRC_RESAMPLE_WORK
     );
     c->enc_stream48_samples += PCM48_FRAME;
+    dashcdg_pcm_mono_narrowband_compand(mono8k, (size_t) EVRC_FRAME8K, 0);
     n = evrc_encoder_encode_to_packet(c->enc, mono8k, EVRC_FRAME8K, out, out_max);
     if (n <= 0) {
         return -1;
@@ -175,6 +176,7 @@ int dashcdg_evrc_decode_to_pcm48_stereo(
     if (got < (int) (EVRC_FRAME8K * (int) sizeof(int16_t))) {
         return -1;
     }
+    dashcdg_pcm_mono_narrowband_compand(mono8k, (size_t) EVRC_FRAME8K, 1);
     dashcdg_mono8k_to_pcm48_stereo(c, mono8k, pcm48_interleaved, PCM48_FRAME * 2U);
     return (int) PCM48_FRAME;
 }

@@ -420,6 +420,16 @@ update_tail:
     }
 }
 
+static int16_t dashcdg_pcm_f64_to_i16(double x) {
+    if (x > 32767.0) {
+        return 32767;
+    }
+    if (x < -32768.0) {
+        return -32768;
+    }
+    return (int16_t) (x < 0.0 ? x - 0.5 : x + 0.5);
+}
+
 void dashcdg_pcm_mono_resample_overlap(
         int16_t *tail,
         size_t *tail_valid,
@@ -498,6 +508,41 @@ update_tail:
             tail[i] = in[start + i];
         }
         *tail_valid = ncopy;
+    }
+}
+
+void dashcdg_pcm_mono_narrowband_compand(
+        int16_t *samples,
+        size_t sample_count,
+        int expand
+) {
+    const double mu = 31.0;
+    const double headroom = 0.82;
+    const double denom = log1p(mu);
+    size_t i;
+
+    if (samples == NULL || sample_count == 0U) {
+        return;
+    }
+
+    for (i = 0U; i < sample_count; ++i) {
+        double x = (double) samples[i] / 32768.0;
+        double ax = fabs(x);
+        double y;
+
+        if (ax > 1.0) {
+            ax = 1.0;
+        }
+        if (expand) {
+            y = (pow(1.0 + mu, ax) - 1.0) / mu;
+            y /= headroom;
+        } else {
+            y = log1p(mu * (ax * headroom)) / denom;
+        }
+        if (x < 0.0) {
+            y = -y;
+        }
+        samples[i] = dashcdg_pcm_f64_to_i16(y * 32767.0);
     }
 }
 
