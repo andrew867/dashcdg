@@ -69,7 +69,7 @@ static void test_alias_prone_high_frequency_is_rejected(void) {
     assert(sum_abs_16k <= (int64_t) ((sizeof(out16k) / sizeof(out16k[0])) - 40U) * 8);
 }
 
-static void test_stereo_to_mono_avoids_phase_cancellation_collapse(void) {
+static void test_stereo_to_mono_uses_linear_average(void) {
     int16_t stereo[8];
     int16_t mono[4];
 
@@ -84,8 +84,29 @@ static void test_stereo_to_mono_avoids_phase_cancellation_collapse(void) {
 
     dashcdg_pcm_stereo_interleaved_to_mono48(stereo, 4U, mono);
 
-    assert(abs(mono[0]) >= 6000);
-    assert(abs(mono[1]) >= 7000);
+    assert(mono[0] == 0);
+    assert(mono[1] == 0);
+    assert(mono[2] == 10000);
+    assert(mono[3] == -9000);
+}
+
+static void test_interleaved_to_mono_averages_stereo_input(void) {
+    int16_t stereo[8];
+    int16_t mono[4];
+
+    stereo[0] = 12000;
+    stereo[1] = -12000;
+    stereo[2] = -14000;
+    stereo[3] = 14000;
+    stereo[4] = 10000;
+    stereo[5] = 10000;
+    stereo[6] = -9000;
+    stereo[7] = -9000;
+
+    dashcdg_pcm_interleaved_to_mono(stereo, 4U, 2U, mono);
+
+    assert(mono[0] == 0);
+    assert(mono[1] == 0);
     assert(mono[2] == 10000);
     assert(mono[3] == -9000);
 }
@@ -314,8 +335,9 @@ int main(void) {
     test_sinc_resample_441_to_480_yields_sine_energy();
     test_sinc_resample_preserves_linearity_on_hot_programme();
     test_alias_prone_high_frequency_is_rejected();
-    test_stereo_to_mono_avoids_phase_cancellation_collapse();
+    test_stereo_to_mono_uses_linear_average();
     test_interleaved_to_mono_copies_single_channel_input();
+    test_interleaved_to_mono_averages_stereo_input();
     test_overlap_chunk0_matches_isolated_resample();
     test_overlap_stereo_48k_to_441_chunks_match_long_buffer();
     return 0;
