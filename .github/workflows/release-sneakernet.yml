@@ -1,0 +1,100 @@
+name: Build and Release Sneakernet Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create/update (example: v0.1.0)"
+        required: true
+      release_name:
+        description: "Optional release name (defaults to tag)"
+        required: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    env:
+      ZIP_PATH: build/dist/dashcdg-windows-sneakernet.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+            name="${{ github.event.inputs.release_name }}"
+            if [[ -z "${name}" ]]; then
+              name="${tag}"
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+            name="${GITHUB_REF_NAME}"
+          fi
+          echo "release_tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_name=${name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up MSYS2 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-binutils
+            mingw-w64-i686-gcc
+            mingw-w64-i686-cmake
+            mingw-w64-i686-ninja
+            mingw-w64-i686-binutils
+
+      - name: Fetch vendor sources
+        shell: msys2 {0}
+        run: |
+          bash scripts/fetch_opus_portaudio_vendors.sh
+
+      - name: Build sneakernet dist bundle
+        shell: msys2 {0}
+        run: |
+          DASHCDG_SNEAKENET_CLEAN=1 RUN_P3_DISASM=1 bash scripts/build_windows_sneakernet_dist.sh
+          test -f "${ZIP_PATH}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashcdg-windows-sneakernet
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      - name: Ensure tag exists for manual release
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          tag="${{ steps.release_meta.outputs.release_tag }}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            git tag "${tag}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${tag}"
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.release_tag }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          files: ${{ env.ZIP_PATH }}
+          generate_release_notes: true
