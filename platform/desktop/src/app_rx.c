@@ -1592,6 +1592,7 @@ static int dashcdg_rx_sender_graphics_playback_now_locked(
     uint64_t sender_playback_ms = 0U;
     uint64_t local_audio_playback_ms = 0U;
     uint32_t lag_ms;
+    uint64_t adjusted_sender_ms;
 
     if (out_playback_ms == NULL ||
             !dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
@@ -1608,12 +1609,22 @@ static int dashcdg_rx_sender_graphics_playback_now_locked(
     }
 
     if (sender_playback_ms > (uint64_t) lag_ms) {
-        sender_playback_ms -= (uint64_t) lag_ms;
+        adjusted_sender_ms = sender_playback_ms - (uint64_t) lag_ms;
     } else {
-        sender_playback_ms = 0U;
+        adjusted_sender_ms = 0U;
     }
 
-    *out_playback_ms = sender_playback_ms;
+    /*
+     * Sender-clock graphics are useful for cross-receiver parity, but they must not outrun the
+     * locally heard DAC by whole lyric words. If our sender-lag model still lands ahead of the
+     * DAC clock, clamp to the local audio timeline.
+     */
+    if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms) &&
+            adjusted_sender_ms > local_audio_playback_ms) {
+        adjusted_sender_ms = local_audio_playback_ms;
+    }
+
+    *out_playback_ms = adjusted_sender_ms;
     return 1;
 }
 
@@ -2877,15 +2888,17 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
             state->chunk_size != (view->announce.chunk_size == 0 ? DASHCDG_MAX_ASSET_CHUNK : view->announce.chunk_size);
     int has_network_audio = view->announce.audio_sample_rate > 0 && view->announce.audio_channels > 0 && view->announce.audio_frame_ms > 0;
 
-    if (song_changed || session_changed || asset_changed) {
+    if (song_changed || session_changed) {
         receiver_state_reset(state);
     }
 
-    receiver_state_prepare_asset(
+    if (view->announce.asset_size > 0 && !receiver_state_prepare_asset(
             state,
             view->announce.asset_size,
             view->announce.chunk_size == 0 ? DASHCDG_MAX_ASSET_CHUNK : view->announce.chunk_size
-    );
+    )) {
+        return;
+    }
     strncpy(state->song_id, view->announce.song_id, sizeof(state->song_id) - 1U);
     state->session_start_ms = view->announce.session_start_ms;
     state->announced_audio_sample_rate = view->announce.audio_sample_rate;
@@ -3163,11 +3176,14 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
             view->v4_session_info.audio_channels > 0 &&
             view->v4_session_info.audio_frame_ms > 0;
 
-    if (session_changed || asset_changed || codec_changed) {
+    if (session_changed || codec_changed) {
         receiver_state_reset(state);
     }
 
-    receiver_state_prepare_asset(state, view->v4_session_info.asset_size, DASHCDG_MAX_V4_BACKFILL_CHUNK);
+    if (view->v4_session_info.asset_size > 0 &&
+            !receiver_state_prepare_asset(state, view->v4_session_info.asset_size, DASHCDG_MAX_V4_BACKFILL_CHUNK)) {
+        return;
+    }
 
     /*
      * Re-open decoders + PCM ring only when session_info advertises different audio parameters,
@@ -3975,7 +3991,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 hud_line_a_size,
                 "v4 dg:%" DASHCDG_RX_PRIu64 " parse:%" DASHCDG_RX_PRIu64 " si:%" DASHCDG_RX_PRIu64
                 " a:%" DASHCDG_RX_PRIu64 " v:%" DASHCDG_RX_PRIu64 " live:%" DASHCDG_RX_PRIu64
-                " fec:%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64,
+                " fec:r%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " hot:%u/%u",
                 (unsigned long long) g_receiver.datagrams_received,
                 (unsigned long long) g_receiver.parse_failures,
                 (unsigned long long) g_receiver.v4_session_info_packets,
@@ -3983,7 +3999,9 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 (unsigned long long) g_receiver.v4_video_delta_packets,
                 (unsigned long long) g_receiver.live_packets_applied,
                 (unsigned long long) g_receiver.fec_audio_recovered,
-                (unsigned long long) g_receiver.fec_cdg_recovered
+                (unsigned long long) g_receiver.fec_cdg_recovered,
+                (unsigned int) audio_repairable,
+                (unsigned int) cdg_repairable
         );
         snprintf(
                 hud_line_b,
