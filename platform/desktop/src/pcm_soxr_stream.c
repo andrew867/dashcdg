@@ -64,19 +64,55 @@ int dashcdg_pcm_soxr_stream_process_interleaved(
         int16_t *out,
         size_t out_frames
 ) {
-    size_t idone = 0U;
-    size_t odone = 0U;
-    soxr_error_t e;
+    size_t id_used = 0U;
+    size_t od_total = 0U;
+    unsigned int guard = 0U;
 
     if (g_soxr == NULL || in == NULL || out == NULL || in_frames == 0U || out_frames == 0U) {
         return 0;
     }
 
-    e = soxr_process(g_soxr, in, in_frames, &idone, out, out_frames, &odone);
-    if (e != NULL || idone != in_frames || odone != out_frames) {
-        return 0;
+    /*
+     * libsoxr streaming API often requires multiple soxr_process calls per chunk (partial input
+     * consumption / partial output); the previous single-call + equality check caused systematic
+     * RX decode failures whenever session rate != device rate — no PCM queued, claim_audio_start
+     * wedged on timeline vs ring, CDG drained behind fake audio back-pressure.
+     */
+    while (id_used < in_frames || od_total < out_frames) {
+        size_t id = 0U;
+        size_t od = 0U;
+        const int16_t *pin;
+        size_t ilen;
+        soxr_error_t e;
+
+        if (id_used < in_frames) {
+            pin = in + id_used * 2U;
+            ilen = in_frames - id_used;
+        } else {
+            pin = NULL;
+            ilen = 0U;
+        }
+
+        e = soxr_process(g_soxr, pin, ilen, &id, out + od_total * 2U, out_frames - od_total, &od);
+        if (e != NULL) {
+            return 0;
+        }
+
+        id_used += id;
+        od_total += od;
+
+        if (pin == NULL && od == 0U) {
+            return 0;
+        }
+        if (od_total > out_frames || id_used > in_frames) {
+            return 0;
+        }
+        if (++guard > 100000U) {
+            return 0;
+        }
     }
-    return 1;
+
+    return (id_used == in_frames && od_total == out_frames) ? 1 : 0;
 }
 
 #else /* !DASHCDG_HAVE_LIBSOXR */
