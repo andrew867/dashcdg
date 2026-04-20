@@ -1193,8 +1193,15 @@ size_t dashcdg_desktop_audio_queue_frames(
     }
 
     pthread_mutex_lock(&audio->stream_mutex);
-    if (audio->stream_base_timestamp_ms < 0 && frame_count > 0 && audio->stream_queued_frames == 0) {
+    /*
+     * Re-anchor whenever the stream refills from empty, not just on the very first queue.
+     * Otherwise an underrun or track handoff can keep the old base timestamp alive and make
+     * later RX timing/graphics reason about stale DAC time until the device is reopened.
+     */
+    if (frame_count > 0 && audio->stream_queued_frames == 0) {
         audio->stream_base_timestamp_ms = first_frame_timestamp_ms;
+        audio->stream_played_frames = 0;
+        DASHCDG_ATOMIC_SET(audio->timestamp_ms, -1);
     }
 
     while (written < frame_count && audio->stream_queued_frames < audio->stream_capacity_frames) {

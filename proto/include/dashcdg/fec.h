@@ -7,7 +7,7 @@
 #include "dashcdg/protocol.h"
 
 struct dashcdg_fec_parity_state {
-    uint8_t payload_bytes;
+    uint16_t payload_bytes;
     uint16_t payload_length_xor;
     uint8_t payload_xor[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
 };

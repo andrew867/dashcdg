@@ -2974,23 +2974,24 @@ static int dashcdg_tx_send_v4_repair_window_locked(
     return 1;
 }
 
-static void dashcdg_tx_send_v4_startup_repair_locked(
+static void dashcdg_tx_send_v4_repair_parity_locked(
         uint64_t now_ms,
         uint8_t stream_type,
         uint32_t group_id,
         uint8_t group_size,
         const uint8_t *payload_bytes,
-        uint16_t payload_length
+        uint16_t payload_length,
+        int startup_only
 ) {
     uint8_t copies = 0U;
 
     if (stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
-        copies = g_tx_state.v4_audio_profile_id == DASHCDG_V4_AUDIO_PROFILE_RESILIENCE ? 2U : 1U;
-        if (group_id >= copies) {
+        copies = startup_only ? (g_tx_state.v4_audio_profile_id == DASHCDG_V4_AUDIO_PROFILE_RESILIENCE ? 2U : 1U) : 1U;
+        if (startup_only && group_id >= copies) {
             return;
         }
     } else if (stream_type == DASHCDG_STREAM_TYPE_CDG) {
-        if (group_id >= DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS) {
+        if (startup_only && group_id >= DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS) {
             return;
         }
         copies = 1U;
@@ -3142,13 +3143,14 @@ static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t gro
             g_tx_state.audio_fec_lengths
     );
     if (g_tx_state.transport_v4_enabled) {
-        dashcdg_tx_send_v4_startup_repair_locked(
+        dashcdg_tx_send_v4_repair_parity_locked(
                 now_ms,
                 DASHCDG_STREAM_TYPE_AUDIO,
                 group_id,
                 g_tx_state.audio_fec_group_size,
                 parity.payload_xor,
-                parity.payload_bytes
+                parity.payload_bytes,
+                0
         );
     }
     g_tx_state.audio_fec_group_size = 0U;
@@ -3197,13 +3199,14 @@ static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group
 
     dashcdg_tx_send_fec_parity_locked(now_ms, DASHCDG_STREAM_TYPE_CDG, group_id, group_size, payloads, lengths);
     if (g_tx_state.transport_v4_enabled) {
-        dashcdg_tx_send_v4_startup_repair_locked(
+        dashcdg_tx_send_v4_repair_parity_locked(
                 now_ms,
                 DASHCDG_STREAM_TYPE_CDG,
                 group_id,
                 group_size,
                 parity.payload_xor,
-                parity.payload_bytes
+                parity.payload_bytes,
+                0
         );
     }
 }

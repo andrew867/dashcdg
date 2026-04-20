@@ -20,7 +20,7 @@ int dashcdg_fec_parity_accumulate(
     }
 
     if (payload_length > state->payload_bytes) {
-        state->payload_bytes = (uint8_t) payload_length;
+        state->payload_bytes = payload_length;
     }
     state->payload_length_xor ^= payload_length;
 
@@ -44,7 +44,7 @@ int dashcdg_fec_parity_recover(
     if (parity == NULL || known_payloads == NULL || known_lengths == NULL || recovered_payload == NULL || recovered_length == NULL) {
         return 0;
     }
-    if (parity->payload_bytes == 0) {
+    if (parity->payload_bytes == 0 || parity->payload_bytes > DASHCDG_MAX_FEC_PAYLOAD_BYTES) {
         return 0;
     }
 

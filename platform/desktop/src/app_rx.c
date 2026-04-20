@@ -3479,7 +3479,7 @@ static void handle_v4_backfill_chunk(struct receiver_state *state, const struct 
 }
 
 static void handle_v4_repair_window(struct receiver_state *state, const struct dashcdg_packet_view *view) {
-    struct dashcdg_packet_view parity_view;
+    struct dashcdg_rx_fec_group *group = NULL;
 
     if (state == NULL || view == NULL || view->v4_repair_window.payload_bytes == NULL) {
         return;
@@ -3488,16 +3488,35 @@ static void handle_v4_repair_window(struct receiver_state *state, const struct d
         return;
     }
 
-    memset(&parity_view, 0, sizeof(parity_view));
-    parity_view.fec_parity.stream_type = view->v4_repair_window.stream_type;
-    parity_view.fec_parity.group_size = view->v4_repair_window.group_size;
-    parity_view.fec_parity.payload_bytes = (uint8_t) (
-            view->v4_repair_window.payload_length > 255U ? 255U : view->v4_repair_window.payload_length
-    );
-    parity_view.fec_parity.group_id = view->v4_repair_window.group_id;
-    parity_view.fec_parity.payload_length_xor = view->v4_repair_window.payload_length;
-    parity_view.fec_parity.payload_xor = view->v4_repair_window.payload_bytes;
-    dashcdg_rx_observe_fec_parity_locked(state, &parity_view);
+    if (view->v4_repair_window.group_size <= 1U ||
+            view->v4_repair_window.group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
+            view->v4_repair_window.payload_length == 0U ||
+            view->v4_repair_window.payload_length > DASHCDG_MAX_FEC_PAYLOAD_BYTES) {
+        return;
+    }
+
+    if (view->v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+        group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, view->v4_repair_window.group_id);
+    } else if (view->v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_CDG) {
+        group = dashcdg_rx_get_fec_group_locked(state->cdg_fec_groups, view->v4_repair_window.group_id);
+    }
+    if (group == NULL) {
+        return;
+    }
+
+    if (group->expected_group_size == 0 || group->expected_group_size > view->v4_repair_window.group_size) {
+        group->expected_group_size = view->v4_repair_window.group_size;
+    }
+    group->parity_present = 1;
+    group->parity.payload_bytes = view->v4_repair_window.payload_length;
+    group->parity.payload_length_xor = view->v4_repair_window.payload_length;
+    memcpy(group->parity.payload_xor, view->v4_repair_window.payload_bytes, view->v4_repair_window.payload_length);
+
+    if (view->v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+        dashcdg_rx_try_recover_audio_group_locked(state, group);
+    } else if (view->v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_CDG) {
+        dashcdg_rx_try_recover_cdg_group_locked(state, group);
+    }
 }
 
 static void handle_v4_clock_sync(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
@@ -3912,6 +3931,12 @@ static void *network_thread(void *user_data) {
                     break;
                 case DASHCDG_PACKET_V4_REPAIR_WINDOW:
                     g_receiver.v4_repair_window_packets++;
+                    g_receiver.fec_packets++;
+                    if (view.v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
+                        g_receiver.fec_audio_packets++;
+                    } else if (view.v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_CDG) {
+                        g_receiver.fec_cdg_packets++;
+                    }
                     handle_v4_repair_window(&g_receiver, &view);
                     break;
                 case DASHCDG_PACKET_V4_BACKFILL_CHUNK:
@@ -3940,7 +3965,7 @@ static void *network_thread(void *user_data) {
     return NULL;
 }
 
-static int dashcdg_rx_claim_audio_start_locked(void);
+static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms);
 
 static void dashcdg_rx_start_audio_async(void) {
     struct dashcdg_desktop_audio *audio = NULL;
@@ -3986,7 +4011,7 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
 
         pthread_mutex_lock(&g_receiver.mutex);
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
-        should_start_audio = dashcdg_rx_claim_audio_start_locked();
+        should_start_audio = dashcdg_rx_claim_audio_start_locked(now_ms);
         dashcdg_rx_publish_render_snapshot_locked(now_ms);
         dashcdg_rx_maybe_send_v4_stats_locked(now_ms);
         if (g_headless && (last_status_ms == 0U || now_ms - last_status_ms >= 1000U)) {
@@ -4075,7 +4100,8 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 hud_line_a_size,
                 "v4 dg:%" DASHCDG_RX_PRIu64 " parse:%" DASHCDG_RX_PRIu64 " si:%" DASHCDG_RX_PRIu64
                 " a:%" DASHCDG_RX_PRIu64 " v:%" DASHCDG_RX_PRIu64 " live:%" DASHCDG_RX_PRIu64
-                " fec:r%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " hot:%u/%u",
+                " fec:r%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
+                " p:%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " hot:%u/%u",
                 (unsigned long long) g_receiver.datagrams_received,
                 (unsigned long long) g_receiver.parse_failures,
                 (unsigned long long) g_receiver.v4_session_info_packets,
@@ -4084,6 +4110,8 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 (unsigned long long) g_receiver.live_packets_applied,
                 (unsigned long long) g_receiver.fec_audio_recovered,
                 (unsigned long long) g_receiver.fec_cdg_recovered,
+                (unsigned long long) g_receiver.fec_audio_packets,
+                (unsigned long long) g_receiver.fec_cdg_packets,
                 (unsigned int) audio_repairable,
                 (unsigned int) cdg_repairable
         );
@@ -4155,22 +4183,49 @@ static void dashcdg_rx_fill_hud_lines_locked(
     hud_line_b[hud_line_b_size - 1U] = '\0';
 }
 
-static int dashcdg_rx_claim_audio_start_locked(void) {
+static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms) {
+    uint64_t sender_playback_now_ms = 0U;
+    uint32_t buffered_ms;
+    uint32_t output_latency_ms;
+    int64_t queued_base_timestamp_ms = -1;
+
     if (!g_receiver.network_audio_enabled || g_audio_stream_started || g_audio_start_inflight ||
             g_audio == NULL || !g_receiver.have_clock) {
         return 0;
     }
 
-    if (dashcdg_desktop_audio_buffered_ms(g_audio) < g_receiver.announced_playout_delay_ms / 2U) {
+    buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
+    if (buffered_ms < g_receiver.announced_playout_delay_ms / 2U) {
+        return 0;
+    }
+
+    if (!dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &sender_playback_now_ms)) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&g_audio->stream_mutex);
+    if (g_audio->stream_queued_frames > 0U) {
+        queued_base_timestamp_ms = g_audio->stream_base_timestamp_ms;
+    }
+    pthread_mutex_unlock(&g_audio->stream_mutex);
+
+    output_latency_ms = dashcdg_desktop_audio_output_latency_ms(g_audio);
+    if (output_latency_ms == 0U) {
+        output_latency_ms = g_receiver.announced_playout_delay_ms / 4U;
+        if (output_latency_ms == 0U) {
+            output_latency_ms = 40U;
+        }
+    }
+    if (queued_base_timestamp_ms >= 0 &&
+            sender_playback_now_ms + (uint64_t) output_latency_ms < (uint64_t) queued_base_timestamp_ms) {
         return 0;
     }
 
     /*
-     * Do not gate WinMM/PortAudio start on session_start_ms vs mapped sender time. TX sets
-     * session_start_ms at track load (playback_anchor); late joiners can map sender_now behind
-     * that value until clock observations settle, which wedged audio on XP/WinMM until the next
-     * track bumped session_start. Preroll (buffered_ms >= playout_delay/2) already implies live
-     * compressed audio is arriving and decoded PCM is queued.
+     * Start from a shared sender timeline, not merely "the ring looks full". Without this gate,
+     * two receivers with different local queue-fill speed can both satisfy preroll and begin
+     * audible playout at different moments. The first queued frame's playback_ms is the schedule;
+     * output latency is the only local allowance.
      */
     g_audio_stream_started = 1;
     return 1;
