@@ -407,6 +407,19 @@ static void test_interleaved_to_mono_copies_single_channel_input(void) {
     }
 }
 
+static void test_gain_q15_matches_nb_headroom_constant(void) {
+    int16_t mono[3] = { 10000, -10000, 32767 };
+    int32_t exp_pos = (int32_t) ((10000LL * (int64_t) DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15) >> 15);
+    int32_t exp_neg = (int32_t) ((-10000LL * (int64_t) DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15) >> 15);
+    int32_t exp_peak = (32767LL * (int64_t) DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15) >> 15;
+
+    dashcdg_pcm_interleaved_s16_gain_q15_inplace(mono, 3U, 1U, DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15);
+
+    assert(mono[0] == exp_pos);
+    assert(mono[1] == exp_neg);
+    assert(mono[2] == (int16_t) exp_peak);
+}
+
 int main(void) {
     test_dc_is_preserved_on_exact_narrowband_decimation();
     test_dc_preserved_on_8k_to_48k_upsample();
@@ -415,6 +428,7 @@ int main(void) {
     test_alias_prone_high_frequency_is_rejected();
     test_stereo_to_mono_uses_linear_average();
     test_interleaved_to_mono_copies_single_channel_input();
+    test_gain_q15_matches_nb_headroom_constant();
     test_interleaved_to_mono_averages_stereo_input();
     test_overlap_chunk0_matches_isolated_resample();
     test_mono_overlap_exact_ratio_48k_to_8k_matches_contiguous();

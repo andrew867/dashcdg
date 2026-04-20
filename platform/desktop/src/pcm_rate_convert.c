@@ -101,6 +101,34 @@ void dashcdg_pcm_interleaved_s16_soft_limit_inplace(int16_t *pcm, size_t frame_c
     }
 }
 
+void dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+        int16_t *pcm,
+        size_t frame_count,
+        unsigned int channels,
+        int32_t gain_q15
+) {
+    size_t i;
+    size_t n;
+
+    if (pcm == NULL || frame_count == 0U || channels == 0U || gain_q15 <= 0) {
+        return;
+    }
+    if (gain_q15 > 32767) {
+        gain_q15 = 32767;
+    }
+    n = frame_count * (size_t) channels;
+    for (i = 0U; i < n; ++i) {
+        int32_t y = ((int32_t) pcm[i] * gain_q15) >> 15;
+
+        if (y > 32767) {
+            y = 32767;
+        } else if (y < -32768) {
+            y = -32768;
+        }
+        pcm[i] = (int16_t) y;
+    }
+}
+
 void dashcdg_pcm_hp80_biquad_reset(struct dashcdg_pcm_hp80_biquad_state *st) {
     if (st != NULL) {
         st->x1 = 0.0f;

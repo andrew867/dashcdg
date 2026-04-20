@@ -3640,7 +3640,39 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 }
             }
 
+            if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
+                /*
+                 * Speech-oriented codecs overload on full-scale music/drums; ~3 dB headroom keeps peaks
+                 * away from quantizer / clip behavior without touching Opus or CDG-only paths.
+                 */
+                if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
+                        current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
+                        current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                    dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                            pcm,
+                            copy_frames,
+                            2U,
+                            DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                    );
+                } else {
+                    dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                            mono_pcm,
+                            copy_frames,
+                            1U,
+                            DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                    );
+                }
+            }
+
             if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+                if (copy_frames > 0U) {
+                    dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                            pcm,
+                            copy_frames,
+                            (unsigned int) DASHCDG_AUDIO_CHANNELS,
+                            DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                    );
+                }
                 encoded_length = dashcdg_opus_encode_frame(
                         &encoder,
                         pcm,

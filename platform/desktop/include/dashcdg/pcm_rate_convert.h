@@ -38,6 +38,19 @@ int16_t dashcdg_pcm_float_soft_limit_to_i16(float x);
 
 void dashcdg_pcm_interleaved_s16_soft_limit_inplace(int16_t *pcm, size_t frame_count, unsigned int channels);
 
+/*
+ * Fixed Q15 gain in [1, 32767] applied to interleaved samples: out = clamp(s * gain_q15 / 32768).
+ * DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15 is ~-3 dB (0.707) for speech-codec headroom on hot music.
+ */
+#define DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15 23170
+
+void dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+        int16_t *pcm,
+        size_t frame_count,
+        unsigned int channels,
+        int32_t gain_q15
+);
+
 /* RX streaming SRC: prepend this many past input samples so Lanczos sees continuity across frames. */
 #define DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES 96
 

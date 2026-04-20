@@ -250,13 +250,6 @@ struct receiver_state {
     int16_t pcm_src_overlap_r[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
     size_t pcm_src_overlap_valid;
     uint64_t pcm_src_stream_in_samples;
-    /*
-     * Per-session 80 Hz HP state for narrowband codec playback (see pcm_rate_convert); reset when the
-     * wire codec changes or audio is reconfigured.
-     */
-    uint8_t rx_nb_hp_codec_tracked;
-    struct dashcdg_pcm_hp80_biquad_state rx_nb_hp_l;
-    struct dashcdg_pcm_hp80_biquad_state rx_nb_hp_r;
 };
 
 static struct receiver_state g_receiver;
@@ -947,9 +940,6 @@ static void receiver_state_reset(struct receiver_state *state) {
     memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
-    state->rx_nb_hp_codec_tracked = 0;
-    dashcdg_pcm_hp80_biquad_reset(&state->rx_nb_hp_l);
-    dashcdg_pcm_hp80_biquad_reset(&state->rx_nb_hp_r);
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -2500,22 +2490,6 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return -1;
     }
 
-    if (dashcdg_v4_audio_codec_is_narrowband(frame->codec_id)) {
-        if (state->rx_nb_hp_codec_tracked != frame->codec_id) {
-            dashcdg_pcm_hp80_biquad_reset(&state->rx_nb_hp_l);
-            dashcdg_pcm_hp80_biquad_reset(&state->rx_nb_hp_r);
-            state->rx_nb_hp_codec_tracked = frame->codec_id;
-        }
-        dashcdg_pcm_hp80_process_stereo_interleaved(
-                &state->rx_nb_hp_l,
-                &state->rx_nb_hp_r,
-                pcm,
-                (size_t) decoded_frames
-        );
-    } else {
-        state->rx_nb_hp_codec_tracked = 0;
-    }
-
     {
         uint32_t ses_sr;
         uint32_t out_sr;
@@ -3119,6 +3093,16 @@ static void dashcdg_rx_configure_audio_locked(
         return;
     }
 
+    /*
+     * Cold reopen after the stream was torn down (!rx_audio_applied_valid) must not reuse an old
+     * playback anchor: sender_playback_now vs queued frame playback_ms wedges claim_audio_start and
+     * startup sounds wrong until session_start/track change clears bases via receiver_state_reset.
+     */
+    if (!state->rx_audio_applied_valid) {
+        state->playback_base_ms = 0U;
+        state->playback_base_sender_ms = 0U;
+    }
+
     if (g_audio == NULL) {
         g_audio = dashcdg_desktop_audio_new();
     }
@@ -3132,9 +3116,6 @@ static void dashcdg_rx_configure_audio_locked(
     dashcdg_desktop_audio_stop_stream(g_audio);
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
-    state->rx_nb_hp_codec_tracked = 0;
-    dashcdg_pcm_hp80_biquad_reset(&state->rx_nb_hp_l);
-    dashcdg_pcm_hp80_biquad_reset(&state->rx_nb_hp_r);
     if (!dashcdg_desktop_audio_init_stream(
                 g_audio,
                 sample_rate,
@@ -3281,11 +3262,29 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
     dashcdg_cdg_state_init(&state->live_state);
     state->v4_bridge_cdg_valid = 0;
     state->live_packets_applied = 0U;
+    /*
+     * dashcdg_rx_seed_live_state_before_first_wire_delta_locked returns early once cdg_snapshots_applied
+     * > 0. After unpause we just wiped live_state — without copying the offline reader here the raster
+     * stays empty until a new snapshot or heavy live delta burst (track change “fixes” it).
+     */
+    if (state->reader_ready) {
+        int playback_ms = dashcdg_rx_playback_ms_for_graphics_locked(state, dashcdg_clock_now_ms());
+
+        if (playback_ms >= 0) {
+            dashcdg_cdg_reader_seek(&state->reader, dashcdg_ms_to_packet_count((uint64_t) playback_ms));
+            state->live_state = state->reader.state;
+        }
+    }
     state->last_audio_jitter_apply_local_ms = 0U;
     state->last_cdg_jitter_apply_local_ms = 0U;
+    /*
+     * Warm handoff: DAC/device stay open (rx_audio_applied_valid still true). Same short skip-hold as
+     * codec hot-swap — the full 1.5 s cold gate starves refill and HUD shows ~one frame (~20 ms) until
+     * random reconfigure.
+     */
     state->audio_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
             dashcdg_clock_now_ms(),
-            dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 0)
+            dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 1)
     );
 
     if (g_audio != NULL) {
@@ -3317,6 +3316,13 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
                 (unsigned int) state->announced_audio_frame_ms
         );
     }
+
+    /*
+     * Drop stale sender playback anchor so the next chunk/clock_sync re-bootstrap matches queued
+     * playback_ms — same class of wedge as idle-RX-then-TX (claim_audio_start / tiny ring).
+     */
+    state->playback_base_ms = 0U;
+    state->playback_base_sender_ms = 0U;
 }
 
 static void handle_v4_session_info(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
@@ -3416,6 +3422,8 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         g_audio_stream_started = 0;
         g_audio_start_inflight = 0;
         state->rx_audio_applied_valid = 0;
+        state->playback_base_ms = 0U;
+        state->playback_base_sender_ms = 0U;
     }
 }
 
