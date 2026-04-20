@@ -72,4 +72,19 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
         size_t work_cap
 );
 
+void dashcdg_pcm_mono_resample_overlap(
+        int16_t *tail,
+        size_t *tail_valid,
+        uint64_t stream_in_samples_before_chunk,
+        const int16_t *in,
+        size_t in_frames,
+        uint32_t in_rate,
+        int16_t *out,
+        size_t out_frames,
+        uint32_t out_rate,
+        int16_t *work_in,
+        int16_t *work_out,
+        size_t work_cap
+);
+
 #endif

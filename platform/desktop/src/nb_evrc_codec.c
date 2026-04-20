@@ -9,12 +9,45 @@
 
 #define EVRC_FRAME8K 160
 #define PCM48_FRAME 960
+#define EVRC_RESAMPLE_WORK 1600
 
-static void dashcdg_mono8k_to_pcm48_stereo(const int16_t *mono8k, int16_t *pcm48, size_t stereo_samples) {
+struct dashcdg_evrc_codec {
+    void *enc;
+    void *dec;
+    int16_t enc_tail48[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t enc_tail48_valid;
+    uint64_t enc_stream48_samples;
+    int16_t dec_tail8[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t dec_tail8_valid;
+    uint64_t dec_stream8_samples;
+    int16_t work_in[EVRC_RESAMPLE_WORK];
+    int16_t work_out[EVRC_RESAMPLE_WORK];
+};
+
+static void dashcdg_mono8k_to_pcm48_stereo(
+        struct dashcdg_evrc_codec *c,
+        const int16_t *mono8k,
+        int16_t *pcm48,
+        size_t stereo_samples
+) {
     int16_t mono48[PCM48_FRAME];
     size_t i;
 
-    dashcdg_pcm_mono_resample_cubic(mono8k, (size_t) EVRC_FRAME8K, 8000U, mono48, PCM48_FRAME, 48000U);
+    dashcdg_pcm_mono_resample_overlap(
+            c->dec_tail8,
+            &c->dec_tail8_valid,
+            c->dec_stream8_samples,
+            mono8k,
+            (size_t) EVRC_FRAME8K,
+            8000U,
+            mono48,
+            PCM48_FRAME,
+            48000U,
+            c->work_in,
+            c->work_out,
+            EVRC_RESAMPLE_WORK
+    );
+    c->dec_stream8_samples += EVRC_FRAME8K;
     for (i = 0U; i < PCM48_FRAME; ++i) {
         size_t ix = i * 2U;
 
@@ -25,22 +58,35 @@ static void dashcdg_mono8k_to_pcm48_stereo(const int16_t *mono8k, int16_t *pcm48
 }
 
 int dashcdg_evrc_encoder_create(void **out_ctx) {
-    void *enc;
+    struct dashcdg_evrc_codec *c;
 
     if (out_ctx == NULL) {
         return 0;
     }
-    enc = evrc_encoder_init(4, 4, 0);
-    if (enc == NULL) {
+    c = (struct dashcdg_evrc_codec *) calloc(1, sizeof(*c));
+    if (c == NULL) {
         return 0;
     }
-    *out_ctx = enc;
+    c->enc = evrc_encoder_init(4, 4, 0);
+    if (c->enc == NULL) {
+        free(c);
+        return 0;
+    }
+    *out_ctx = c;
     return 1;
 }
 
 void dashcdg_evrc_encoder_destroy(void *ctx) {
-    if (ctx != NULL) {
-        evrc_encoder_uninit(ctx);
+    struct dashcdg_evrc_codec *c = (struct dashcdg_evrc_codec *) ctx;
+
+    if (c != NULL) {
+        if (c->enc != NULL) {
+            evrc_encoder_uninit(c->enc);
+        }
+        if (c->dec != NULL) {
+            evrc_decoder_uninit(c->dec);
+        }
+        free(c);
     }
 }
 
@@ -51,19 +97,34 @@ int dashcdg_evrc_encode_pcm48_stereo_frame(
         uint8_t *out,
         size_t out_max
 ) {
+    struct dashcdg_evrc_codec *c = (struct dashcdg_evrc_codec *) ctx;
     int16_t mono48[PCM48_FRAME];
     int16_t mono8k[EVRC_FRAME8K];
     int n;
 
-    if (ctx == NULL || pcm48_interleaved == NULL || out == NULL || out_max == 0U) {
+    if (c == NULL || c->enc == NULL || pcm48_interleaved == NULL || out == NULL || out_max == 0U) {
         return -1;
     }
     if (pcm_samples < PCM48_FRAME * 2U) {
         return -1;
     }
     dashcdg_pcm_stereo_interleaved_to_mono48(pcm48_interleaved, PCM48_FRAME, mono48);
-    dashcdg_pcm_mono_resample_cubic(mono48, PCM48_FRAME, 48000U, mono8k, (size_t) EVRC_FRAME8K, 8000U);
-    n = evrc_encoder_encode_to_packet(ctx, mono8k, EVRC_FRAME8K, out, out_max);
+    dashcdg_pcm_mono_resample_overlap(
+            c->enc_tail48,
+            &c->enc_tail48_valid,
+            c->enc_stream48_samples,
+            mono48,
+            PCM48_FRAME,
+            48000U,
+            mono8k,
+            (size_t) EVRC_FRAME8K,
+            8000U,
+            c->work_in,
+            c->work_out,
+            EVRC_RESAMPLE_WORK
+    );
+    c->enc_stream48_samples += PCM48_FRAME;
+    n = evrc_encoder_encode_to_packet(c->enc, mono8k, EVRC_FRAME8K, out, out_max);
     if (n <= 0) {
         return -1;
     }
@@ -71,23 +132,26 @@ int dashcdg_evrc_encode_pcm48_stereo_frame(
 }
 
 int dashcdg_evrc_decoder_create(void **out_ctx) {
-    void *dec;
+    struct dashcdg_evrc_codec *c;
 
     if (out_ctx == NULL) {
         return 0;
     }
-    dec = evrc_decoder_init();
-    if (dec == NULL) {
+    c = (struct dashcdg_evrc_codec *) calloc(1, sizeof(*c));
+    if (c == NULL) {
         return 0;
     }
-    *out_ctx = dec;
+    c->dec = evrc_decoder_init();
+    if (c->dec == NULL) {
+        free(c);
+        return 0;
+    }
+    *out_ctx = c;
     return 1;
 }
 
 void dashcdg_evrc_decoder_destroy(void *ctx) {
-    if (ctx != NULL) {
-        evrc_decoder_uninit(ctx);
-    }
+    dashcdg_evrc_encoder_destroy(ctx);
 }
 
 int dashcdg_evrc_decode_to_pcm48_stereo(
@@ -97,19 +161,20 @@ int dashcdg_evrc_decode_to_pcm48_stereo(
         int16_t *pcm48_interleaved,
         size_t pcm_samples_max
 ) {
+    struct dashcdg_evrc_codec *c = (struct dashcdg_evrc_codec *) ctx;
     int16_t mono8k[EVRC_FRAME8K];
     int got;
 
-    if (ctx == NULL || in == NULL || in_len == 0U || pcm48_interleaved == NULL) {
+    if (c == NULL || c->dec == NULL || in == NULL || in_len == 0U || pcm48_interleaved == NULL) {
         return -1;
     }
     if (pcm_samples_max < PCM48_FRAME * 2U) {
         return -1;
     }
-    got = evrc_decoder_decode_from_packet(ctx, in, in_len, mono8k, EVRC_FRAME8K);
+    got = evrc_decoder_decode_from_packet(c->dec, in, in_len, mono8k, EVRC_FRAME8K);
     if (got < (int) (EVRC_FRAME8K * (int) sizeof(int16_t))) {
         return -1;
     }
-    dashcdg_mono8k_to_pcm48_stereo(mono8k, pcm48_interleaved, PCM48_FRAME * 2U);
+    dashcdg_mono8k_to_pcm48_stereo(c, mono8k, pcm48_interleaved, PCM48_FRAME * 2U);
     return (int) PCM48_FRAME;
 }

@@ -22,9 +22,22 @@ struct dashcdg_qcelp13k_codec {
     float out_speech[FSIZE];
     int encoder_ready;
     int decoder_ready;
+    int16_t enc_tail48[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t enc_tail48_valid;
+    uint64_t enc_stream48_samples;
+    int16_t dec_tail8[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t dec_tail8_valid;
+    uint64_t dec_stream8_samples;
+    int16_t work_in[1600];
+    int16_t work_out[1600];
 };
 
-static void dashcdg_float_mono_8k_to_pcm48_stereo(const float *mono_float, int16_t *pcm48_stereo, size_t stereo_samples) {
+static void dashcdg_float_mono_8k_to_pcm48_stereo(
+        struct dashcdg_qcelp13k_codec *c,
+        const float *mono_float,
+        int16_t *pcm48_stereo,
+        size_t stereo_samples
+) {
     int16_t mono8k[FSIZE];
     int16_t mono48[960];
     size_t i;
@@ -39,7 +52,21 @@ static void dashcdg_float_mono_8k_to_pcm48_stereo(const float *mono_float, int16
         }
         mono8k[i] = (int16_t) (s < 0.0f ? s - 0.5f : s + 0.5f);
     }
-    dashcdg_pcm_mono_resample_cubic(mono8k, FSIZE, 8000U, mono48, 960U, 48000U);
+    dashcdg_pcm_mono_resample_overlap(
+            c->dec_tail8,
+            &c->dec_tail8_valid,
+            c->dec_stream8_samples,
+            mono8k,
+            FSIZE,
+            8000U,
+            mono48,
+            960U,
+            48000U,
+            c->work_in,
+            c->work_out,
+            1600U
+    );
+    c->dec_stream8_samples += FSIZE;
     for (i = 0U; i < 960U; ++i) {
         pcm48_stereo[i * 2U] = mono48[i];
         pcm48_stereo[i * 2U + 1U] = mono48[i];
@@ -110,7 +137,21 @@ int dashcdg_qcelp13k_encode_pcm48_stereo_frame(
         return -1;
     }
     dashcdg_pcm_stereo_interleaved_to_mono48(pcm48_interleaved, 960U, mono48);
-    dashcdg_pcm_mono_resample_cubic(mono48, 960U, 48000U, mono8k, FSIZE, 8000U);
+    dashcdg_pcm_mono_resample_overlap(
+            c->enc_tail48,
+            &c->enc_tail48_valid,
+            c->enc_stream48_samples,
+            mono48,
+            960U,
+            48000U,
+            mono8k,
+            FSIZE,
+            8000U,
+            c->work_in,
+            c->work_out,
+            1600U
+    );
+    c->enc_stream48_samples += 960U;
     for (i = 0; i < (size_t) (LPCSIZE - FSIZE + LPCOFFSET); ++i) {
         c->in_workspace[i] = 0.0f;
     }
@@ -187,7 +228,7 @@ int dashcdg_qcelp13k_decode_to_pcm48_stereo(
         c->packet.data[j] = (int) w[j];
     }
     decoder(c->out_speech, &c->packet, &c->control, &c->dec_mem);
-    dashcdg_float_mono_8k_to_pcm48_stereo(c->out_speech, pcm48_interleaved, 960U * 2U);
+    dashcdg_float_mono_8k_to_pcm48_stereo(c, c->out_speech, pcm48_interleaved, 960U * 2U);
     return 960;
 }
 

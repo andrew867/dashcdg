@@ -10,12 +10,21 @@
 
 #define SBC_PCM_FRAME48 960U
 #define SBC_PCM_MONO16 320U
+#define SBC_RESAMPLE_WORK 1600U
 
 struct dashcdg_bt_sbc_codec {
     sbc_t enc;
     sbc_t dec;
     int enc_ok;
     int dec_ok;
+    int16_t enc_tail48[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t enc_tail48_valid;
+    uint64_t enc_stream48_samples;
+    int16_t dec_tail16[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+    size_t dec_tail16_valid;
+    uint64_t dec_stream16_samples;
+    int16_t work_in[SBC_RESAMPLE_WORK];
+    int16_t work_out[SBC_RESAMPLE_WORK];
 };
 
 static int dashcdg_sbc_open_common(sbc_t *sbc, int encoder) {
@@ -97,14 +106,21 @@ int dashcdg_bt_sbc_encode_pcm48_stereo_frame(
         return -1;
     }
     dashcdg_pcm_stereo_interleaved_to_mono48(pcm48_interleaved, SBC_PCM_FRAME48, mono48);
-    dashcdg_pcm_mono_resample_cubic(
+    dashcdg_pcm_mono_resample_overlap(
+            c->enc_tail48,
+            &c->enc_tail48_valid,
+            c->enc_stream48_samples,
             mono48,
             SBC_PCM_FRAME48,
             48000U,
             mono16,
             SBC_PCM_MONO16,
-            16000U
+            16000U,
+            c->work_in,
+            c->work_out,
+            SBC_RESAMPLE_WORK
     );
+    c->enc_stream48_samples += SBC_PCM_FRAME48;
     codesize = sbc_get_codesize(&c->enc);
     if (codesize == 0U || codesize > sizeof(mono16)) {
         return -1;
@@ -206,14 +222,21 @@ int dashcdg_bt_sbc_decode_to_pcm48_stereo(
     if (pcmo < SBC_PCM_MONO16) {
         return -1;
     }
-    dashcdg_pcm_mono_resample_cubic(
+    dashcdg_pcm_mono_resample_overlap(
+            c->dec_tail16,
+            &c->dec_tail16_valid,
+            c->dec_stream16_samples,
             mono16,
             SBC_PCM_MONO16,
             16000U,
             mono48,
             SBC_PCM_FRAME48,
-            48000U
+            48000U,
+            c->work_in,
+            c->work_out,
+            SBC_RESAMPLE_WORK
     );
+    c->dec_stream16_samples += SBC_PCM_MONO16;
     {
         size_t i;
 

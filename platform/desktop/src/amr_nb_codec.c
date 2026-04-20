@@ -11,11 +11,23 @@
 
 #define DASHCDG_AMR_NB_PCM8K 160
 #define DASHCDG_AMR_NB_PCM48K 960
+#define DASHCDG_AMR_NB_RESAMPLE_WORK 1600
+
+static int16_t g_amr_nb_enc_tail48[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+static size_t g_amr_nb_enc_tail48_valid;
+static uint64_t g_amr_nb_enc_stream48_samples;
+static int16_t g_amr_nb_dec_tail8[DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES];
+static size_t g_amr_nb_dec_tail8_valid;
+static uint64_t g_amr_nb_dec_stream8_samples;
+static int16_t g_amr_nb_work_in[DASHCDG_AMR_NB_RESAMPLE_WORK];
+static int16_t g_amr_nb_work_out[DASHCDG_AMR_NB_RESAMPLE_WORK];
 
 void dashcdg_amr_nb_encoder_create(void **opaque) {
     if (opaque == NULL) {
         return;
     }
+    g_amr_nb_enc_tail48_valid = 0U;
+    g_amr_nb_enc_stream48_samples = 0U;
     *opaque = Encoder_Interface_init(0);
 }
 
@@ -32,14 +44,21 @@ int dashcdg_amr_nb_encoder_run(void *opaque, const int16_t *pcm48_960, uint8_t *
     if (opaque == NULL || pcm48_960 == NULL || out == NULL || out_cap < 32U) {
         return 0;
     }
-    dashcdg_pcm_mono_resample_cubic(
+    dashcdg_pcm_mono_resample_overlap(
+            g_amr_nb_enc_tail48,
+            &g_amr_nb_enc_tail48_valid,
+            g_amr_nb_enc_stream48_samples,
             pcm48_960,
             DASHCDG_AMR_NB_PCM48K,
             48000U,
             pcm8k,
             DASHCDG_AMR_NB_PCM8K,
-            8000U
+            8000U,
+            g_amr_nb_work_in,
+            g_amr_nb_work_out,
+            DASHCDG_AMR_NB_RESAMPLE_WORK
     );
+    g_amr_nb_enc_stream48_samples += DASHCDG_AMR_NB_PCM48K;
     n = Encoder_Interface_Encode(opaque, MR122, pcm8k, out, 0);
     if (n <= 0 || (size_t) n > out_cap) {
         return 0;
@@ -51,6 +70,8 @@ void dashcdg_amr_nb_decoder_create(void **opaque) {
     if (opaque == NULL) {
         return;
     }
+    g_amr_nb_dec_tail8_valid = 0U;
+    g_amr_nb_dec_stream8_samples = 0U;
     *opaque = Decoder_Interface_init();
 }
 
@@ -74,13 +95,20 @@ int dashcdg_amr_nb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, i
         memcpy(bits, in, in_len);
         Decoder_Interface_Decode(opaque, bits, pcm8k, 0);
     }
-    dashcdg_pcm_mono_resample_cubic(
+    dashcdg_pcm_mono_resample_overlap(
+            g_amr_nb_dec_tail8,
+            &g_amr_nb_dec_tail8_valid,
+            g_amr_nb_dec_stream8_samples,
             pcm8k,
             DASHCDG_AMR_NB_PCM8K,
             8000U,
             pcm48_960,
             DASHCDG_AMR_NB_PCM48K,
-            48000U
+            48000U,
+            g_amr_nb_work_in,
+            g_amr_nb_work_out,
+            DASHCDG_AMR_NB_RESAMPLE_WORK
     );
+    g_amr_nb_dec_stream8_samples += DASHCDG_AMR_NB_PCM8K;
     return (int) DASHCDG_AMR_NB_PCM48K;
 }

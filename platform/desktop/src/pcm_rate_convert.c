@@ -420,6 +420,87 @@ update_tail:
     }
 }
 
+void dashcdg_pcm_mono_resample_overlap(
+        int16_t *tail,
+        size_t *tail_valid,
+        uint64_t stream_in_samples_before_chunk,
+        const int16_t *in,
+        size_t in_frames,
+        uint32_t in_rate,
+        int16_t *out,
+        size_t out_frames,
+        uint32_t out_rate,
+        int16_t *work_in,
+        int16_t *work_out,
+        size_t work_cap
+) {
+    size_t prepend;
+    size_t ext_in;
+    size_t ext_out;
+    size_t skip_out;
+    size_t outs_at_chunk_start;
+    size_t outs_at_ext_base;
+    uint64_t ext_base_in;
+    size_t i;
+    size_t overlap_max = (size_t) DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES;
+
+    if (tail == NULL || tail_valid == NULL || in == NULL || out == NULL || work_in == NULL || work_out == NULL ||
+            in_frames == 0U || out_frames == 0U || in_rate == 0U || out_rate == 0U) {
+        return;
+    }
+
+    if (*tail_valid > overlap_max) {
+        *tail_valid = 0U;
+    }
+
+    prepend = *tail_valid;
+
+    if (in_rate == out_rate && in_frames == out_frames) {
+        if (out != in) {
+            memcpy(out, in, in_frames * sizeof(int16_t));
+        }
+        goto update_tail;
+    }
+
+    ext_in = prepend + in_frames;
+    ext_out = (ext_in * (size_t) out_rate + (size_t) in_rate - 1U) / (size_t) in_rate;
+
+    outs_at_chunk_start = dashcdg_pcm_output_frames_for_stream_position(stream_in_samples_before_chunk, in_rate, out_rate);
+    ext_base_in = stream_in_samples_before_chunk > prepend ? stream_in_samples_before_chunk - prepend : 0ULL;
+    outs_at_ext_base = dashcdg_pcm_output_frames_for_stream_position(ext_base_in, in_rate, out_rate);
+    skip_out = outs_at_chunk_start > outs_at_ext_base ? outs_at_chunk_start - outs_at_ext_base : 0U;
+
+    if (work_cap < ext_in || work_cap < ext_out || skip_out + out_frames > ext_out) {
+        memset(out, 0, out_frames * sizeof(int16_t));
+        goto update_tail;
+    }
+
+    memcpy(work_in, tail, prepend * sizeof(int16_t));
+    memcpy(work_in + prepend, in, in_frames * sizeof(int16_t));
+
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    if (dashcdg_soxr_mono_i16_oneshot(work_in, ext_in, in_rate, work_out, ext_out, out_rate) != 0) {
+        memset(out, 0, out_frames * sizeof(int16_t));
+        goto update_tail;
+    }
+#else
+    dashcdg_pcm_mono_resample_cubic(work_in, ext_in, in_rate, work_out, ext_out, out_rate);
+#endif
+
+    memcpy(out, work_out + skip_out, out_frames * sizeof(int16_t));
+
+update_tail:
+    {
+        size_t start = in_frames >= overlap_max ? in_frames - overlap_max : 0U;
+        size_t ncopy = in_frames >= overlap_max ? overlap_max : in_frames;
+
+        for (i = 0U; i < ncopy; ++i) {
+            tail[i] = in[start + i];
+        }
+        *tail_valid = ncopy;
+    }
+}
+
 void dashcdg_pcm_interleaved_to_mono(
         const int16_t *pcm_interleaved,
         size_t frame_count,
