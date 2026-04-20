@@ -3125,9 +3125,9 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
 }
 
 /*
- * After unpause, rebuild the live A/V pipeline like a lightweight track change: clear jitter,
- * reset CDG accumulation, and re-open the output device. Fixes wedged audio where only a full
- * song change used to recover.
+ * After unpause, rebuild the live A/V pipeline like a lightweight discontinuity: clear jitter and
+ * stale buffered media, but keep the host device open. Reopening PortAudio/waveOut on every
+ * pause/unpause needlessly churns the clock and wedges legacy paths.
  */
 static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state) {
     if (state == NULL || !state->network_audio_enabled) {
@@ -3143,17 +3143,49 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
     dashcdg_cdg_state_init(&state->live_state);
     state->v4_bridge_cdg_valid = 0;
     state->live_packets_applied = 0U;
-
-    dashcdg_rx_configure_audio_locked(
-            state,
+    state->last_audio_jitter_apply_local_ms = 0U;
+    state->last_cdg_jitter_apply_local_ms = 0U;
+    state->audio_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
             dashcdg_clock_now_ms(),
-            state->announced_audio_sample_rate,
-            state->announced_audio_channels,
-            state->announced_audio_frame_ms,
-            state->announced_playout_delay_ms,
-            state->announced_audio_profile_id,
-            state->announced_audio_codec_id
+            dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms)
     );
+
+    if (g_audio != NULL) {
+        dashcdg_desktop_audio_flush_stream_ring(g_audio);
+        dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+        g_audio_stream_started = dashcdg_desktop_audio_output_device_ready(g_audio) ? 1 : 0;
+        g_audio_start_inflight = 0;
+    }
+
+    dashcdg_opus_decoder_free(&g_opus_decoder);
+    dashcdg_rx_amr_decoders_release();
+    if (state->announced_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+#if !defined(DASHCDG_DESKTOP_NO_OPUS)
+        dashcdg_opus_decoder_init(
+                &g_opus_decoder,
+                state->announced_audio_sample_rate,
+                state->announced_audio_channels,
+                state->announced_audio_frame_ms
+        );
+#endif
+    } else if (state->announced_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+        dashcdg_amr_wb_decoder_create(&g_amr_wb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (state->announced_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        dashcdg_amr_nb_decoder_create(&g_amr_nb_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (state->announced_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+        dashcdg_evrc_decoder_create(&g_evrc_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (state->announced_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+        dashcdg_qcelp13k_decoder_create(&g_qcelp_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else if (state->announced_audio_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+        dashcdg_bt_sbc_decoder_create(&g_bt_sbc_decoder);
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    } else {
+        dashcdg_nb_ima_state_init(&g_nb_ima_decoder);
+    }
 }
 
 static void handle_v4_session_info(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
