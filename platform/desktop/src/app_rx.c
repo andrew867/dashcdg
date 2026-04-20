@@ -4229,9 +4229,18 @@ static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms) {
             output_latency_ms = 40U;
         }
     }
-    if (queued_base_timestamp_ms >= 0 &&
-            sender_playback_now_ms + (uint64_t) output_latency_ms < (uint64_t) queued_base_timestamp_ms) {
-        return 0;
+    /*
+     * Align first audible playout to the sender timeline vs the first queued frame's playback_ms.
+     * Before Pa_OpenStream exists, sender_playback_now vs stream_base_timestamp_ms can disagree on
+     * cold join (clock_sync vs first-audio bootstrap ordering) while the ring still fills — HUD
+     * looks healthy (buffer ms) but claim never opens the DAC. Skip this gate until the host device
+     * is ready; after that, g_audio_stream_started stays set so this path is not re-entered.
+     */
+    if (dashcdg_desktop_audio_output_device_ready(g_audio)) {
+        if (queued_base_timestamp_ms >= 0 &&
+                sender_playback_now_ms + (uint64_t) output_latency_ms < (uint64_t) queued_base_timestamp_ms) {
+            return 0;
+        }
     }
 
     /*
