@@ -45,6 +45,8 @@ struct dashcdg_desktop_audio {
     uint64_t playback_started_ms;
     int playback_running;
     int mode;
+    /* Stream multicast: decoded PCM/sample clock from session_info; playback ring + device use stream_sample_rate. */
+    uint32_t session_sample_rate;
     uint32_t stream_sample_rate;
     uint16_t stream_channels;
     int64_t stream_base_timestamp_ms;
@@ -92,7 +94,16 @@ size_t dashcdg_desktop_audio_queue_frames(
         int64_t first_frame_timestamp_ms
 );
 uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *audio);
+uint32_t dashcdg_desktop_audio_output_latency_ms(const struct dashcdg_desktop_audio *audio);
 void dashcdg_desktop_audio_set_muted(struct dashcdg_desktop_audio *audio, int muted);
 int dashcdg_desktop_audio_is_muted(const struct dashcdg_desktop_audio *audio);
+uint32_t dashcdg_desktop_audio_session_sample_rate(const struct dashcdg_desktop_audio *audio);
+uint32_t dashcdg_desktop_audio_output_sample_rate(const struct dashcdg_desktop_audio *audio);
+void dashcdg_desktop_audio_refresh_stream_sample_rate(struct dashcdg_desktop_audio *audio);
+/*
+ * Non-zero once PortAudio stream exists or WinMM waveOut is active. Until then, PCM may be queued
+ * while the DAC is still opening (desktop-rx starts output asynchronously).
+ */
+int dashcdg_desktop_audio_output_device_ready(const struct dashcdg_desktop_audio *audio);
 
 #endif

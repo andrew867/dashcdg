@@ -24,7 +24,7 @@ This matches **[v4-display-audio-sync.md](v4-display-audio-sync.md)** § “RX: 
 
 **Goal:** All receivers paint the **same** raster for the same **network media timeline** (multi-receiver parity / monitoring).
 
-When clock_sync has established `playback_base_*`, **`dashcdg_rx_playback_ms_for_graphics_locked`** prefers **`dashcdg_rx_sender_playback_now_locked`** even if DAC time is available.
+When clock_sync has established `playback_base_*`, **`dashcdg_rx_playback_ms_for_graphics_locked`** prefers the **sender timeline** but compensates it by the receiver's current **audio presentation lag** (queued audio + output-device latency during bootstrap, then measured sender-minus-DAC skew once timestamps are live). This preserves sender-clock startup semantics without letting graphics lead heard audio by the local output buffer depth.
 
 Use this mode when comparing **multiple RX screens** to each other or to **encoder-tagged** analytics — not when tuning “lip-sync” vs local speakers.
 

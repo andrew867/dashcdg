@@ -1535,9 +1535,10 @@ static int dashcdg_rx_local_audio_playback_now_locked(uint64_t *out_playback_ms)
 
 /*
  * CDG frame selection for both GL and Win32 GDI uses the same render snapshot.
- * Default to sender/network timing so one RX tracks the same lyric timeline as
- * TX preview and other listeners. --rx-graphics-clock dac remains available
- * when one box's locally-heard audio should drive the lyrics instead.
+ * Default to sender/network timing, but hold that timeline back by the local
+ * output pipeline delay so the raster does not outrun heard audio. That keeps
+ * startup and cross-receiver behavior anchored to clock_sync while matching the
+ * single playout-clock model users expect from players like VLC.
  */
 static int dashcdg_rx_u64_playback_ms_to_int_safe(uint64_t ms) {
     if (ms >= (uint64_t) INT_MAX) {
@@ -1558,6 +1559,62 @@ static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
     return (int) v;
 }
 
+static uint32_t dashcdg_rx_estimated_audio_pipeline_lag_ms_locked(const struct receiver_state *state) {
+    uint32_t lag_ms = 0U;
+
+    if (g_audio != NULL) {
+        lag_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
+        lag_ms += dashcdg_desktop_audio_output_latency_ms(g_audio);
+    }
+
+    /*
+     * Before DAC timestamps exist, bootstrap sender-clock graphics with the same
+     * startup cushion the RX uses for audio claim/start. Once the DAC is running,
+     * measured skew wins instead.
+     */
+    if (lag_ms == 0U && state != NULL && state->announced_playout_delay_ms > 0U) {
+        lag_ms = state->announced_playout_delay_ms / 2U;
+    }
+
+    if (lag_ms > 1000U) {
+        lag_ms = 1000U;
+    }
+    return lag_ms;
+}
+
+static int dashcdg_rx_sender_graphics_playback_now_locked(
+        const struct receiver_state *state,
+        uint64_t local_now_ms,
+        uint64_t *out_playback_ms
+) {
+    uint64_t sender_playback_ms = 0U;
+    uint64_t local_audio_playback_ms = 0U;
+    uint32_t lag_ms;
+
+    if (out_playback_ms == NULL ||
+            !dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
+        return 0;
+    }
+
+    if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms) &&
+            sender_playback_ms > local_audio_playback_ms) {
+        uint64_t skew_ms = sender_playback_ms - local_audio_playback_ms;
+
+        lag_ms = skew_ms >= 1000U ? 1000U : (uint32_t) skew_ms;
+    } else {
+        lag_ms = dashcdg_rx_estimated_audio_pipeline_lag_ms_locked(state);
+    }
+
+    if (sender_playback_ms > (uint64_t) lag_ms) {
+        sender_playback_ms -= (uint64_t) lag_ms;
+    } else {
+        sender_playback_ms = 0U;
+    }
+
+    *out_playback_ms = sender_playback_ms;
+    return 1;
+}
+
 static int dashcdg_rx_playback_ms_for_graphics_locked(struct receiver_state *state, uint64_t local_now_ms) {
     uint64_t local_audio_playback_ms = 0U;
     uint64_t sender_playback_ms = 0U;
@@ -1567,7 +1624,7 @@ static int dashcdg_rx_playback_ms_for_graphics_locked(struct receiver_state *sta
         return -1;
     }
     if (g_rx_graphics_clock_sender) {
-        if (dashcdg_rx_sender_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
+        if (dashcdg_rx_sender_graphics_playback_now_locked(state, local_now_ms, &sender_playback_ms)) {
             base = dashcdg_rx_u64_playback_ms_to_int_safe(sender_playback_ms);
         } else if (dashcdg_rx_local_audio_playback_now_locked(&local_audio_playback_ms)) {
             base = dashcdg_rx_u64_playback_ms_to_int_safe(local_audio_playback_ms);

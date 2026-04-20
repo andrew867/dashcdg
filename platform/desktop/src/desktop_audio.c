@@ -7,6 +7,7 @@
 
 #include "dashcdg/desktop_audio.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,7 @@ static void dashcdg_pa_host_deinit(void) {
     }
     pthread_mutex_unlock(&g_dashcdg_pa_mutex);
 }
+
 #endif
 
 #if DASHCDG_HAVE_PORTAUDIO || (defined(DASHCDG_DESKTOP_WIN32_WAVEOUT) && (DASHCDG_DESKTOP_WIN32_WAVEOUT) && defined(_WIN32))
@@ -146,6 +148,21 @@ static void dashcdg_pcm_buffer_consume(struct dashcdg_pcm_buffer *pcm, size_t sa
 #endif
 
 #if DASHCDG_HAVE_PORTAUDIO
+/*
+ * Drop queued PCM and reset DAC timeline anchors. Caller must hold stream_mutex when the callback
+ * can run or another thread may queue; safe before Pa_StartStream (no callback yet).
+ */
+static void dashcdg_desktop_audio_flush_stream_ring_locked(struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return;
+    }
+    audio->stream_read_frame = 0;
+    audio->stream_write_frame = 0;
+    audio->stream_queued_frames = 0;
+    audio->stream_base_timestamp_ms = -1;
+    audio->stream_played_frames = 0;
+}
+
 static int dashcdg_pa_latency_ms_from_timeinfo(
         const PaStreamCallbackTimeInfo *time_info,
         int fallback_ms
@@ -331,10 +348,63 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
             dashcdg_pa_callback,
             audio
     );
+    if (err != paNoError && audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
+        int alt = (int) (dev_info->defaultSampleRate + 0.5);
+
+        if (alt >= 8000 && alt <= 192000 && alt != sample_rate) {
+            fprintf(
+                    stderr,
+                    "[desktop-audio] Pa_OpenStream @ %d Hz failed (%s); retrying @ %d Hz\n",
+                    sample_rate,
+                    Pa_GetErrorText(err),
+                    alt
+            );
+            fflush(stderr);
+            err = Pa_OpenStream(
+                    &audio->stream,
+                    NULL,
+                    &out_params,
+                    (double) alt,
+                    paFramesPerBufferUnspecified,
+                    0,
+                    dashcdg_pa_callback,
+                    audio
+            );
+        }
+    }
     if (err != paNoError) {
         fprintf(stderr, "PortAudio error: %s\n", Pa_GetErrorText(err));
         dashcdg_pa_host_deinit();
         return 0;
+    }
+
+    /*
+     * Query the stream's actual sample rate before StartStream so we can discard pre-open PCM that
+     * was queued at session decode rate when the DAC will tick at a different Hz (prevents mixed
+     * clock material in the ring and audible pitch/SRC churn).
+     */
+    {
+        const PaStreamInfo *psi = Pa_GetStreamInfo(audio->stream);
+
+        if (psi != NULL && audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
+            double got = psi->sampleRate;
+            uint32_t got_u = (uint32_t) (got + 0.5);
+
+            pthread_mutex_lock(&audio->stream_mutex);
+            audio->stream_sample_rate = got_u;
+            if (fabs(got - (double) audio->session_sample_rate) > 0.5) {
+                fprintf(
+                        stderr,
+                        "[desktop-audio] output device %.1f Hz vs session/decode %u Hz (resample in RX before queue; flushed pre-open ring).\n",
+                        got,
+                        (unsigned int) audio->session_sample_rate
+                );
+                fflush(stderr);
+                dashcdg_desktop_audio_flush_stream_ring_locked(audio);
+                DASHCDG_ATOMIC_SET(audio->timestamp_ms, -1);
+            }
+            pthread_mutex_unlock(&audio->stream_mutex);
+        }
     }
 
     err = Pa_StartStream(audio->stream);
@@ -812,6 +882,10 @@ size_t dashcdg_desktop_audio_read_mp3_frames(
         *channels = (uint16_t) decoder_channels;
     }
 
+    /*
+     * minimp3 uses int16 pcm unless built with MINIMP3_FLOAT_OUTPUT; desktop builds omit that,
+     * so pcm is native int16 interleaved (matches TX fifo + Opus path).
+     */
     samples_read = mp3dec_ex_read(
             &audio->stream_decoder,
             (mp3d_sample_t *) pcm,
@@ -931,14 +1005,23 @@ int dashcdg_desktop_audio_init_stream(
         uint32_t buffer_ms
 ) {
     size_t capacity_frames;
+    uint32_t ring_sr;
 
     if (audio == NULL || sample_rate == 0 || channels == 0 || buffer_ms == 0) {
         return 0;
     }
 
-    capacity_frames = ((size_t) sample_rate * (size_t) buffer_ms) / 1000U;
-    if (capacity_frames < (size_t) sample_rate / 10U) {
-        capacity_frames = (size_t) sample_rate / 10U;
+    /*
+     * Size the ring and request Pa_OpenStream at the session/decode rate. Using the host default
+     * (often 44100) here forced Pa_OpenStream(44100) while the wire/session stayed 48000 — RX then
+     * SRC'd every frame and, worse, pre-open queues held session-rate PCM that the DAC played at
+     * the wrong clock until the mismatch was visible (audible pitch/SRC artifacts).
+     */
+    ring_sr = sample_rate;
+
+    capacity_frames = ((size_t) ring_sr * (size_t) buffer_ms) / 1000U;
+    if (capacity_frames < (size_t) ring_sr / 10U) {
+        capacity_frames = (size_t) ring_sr / 10U;
     }
 
     free(audio->stream_pcm);
@@ -948,7 +1031,8 @@ int dashcdg_desktop_audio_init_stream(
     }
 
     audio->mode = DASHCDG_AUDIO_MODE_STREAM;
-    audio->stream_sample_rate = sample_rate;
+    audio->session_sample_rate = sample_rate;
+    audio->stream_sample_rate = ring_sr;
     audio->stream_channels = channels;
     audio->stream_capacity_frames = capacity_frames;
     audio->stream_read_frame = 0;
@@ -1003,6 +1087,28 @@ void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio) {
     DASHCDG_ATOMIC_SET(audio->playback_running, 0);
 }
 
+/*
+ * True once the host output device is accepting callbacks (PortAudio stream open, or WinMM waveOut).
+ * Until then, queued PCM is session-rate decode; comparing it to init_stream()'s host-default guess
+ * for stream_sample_rate mis-triggers SRC (e.g. 48 kHz frames resampled toward 44.1 kHz, then opened at 48 kHz).
+ */
+int dashcdg_desktop_audio_output_device_ready(const struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return 0;
+    }
+#if DASHCDG_HAVE_PORTAUDIO
+    if (audio->stream != NULL) {
+        return 1;
+    }
+#endif
+#if defined(DASHCDG_DESKTOP_WIN32_WAVEOUT) && (DASHCDG_DESKTOP_WIN32_WAVEOUT) && defined(_WIN32)
+    if (audio->audio_io_ctx != NULL) {
+        return 1;
+    }
+#endif
+    return 0;
+}
+
 size_t dashcdg_desktop_audio_queue_frames(
         struct dashcdg_desktop_audio *audio,
         const int16_t *pcm,
@@ -1046,15 +1152,62 @@ size_t dashcdg_desktop_audio_queue_frames(
 
 uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *audio) {
     size_t queued_frames;
+    uint32_t rate_for_ms;
 
-    if (audio == NULL || audio->stream_sample_rate == 0) {
+    if (audio == NULL) {
         return 0;
     }
 
     pthread_mutex_lock((pthread_mutex_t *) &audio->stream_mutex);
     queued_frames = audio->stream_queued_frames;
     pthread_mutex_unlock((pthread_mutex_t *) &audio->stream_mutex);
-    return (uint32_t) ((queued_frames * 1000U) / audio->stream_sample_rate);
+
+    /*
+     * Pre-device-open, the ring holds session-clock PCM (decode rate). Init uses the host default
+     * rate only for sizing/opening Pa_OpenStream — do not interpret queued frame counts in that Hz.
+     */
+    if (audio->mode == DASHCDG_AUDIO_MODE_STREAM && !dashcdg_desktop_audio_output_device_ready(audio)) {
+        rate_for_ms = audio->session_sample_rate;
+    } else {
+        rate_for_ms = audio->stream_sample_rate;
+    }
+    if (rate_for_ms == 0U) {
+        return 0;
+    }
+
+    return (uint32_t) ((queued_frames * 1000U) / rate_for_ms);
+}
+
+uint32_t dashcdg_desktop_audio_output_latency_ms(const struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return 0U;
+    }
+
+#if DASHCDG_HAVE_PORTAUDIO
+    if (audio->stream != NULL) {
+        const PaStreamInfo *psi = Pa_GetStreamInfo(audio->stream);
+
+        if (psi != NULL && psi->outputLatency > 0.0) {
+            double ms = psi->outputLatency * 1000.0;
+
+            if (ms <= 0.0) {
+                return 0U;
+            }
+            if (ms >= 1000.0) {
+                return 1000U;
+            }
+            return (uint32_t) (ms + 0.5);
+        }
+    }
+#endif
+
+#if DASHCDG_DESKTOP_WIN32_WAVEOUT && defined(_WIN32)
+    if (audio->audio_io_ctx != NULL) {
+        return audio->mode == DASHCDG_AUDIO_MODE_STREAM ? 160U : 80U;
+    }
+#endif
+
+    return 0U;
 }
 
 void dashcdg_desktop_audio_set_muted(struct dashcdg_desktop_audio *audio, int muted) {
@@ -1071,4 +1224,43 @@ int dashcdg_desktop_audio_is_muted(const struct dashcdg_desktop_audio *audio) {
     }
 
     return DASHCDG_ATOMIC_GET(audio->stream_muted) != 0;
+}
+
+uint32_t dashcdg_desktop_audio_session_sample_rate(const struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return 0U;
+    }
+    if (audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
+        return audio->session_sample_rate;
+    }
+    return (uint32_t) audio->file_info.hz;
+}
+
+uint32_t dashcdg_desktop_audio_output_sample_rate(const struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return 0U;
+    }
+    if (audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
+        if (!dashcdg_desktop_audio_output_device_ready(audio)) {
+            return audio->session_sample_rate != 0U ? audio->session_sample_rate : audio->stream_sample_rate;
+        }
+        return audio->stream_sample_rate;
+    }
+    return (uint32_t) audio->file_info.hz;
+}
+
+void dashcdg_desktop_audio_refresh_stream_sample_rate(struct dashcdg_desktop_audio *audio) {
+#if DASHCDG_HAVE_PORTAUDIO
+    const PaStreamInfo *psi;
+
+    if (audio == NULL || audio->mode != DASHCDG_AUDIO_MODE_STREAM || audio->stream == NULL) {
+        return;
+    }
+    psi = Pa_GetStreamInfo(audio->stream);
+    if (psi != NULL) {
+        audio->stream_sample_rate = (uint32_t) (psi->sampleRate + 0.5);
+    }
+#else
+    (void) audio;
+#endif
 }
