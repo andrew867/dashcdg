@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| **Status** | **Implemented in part** — exact-ratio anti-alias decimation for desktop 48 kHz -> 8/16 kHz narrowband adapters is now in-tree; jitter PLC and TX live-device resample work remain follow-up items. |
+| **Status** | **Implemented on desktop (2026)** — FIR decimation + Lanczos upsample paths, overlap SRC **`skip_out`** clamp, TX **~80 Hz HPF** + **~3 dB headroom** before NB encode, **Opus** same input gain for parity, soft limiting on hot PCM, codec-handoff startup skip-hold tuning, **idle / unpause** **`playback_base_*`** hygiene; jitter **PLC** and **TX mic linear resample** anti-alias remain optional follow-ups. |
 | **Scope** | Desktop TX/RX for **v4 narrowband family** (wire ids 2–7) and, where relevant, **Opus at very low bitrates**; “choppy / not continuous / shrill or harsh” reports. |
 | **Related** | [v4-audio-codecs.md](v4-audio-codecs.md), [bad-network-audio-profiles.md](bad-network-audio-profiles.md), [audio-jitter-playout-boundary.md](audio-jitter-playout-boundary.md) |
 
@@ -151,6 +151,17 @@
 - RX apply + jitter: `platform/desktop/src/app_rx.c`, `core/src/audio_jitter.c`  
 - NB playout buffer floor: `dashcdg_rx_network_stream_ring_ms` in `app_rx.c`  
 
+## 10. Desktop updates (2026, summarized)
+
+Operational fixes landed in **`platform/desktop`** and **`pcm_rate_convert.c`**:
+
+- **Alias / peaks:** Exact-ratio **FIR decimation** for **48 → 8 / 16 kHz** before vocoder encode; Lanczos-style upsampling with **soft saturation** toward **int16** on hot peaks; mono/stereo **overlap SRC** alignment clamp to avoid whole-frame silence at chunk boundaries.
+- **Levels:** **Q15 ~−3 dB** encode headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) on narrowband **and Opus** TX paths; **80 Hz HPF** on TX before NB encode (not applied to Opus); RX no longer stacks a second HPF on NB (avoid cascaded tilt).
+- **Transport feel:** **Warm** startup skip-hold when codec swaps mid-stream; **cold** idle→TX and **resume** clear **`playback_base_*`** so **`claim_audio_start`** and jitter see a consistent timeline.
+- **Unpause video:** **`dashcdg_rx_reset_live_media_after_resume_locked`** re-seeks **offline CDG reader** into **`live_state`** because **`cdg_snapshots_applied`** blocks the normal first-wire seed path.
+
+Related: **`docs/specs/opus-desktop-encoding-policy.md`**, **`AGENTS.md`**.
+
 ---
 
-**Status for implementation:** this document is the **stopping point** for your review. After you approve the approach (phases, library vs in-house, NB-IMA compatibility, Opus in/out), the next tranche can implement **Phase A + B** (measurement + resampler) first, then **C** (PLC) if “chop” remains transport-dominated.
+**Status for implementation:** Phase **B** (band-limited resampling core) is largely satisfied on desktop; **Phase C** (PLC on **`DRAIN_SKIP`**) remains open if loss-soak still reports audible holes.

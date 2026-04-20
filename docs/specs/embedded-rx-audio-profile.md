@@ -14,6 +14,10 @@ This note is intentionally implementation-oriented for the first MCU receiver.
 It does not replace `docs/specs/bad-network-audio-profiles.md`. It explains how
 the embedded receiver should prioritize those profiles during bring-up.
 
+### Desktop reference (2026)
+
+**Windows desktop-rx / desktop-tx** now exercise the full **v4** codec matrix (Opus + ids **2–7**) with stable session_info reconfigure rules, codec hot-swap, cold join, and pause/resume behaviour — see [`../../AGENTS.md`](../../AGENTS.md), [`narrowband-low-bitrate-audio-quality.md`](narrowband-low-bitrate-audio-quality.md), and [`v4-codec-switching-contract.md`](v4-codec-switching-contract.md). Embedded bring-up should treat that stack as the **normative wire + timing contract**; MCU decode order and RAM gates remain per [`audio-codec-modules.md`](audio-codec-modules.md) and the ESP32 enterprise plan.
+
 ## First embedded policy
 
 For the first ESP32 handheld receiver:

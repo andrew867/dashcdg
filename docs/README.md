@@ -59,5 +59,5 @@ and **`specs/windows-legacy-mingw-build.md`**.
 
 ## Hardware & ops
 
-- [`hardware/`](hardware/) — ESP32 / BOM / bringup notes  
+- [`hardware/`](hardware/) — ESP32 / BOM / bringup notes (desktop **v4** A/V + codec switching is the reference contract for firmware — see [`AGENTS.md`](../AGENTS.md), [`specs/embedded-rx-audio-profile.md`](specs/embedded-rx-audio-profile.md))  
 - [`ops/quality-gates.md`](ops/quality-gates.md) — Release criteria  

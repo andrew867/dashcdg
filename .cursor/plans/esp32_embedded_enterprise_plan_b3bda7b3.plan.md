@@ -1,10 +1,10 @@
 ---
 name: ESP32 embedded enterprise plan
-overview: "Deliver a spec-first, tranche-based ESP-IDF + FreeRTOS receiver for the Freenove ESP32 CYD 3.2\" (ST7789), but do it on top of a restored and measurable desktop `protocol v4` baseline first. Extend `platform/espidf/` into buildable firmware with simulation layers, CI, commits per major milestone, **preferred wire codecs** (Opus, Bluetooth SBC, AMR-WB/NB, EVRC, QCELP), **not** NB-IMA-led, and **battery-aware power management**. Treat desktop `v4` A/V correctness, startup, and late-join behaviour as tranche-zero engineering prerequisites because the embedded receiver can only inherit a protocol/runtime that already works."
+overview: "Deliver a spec-first, tranche-based ESP-IDF + FreeRTOS receiver for the Freenove ESP32 CYD 3.2\" (ST7789), building on the **now soak-validated** desktop `protocol v4` baseline (NB + Opus codec matrix, switching, cold join, idle→TX, pause/resume). Extend `platform/espidf/` into buildable firmware with simulation layers, CI, commits per major milestone, **preferred wire codecs** (Opus, Bluetooth SBC, AMR-WB/NB, EVRC, QCELP), **not** NB-IMA-led, and **battery-aware power management**."
 todos:
   - id: tr0a-v4-stabilize
     content: "Freeze and document the desktop `protocol v4` receiver contract first: audio-device reconfigure rules, `clock_sync` / `playback_base_*` ownership, first-keyframe / first-delta video seeding, jitter priming / skip policy, codec switch behaviour, and recovery telemetry. Explicitly require that steady-state v4 video remains live-path owned after bootstrap and that CDG recovery converges to real sender batch boundaries, not an `asset-ready` reader fallback. Update docs/specs + tests before firmware work depends on them."
-    status: in_progress
+    status: completed
   - id: tr0-specs
     content: Author ESP32 REQ/traceability docs (esp32-rx-requirements, freertos-architecture, test-strategy), **esp32-audio-codecs.md** + **esp32-power-management.md**, link from platform/espidf/README.md; revise embedded-rx-audio-profile stance for MCU (NB-IMA last-resort only); explicitly inherit only the stabilized `v4` subset from `tr0a-v4-stabilize`
     status: pending
@@ -40,7 +40,7 @@ isProject: false
 - **Portable assets** exist for firmware reuse: [`proto/`](proto/) (wire parse/serialize), [`core/`](core/) (CD+G, clock helpers). Desktop proof lives under [`platform/desktop/`](platform/desktop/) — embedded work should **not** duplicate protocol logic; link or submodule the portable libs into the ESP-IDF component graph.
 - **Codec inventory (normative for wiring adapters):** [`docs/specs/audio-codec-modules.md`](docs/specs/audio-codec-modules.md) maps wire ids to **Bluetooth SBC** (`bluetooth_sbc_kernel`), **AMR NB/WB** (`amr_pschatzmann`), **EVRC**, **QCELP**, **Opus**, vs baseline **NB-IMA** in `core/`. The ESP32 program **explicitly prioritizes the higher-quality / standard codec paths** below and treats **NB-IMA as fallback-only**, not the primary MCU audio story (overrides the older “NB-IMA first” wording in [`docs/specs/embedded-rx-audio-profile.md`](docs/specs/embedded-rx-audio-profile.md) — that doc should be **updated in Tranche 0** to match this plan).
 - **Firmware landing zone is still a stub**: [`platform/espidf/README.md`](platform/espidf/README.md) only lists intended modules; **no `idf.py` project yet** ([`README.md`](README.md) notes no buildable ESP-IDF receiver).
-- **Important current reality:** the active desktop proof already contains the protocol and timing rules the ESP32 receiver will need, but the current `v4` runtime has regressions and in-flight fixes around **audio-device reconfigure churn**, **cold-start jitter skip**, and **first-live-video seed**. Embedded work must inherit the corrected contract, not the broken one.
+- **Update (2026):** Desktop **`protocol v4`** on Windows (**desktop-rx** / **desktop-tx**) is the **stable reference** for session timing, jitter priming, **`playback_base_*`** lifecycle (including idle→TX and unpause), **codec hot-swap**, and narrowband + Opus DSP paths documented in **`AGENTS.md`**, **`docs/specs/narrowband-low-bitrate-audio-quality.md`**, and **`docs/specs/v4-audio-codecs.md`**. Firmware should track that contract; remaining work is **MCU decode ports** and **ESP-IDF integration**, not re-proving desktop v4 from scratch.
 
 This plan assumes: **prefer Espressif-managed components** (`esp_wifi`, `lwip`, `esp_lcd` ST7789 panel driver, `esp_lvgl_port` / LVGL) for reliability; **greenfield only** for dashcdg-specific pipelines (RX dispatch, jitter/playout glue, SPI bandwidth strategy) where no upstream equivalent exists.
 
@@ -55,9 +55,9 @@ The repo now documents a good `v4` timing model in:
 - [`docs/specs/receiver-progress-invariants.md`](docs/specs/receiver-progress-invariants.md)
 - [`docs/specs/audio-jitter-playout-boundary.md`](docs/specs/audio-jitter-playout-boundary.md)
 
-But the runtime implementation in [`platform/desktop/src/app_rx.c`](platform/desktop/src/app_rx.c), [`core/src/audio_jitter.c`](core/src/audio_jitter.c), and [`core/src/cdg_batch_jitter.c`](core/src/cdg_batch_jitter.c) has been drifting while the docs evolved.
+The runtime in [`platform/desktop/src/app_rx.c`](platform/desktop/src/app_rx.c), [`core/src/audio_jitter.c`](core/src/audio_jitter.c), and [`core/src/cdg_batch_jitter.c`](core/src/cdg_batch_jitter.c) now matches the documented contract for the items below (ongoing soak and edge-case reports notwithstanding).
 
-Before any ESP-IDF tranche uses `v4` as a stable transport, complete this **desktop stabilization gate**:
+This **desktop stabilization gate** is **met** for embedded handoff; keep regression tests green when changing shared code:
 
 ### v4 remediation work items
 
@@ -148,7 +148,7 @@ If desktop `v4` is unstable, the firmware project inherits unstable semantics an
 - audio pipeline
 - power / hardening
 
-This ordering is mandatory. No firmware tranche should invent a new timing contract while desktop `v4` is still being debugged.
+This ordering is mandatory. No firmware tranche should invent a new timing contract without updating **`AGENTS.md`**, **`docs/specs/`**, and shared **`core/`** tests when desktop behaviour changes.
 
 ---
 

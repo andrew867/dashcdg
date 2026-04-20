@@ -24,7 +24,7 @@ That portable set should track the desktop proof's **protocol v4** direction:
 - bootstrap asset packets for late join
 - v4 session info and narrowband audio chunks
 - live **`Opus`** audio (optional on MCU; requires libopus-class integration)
-- live **NB-IMA** narrowband audio (`dashcdg_nb_ima_*` in `core/` — fixed-point, no external codec libs for ids 2–7 today; see [`../specs/v4-audio-codecs.md`](../specs/v4-audio-codecs.md))
+- narrowband **`audio_codec_id` 2–7:** on **desktop**, each id maps to its **native** payload path (NB-IMA, QCELP, EVRC, AMR-NB/WB, Bluetooth SBC per [`../specs/v4-audio-codecs.md`](../specs/v4-audio-codecs.md)), with DSP/resample glue in **`platform/desktop`**. On **ESP32**, the **first-party fixed-point** story remains **`dashcdg_nb_ima_*`** (**id 2**) until vendor decode ports land; higher ids may be decode-later milestones per [`../specs/audio-codec-modules.md`](../specs/audio-codec-modules.md).
 - live timed `CDG_BATCH` framing
 - bounded `CDG_SNAPSHOT` framing for fast visual bootstrap/recovery
 - software-timestamped `PTP_SYNC` / `PTP_FOLLOW_UP` / `PTP_DELAY_REQ` / `PTP_DELAY_RESP` clock discipline
@@ -33,7 +33,7 @@ That portable set should track the desktop proof's **protocol v4** direction:
 ### ESP-IDF-specific layers to implement next
 
 - Wi-Fi transport adapter
-- jitter buffer and playout scheduler
+- jitter buffer and playout scheduler aligned with **desktop v4** priming / skip policy (`core/` + [`AGENTS.md`](../../AGENTS.md) handoff)
 - NB-IMA decode integration first; optional Opus decode if the board has headroom
 - display driver adapter
 - persistent settings

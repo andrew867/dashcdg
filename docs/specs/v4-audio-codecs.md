@@ -34,6 +34,13 @@ Canonical **NB-IMA** implementation: **`core/include/dashcdg/nb_ima_codec.h`** +
 - **Opus:** optional on MCU builds; gate with `DASHCDG_DESKTOP_NO_OPUS`-style defines per platform.
 - **Vendored vocoders / SBC:** may use float internally — desktop-focused until fixed-point audits land.
 
+## Desktop-only DSP (not part of the wire format)
+
+The following affect **PCM before/after encode** on Windows desktop only; they do not change `audio_codec_id` or packet layout:
+
+- **TX:** ~**80 Hz** high-pass on narrowband paths only; **~−3 dB** fixed digital headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) before NB **and Opus** encode for consistent loudness; soft limiting / band-limited resampling in **`platform/desktop/src/pcm_rate_convert.c`** (see [`narrowband-low-bitrate-audio-quality.md`](narrowband-low-bitrate-audio-quality.md), [`opus-desktop-encoding-policy.md`](opus-desktop-encoding-policy.md)).
+- **RX:** post-decode SRC / queue **soft limit** on narrowband; **`playback_base_*`** clearing on cold reopen and resume (see **`AGENTS.md`**).
+
 ## Command-line selector (TX)
 
 - **`--v4-audio-codec=<name>`** / **`--v4-audio-codec <name>`** — `opus`, `sbc-like`, `celp13k`, `evrc`, `amr-nb`, `amr-wb`, `bluetooth-sbc`.
