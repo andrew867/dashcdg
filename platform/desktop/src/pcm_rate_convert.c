@@ -379,7 +379,14 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
     for (i = 0U; i < in_frames; ++i) {
         work_left[prepend + i] = in[i * 2U];
     }
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    if (dashcdg_soxr_mono_i16_oneshot(work_left, ext_in, in_rate, work_right, ext_out, out_rate) != 0) {
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        goto update_tail;
+    }
+#else
     dashcdg_pcm_mono_resample_cubic(work_left, ext_in, in_rate, work_right, ext_out, out_rate);
+#endif
     for (k = 0U; k < out_frames; ++k) {
         out[k * 2U] = work_right[skip_out + k];
     }
@@ -388,7 +395,14 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
     for (i = 0U; i < in_frames; ++i) {
         work_left[prepend + i] = in[i * 2U + 1U];
     }
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    if (dashcdg_soxr_mono_i16_oneshot(work_left, ext_in, in_rate, work_right, ext_out, out_rate) != 0) {
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        goto update_tail;
+    }
+#else
     dashcdg_pcm_mono_resample_cubic(work_left, ext_in, in_rate, work_right, ext_out, out_rate);
+#endif
     for (k = 0U; k < out_frames; ++k) {
         out[k * 2U + 1U] = work_right[skip_out + k];
     }

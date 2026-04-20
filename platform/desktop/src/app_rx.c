@@ -37,7 +37,6 @@
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
 #include "dashcdg/pcm_rate_convert.h"
-#include "dashcdg/pcm_soxr_stream.h"
 #include "dashcdg/protocol.h"
 #include "dashcdg/amr_codec.h"
 #include "dashcdg/nb_ima_codec.h"
@@ -834,7 +833,6 @@ static void receiver_state_reset(struct receiver_state *state) {
     memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
-    dashcdg_pcm_soxr_stream_reset();
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -2420,9 +2418,9 @@ static int dashcdg_rx_apply_audio_frame_locked(
                     return -1;
                 }
                 /*
-                 * The new libsoxr streaming path regressed live RX into "buffer moves, no audible
-                 * audio" on real receivers. Keep the proven overlap SRC here for deterministic
-                 * playout; one-shot/offline conversion can continue to use libsoxr elsewhere.
+                 * Live RX uses the overlap/windowed SRC path so chunk boundaries stay continuous.
+                 * That helper now uses libsoxr internally when available instead of a separate
+                 * streaming state machine bolted onto app_rx.
                  */
                 dashcdg_pcm_stereo_interleaved_resample_overlap(
                         state->pcm_src_overlap_l,
@@ -2990,7 +2988,6 @@ static void dashcdg_rx_configure_audio_locked(
     dashcdg_desktop_audio_stop_stream(g_audio);
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
-    dashcdg_pcm_soxr_stream_reset();
     if (!dashcdg_desktop_audio_init_stream(
                 g_audio,
                 sample_rate,
@@ -3096,8 +3093,6 @@ static void dashcdg_rx_refresh_audio_decode_path_locked(
     );
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
-    dashcdg_pcm_soxr_stream_reset();
-
     if (flush_output_ring && g_audio != NULL) {
         dashcdg_desktop_audio_flush_stream_ring(g_audio);
         dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
