@@ -24,6 +24,11 @@ struct dashcdg_evrc_codec {
     int16_t work_out[EVRC_RESAMPLE_WORK];
 };
 
+static struct dashcdg_evrc_codec *g_dashcdg_evrc_shared_encoder;
+static unsigned int g_dashcdg_evrc_shared_encoder_refs;
+static struct dashcdg_evrc_codec *g_dashcdg_evrc_shared_decoder;
+static unsigned int g_dashcdg_evrc_shared_decoder_refs;
+
 static void dashcdg_mono8k_to_pcm48_stereo(
         struct dashcdg_evrc_codec *c,
         const int16_t *mono8k,
@@ -63,6 +68,13 @@ int dashcdg_evrc_encoder_create(void **out_ctx) {
     if (out_ctx == NULL) {
         return 0;
     }
+    if (g_dashcdg_evrc_shared_encoder != NULL) {
+        g_dashcdg_evrc_shared_encoder_refs++;
+        g_dashcdg_evrc_shared_encoder->enc_tail48_valid = 0U;
+        g_dashcdg_evrc_shared_encoder->enc_stream48_samples = 0U;
+        *out_ctx = g_dashcdg_evrc_shared_encoder;
+        return 1;
+    }
     c = (struct dashcdg_evrc_codec *) calloc(1, sizeof(*c));
     if (c == NULL) {
         return 0;
@@ -72,6 +84,8 @@ int dashcdg_evrc_encoder_create(void **out_ctx) {
         free(c);
         return 0;
     }
+    g_dashcdg_evrc_shared_encoder = c;
+    g_dashcdg_evrc_shared_encoder_refs = 1U;
     *out_ctx = c;
     return 1;
 }
@@ -79,15 +93,26 @@ int dashcdg_evrc_encoder_create(void **out_ctx) {
 void dashcdg_evrc_encoder_destroy(void *ctx) {
     struct dashcdg_evrc_codec *c = (struct dashcdg_evrc_codec *) ctx;
 
-    if (c != NULL) {
-        if (c->enc != NULL) {
-            evrc_encoder_uninit(c->enc);
-        }
-        if (c->dec != NULL) {
-            evrc_decoder_uninit(c->dec);
-        }
-        free(c);
+    if (c == NULL) {
+        return;
     }
+    if (c == g_dashcdg_evrc_shared_encoder) {
+        if (g_dashcdg_evrc_shared_encoder_refs > 0U) {
+            g_dashcdg_evrc_shared_encoder_refs--;
+        }
+        /*
+         * The vendored EVRC codec is built around global static state. Keep the singleton alive for
+         * the lifetime of the process instead of tearing it down on every hot-switch.
+         */
+        return;
+    }
+    if (c->enc != NULL) {
+        evrc_encoder_uninit(c->enc);
+    }
+    if (c->dec != NULL) {
+        evrc_decoder_uninit(c->dec);
+    }
+    free(c);
 }
 
 int dashcdg_evrc_encode_pcm48_stereo_frame(
@@ -138,6 +163,13 @@ int dashcdg_evrc_decoder_create(void **out_ctx) {
     if (out_ctx == NULL) {
         return 0;
     }
+    if (g_dashcdg_evrc_shared_decoder != NULL) {
+        g_dashcdg_evrc_shared_decoder_refs++;
+        g_dashcdg_evrc_shared_decoder->dec_tail8_valid = 0U;
+        g_dashcdg_evrc_shared_decoder->dec_stream8_samples = 0U;
+        *out_ctx = g_dashcdg_evrc_shared_decoder;
+        return 1;
+    }
     c = (struct dashcdg_evrc_codec *) calloc(1, sizeof(*c));
     if (c == NULL) {
         return 0;
@@ -147,11 +179,24 @@ int dashcdg_evrc_decoder_create(void **out_ctx) {
         free(c);
         return 0;
     }
+    g_dashcdg_evrc_shared_decoder = c;
+    g_dashcdg_evrc_shared_decoder_refs = 1U;
     *out_ctx = c;
     return 1;
 }
 
 void dashcdg_evrc_decoder_destroy(void *ctx) {
+    struct dashcdg_evrc_codec *c = (struct dashcdg_evrc_codec *) ctx;
+
+    if (c == NULL) {
+        return;
+    }
+    if (c == g_dashcdg_evrc_shared_decoder) {
+        if (g_dashcdg_evrc_shared_decoder_refs > 0U) {
+            g_dashcdg_evrc_shared_decoder_refs--;
+        }
+        return;
+    }
     dashcdg_evrc_encoder_destroy(ctx);
 }
 
