@@ -56,9 +56,6 @@ struct dashcdg_desktop_audio {
     size_t stream_write_frame;
     size_t stream_queued_frames;
     int16_t *stream_pcm;
-    /* Windows PortAudio + WASAPI: stream opened as paFloat32; ring stays int16. */
-    int16_t *stream_pa_i16_scratch;
-    size_t stream_pa_i16_scratch_samples;
     int stream_decoder_open;
     int stream_muted;
     pthread_mutex_t stream_mutex;

@@ -254,38 +254,11 @@ static int dashcdg_pa_callback(
         }
 
         latency_ms = dashcdg_pa_latency_ms_from_timeinfo(time_info, 80);
-        total_samples = (size_t) frame_count * (size_t) audio->stream_channels;
-#if defined(_WIN32)
-        {
-            int16_t *i16b;
-            float *fout;
-            size_t i;
-
-            if (audio->stream_pa_i16_scratch == NULL || total_samples == 0U) {
-                return paAbort;
-            }
-            if (total_samples > audio->stream_pa_i16_scratch_samples) {
-                /* PortAudio block larger than prealloc; play silence to stay real-time safe. */
-                memset(output_buffer, 0, total_samples * sizeof(float));
-                consumed_frames = 0U;
-            } else {
-                i16b = audio->stream_pa_i16_scratch;
-                consumed_frames = dashcdg_stream_buffer_consume(audio, frame_count, i16b);
-                fout = (float *) output_buffer;
-                for (i = 0; i < total_samples; i++) {
-                    fout[i] = (float) i16b[i] * (1.0f / 32768.0f);
-                }
-            }
-            if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
-                memset(output_buffer, 0, total_samples * sizeof(float));
-            }
-        }
-#else
         consumed_frames = dashcdg_stream_buffer_consume(audio, frame_count, (int16_t *) output_buffer);
+        total_samples = (size_t) frame_count * (size_t) audio->stream_channels;
         if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
             memset(output_buffer, 0, total_samples * sizeof(int16_t));
         }
-#endif
         if (audio->stream_base_timestamp_ms >= 0) {
             /*
              * Advance by the full PortAudio block size. Partial underrun still outputs silence for
@@ -459,15 +432,7 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     memset(&out_params, 0, sizeof(out_params));
     out_params.device = out_dev;
     out_params.channelCount = channels;
-#if defined(_WIN32)
-    if (audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
-        out_params.sampleFormat = paFloat32;
-    } else {
-        out_params.sampleFormat = paInt16;
-    }
-#else
     out_params.sampleFormat = paInt16;
-#endif
     /*
      * Pa_OpenDefaultStream uses the device's default *low* latency. On Windows (WASAPI shared)
      * that is often only ~10–20 ms of host buffering, which glitches when the UI thread is busy.
@@ -544,14 +509,9 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
 
         fprintf(
                 stdout,
-                "[desktop-audio] output stream: PaDeviceIndex=%d api=%s host_pcm=%s device=\"%s\"%s\n",
+                "[desktop-audio] output stream: PaDeviceIndex=%d api=%s host_pcm=int16 device=\"%s\"%s\n",
                 (int) out_dev,
                 hai_api != NULL ? hai_api->name : "?",
-#if defined(_WIN32)
-                out_params.sampleFormat == paFloat32 ? "float32" : "int16",
-#else
-                "int16",
-#endif
                 dev_info->name != NULL ? dev_info->name : "?",
 #if defined(_WIN32)
                 out_params.hostApiSpecificStreamInfo != NULL ? " [WASAPI AutoConvert]" : ""
@@ -1027,9 +987,6 @@ void dashcdg_desktop_audio_free(struct dashcdg_desktop_audio *audio) {
 
     dashcdg_desktop_audio_close_mp3_stream(audio);
     free(audio->stream_pcm);
-#if defined(_WIN32)
-    free(audio->stream_pa_i16_scratch);
-#endif
     pthread_mutex_destroy(&audio->stream_mutex);
 
     free(audio);
@@ -1282,34 +1239,19 @@ int dashcdg_desktop_audio_init_stream(
         capacity_frames = (size_t) ring_sr / 10U;
     }
 
+    /*
+     * Serialize with PortAudio's callback (stream_buffer_consume) and queue_frames. Without this,
+     * re-init can free the ring or reset indices while the callback or another thread is queueing
+     * decoded PCM = crash or memory corruption. Callers are expected to stop the stream first;
+     * this still protects re-init versus queue when ordering is racy.
+     */
+    pthread_mutex_lock(&audio->stream_mutex);
     free(audio->stream_pcm);
-#if defined(_WIN32)
-    free(audio->stream_pa_i16_scratch);
-    audio->stream_pa_i16_scratch = NULL;
-    audio->stream_pa_i16_scratch_samples = 0U;
-#endif
     audio->stream_pcm = (int16_t *) calloc(capacity_frames * (size_t) channels, sizeof(int16_t));
     if (audio->stream_pcm == NULL) {
+        pthread_mutex_unlock(&audio->stream_mutex);
         return 0;
     }
-#if defined(_WIN32)
-    {
-        /* Max single PortAudio block is at most a few 100ms; 64k int16s ≈ 340ms @ 48kHz stereo. */
-        size_t scratch = (size_t) capacity_frames * (size_t) channels;
-
-        if (scratch < 65536U) {
-            scratch = 65536U;
-        }
-        audio->stream_pa_i16_scratch = (int16_t *) malloc(scratch * sizeof(int16_t));
-        if (audio->stream_pa_i16_scratch == NULL) {
-            free(audio->stream_pcm);
-            audio->stream_pcm = NULL;
-            return 0;
-        }
-        audio->stream_pa_i16_scratch_samples = scratch;
-    }
-#endif
-
     audio->mode = DASHCDG_AUDIO_MODE_STREAM;
     audio->session_sample_rate = sample_rate;
     audio->stream_sample_rate = ring_sr;
@@ -1321,6 +1263,7 @@ int dashcdg_desktop_audio_init_stream(
     audio->stream_played_frames = 0;
     audio->stream_base_timestamp_ms = -1;
     DASHCDG_ATOMIC_SET(audio->timestamp_ms, -1);
+    pthread_mutex_unlock(&audio->stream_mutex);
     return 1;
 }
 
