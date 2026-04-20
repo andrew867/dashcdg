@@ -299,12 +299,14 @@ static uint64_t g_rx_last_av_sync_log_ms = 0U;
 static int g_rx_graphics_clock_sender = 1;
 static int32_t g_rx_graphics_trim_ms = 0;
 static dashcdg_socket_t g_rx_stats_sockfd = DASHCDG_INVALID_SOCKET;
+static dashcdg_socket_t g_rx_data_sockfd = DASHCDG_INVALID_SOCKET;
 static struct sockaddr_in g_rx_stats_dest;
 static int g_headless = 0;
 static int g_audio_stream_started = 0;
 static int g_audio_start_inflight = 0;
 static int g_hud_visible = 0;
 static int g_audio_muted = 0;
+static volatile int g_rx_shutdown_requested = 0;
 static pthread_mutex_t g_render_mutex;
 static struct dashcdg_rx_render_snapshot g_render_snapshot;
 static FILE *g_rx_pcm_dump_file;
@@ -3498,6 +3500,18 @@ static void dashcdg_rx_init_stats_sender(int port) {
     g_rx_stats_dest.sin_addr = g_endpoint_in_addr;
 }
 
+static void dashcdg_rx_request_shutdown(void) {
+    g_rx_shutdown_requested = 1;
+    if (g_rx_data_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_rx_data_sockfd);
+        g_rx_data_sockfd = DASHCDG_INVALID_SOCKET;
+    }
+    if (g_rx_stats_sockfd != DASHCDG_INVALID_SOCKET) {
+        dashcdg_socket_close(g_rx_stats_sockfd);
+        g_rx_stats_sockfd = DASHCDG_INVALID_SOCKET;
+    }
+}
+
 static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
     struct dashcdg_packet_header hdr;
@@ -3620,11 +3634,15 @@ static void *network_thread(void *user_data) {
     endpoint_addr.sin_family = AF_INET;
     endpoint_addr.sin_port = htons((uint16_t) port);
     endpoint_addr.sin_addr = g_endpoint_in_addr;
+    g_rx_data_sockfd = sockfd;
 
     for (;;) {
         size_t received = 0U;
 
         if (!dashcdg_transport_udp_recv_datagram(sockfd, buffer, sizeof(buffer), &sender_addr, &received) || received == 0U) {
+            if (g_rx_shutdown_requested) {
+                break;
+            }
             continue;
         }
 
@@ -3791,7 +3809,10 @@ static void *network_thread(void *user_data) {
         }
     }
 
-    dashcdg_socket_close(sockfd);
+    if (g_rx_data_sockfd != DASHCDG_INVALID_SOCKET) {
+        g_rx_data_sockfd = DASHCDG_INVALID_SOCKET;
+        dashcdg_socket_close(sockfd);
+    }
     return NULL;
 }
 
@@ -3859,7 +3880,7 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
 
     (void) unused;
     dashcdg_win32_thread_timing_boost_begin(&mmcss);
-    for (;;) {
+    while (!g_rx_shutdown_requested) {
         int should_start_audio = 0;
         uint64_t now_ms = dashcdg_clock_now_ms();
 
@@ -4502,6 +4523,8 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     dashcdg_cdg_reader_init(&g_receiver.reader);
     dashcdg_media_clock_init(&g_receiver.sender_clock);
     g_audio = NULL;
+    g_rx_shutdown_requested = 0;
+    g_rx_data_sockfd = DASHCDG_INVALID_SOCKET;
 
     pthread_create(&rx_thread, NULL, network_thread, &port);
     pthread_create(&media_thread, NULL, dashcdg_rx_media_thread_main, NULL);
@@ -4513,6 +4536,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
 #if DASHCDG_RX_HAVE_GLUT || defined(_WIN32)
     if (dashcdg_rx_run_windowed_ui(argc, argv) != 0) {
+        dashcdg_rx_request_shutdown();
+        pthread_join(rx_thread, NULL);
+        pthread_join(media_thread, NULL);
         dashcdg_net_cleanup();
         if (g_audio != NULL) {
             dashcdg_desktop_audio_stop_stream(g_audio);
@@ -4527,6 +4553,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     }
 #else
     fprintf(stderr, "windowed RX requires a Win32 GDI-only build or OpenGL/GLUT\n");
+    dashcdg_rx_request_shutdown();
+    pthread_join(rx_thread, NULL);
+    pthread_join(media_thread, NULL);
     dashcdg_net_cleanup();
     if (g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
@@ -4540,6 +4569,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     return 1;
 #endif
 
+    dashcdg_rx_request_shutdown();
+    pthread_join(rx_thread, NULL);
+    pthread_join(media_thread, NULL);
     dashcdg_net_cleanup();
     if (g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
