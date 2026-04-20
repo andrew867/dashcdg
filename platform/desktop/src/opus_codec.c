@@ -116,15 +116,10 @@ int dashcdg_opus_encoder_init(
     opus_encoder_ctl(encoder->encoder, OPUS_SET_BITRATE(bitrate_bps));
     opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR(1));
     /*
-     * Constrained VBR keeps packet sizes predictable for speech/karaoke; on dense music at 96 kbit/s
-     * it can trade quality for frame-size uniformity and sound like level pumping ("tuned FM").
-     * Unconstrained VBR for the high-bitrate music tier avoids that.
+     * Unconstrained VBR avoids bitrate-target clamping that can sound like cheap compression /
+     * level pumping on programme material (especially vs narrowband chains that already band-limit).
      */
-    if (bitrate_bps > 0 && bitrate_bps < 96000) {
-        opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(1));
-    } else {
-        opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(0));
-    }
+    opus_encoder_ctl(encoder->encoder, OPUS_SET_VBR_CONSTRAINT(0));
     /*
      * High complexity + in-band FEC can exceed small UDP payloads and peg CPU under load;
      * keep frames compact and encoding cheap for real-time desktop streaming.

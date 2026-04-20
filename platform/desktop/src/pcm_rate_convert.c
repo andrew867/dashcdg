@@ -63,6 +63,130 @@ static int16_t dashcdg_f32_to_i16(float x) {
     return (int16_t) (x < 0.0f ? x - 0.5f : x + 0.5f);
 }
 
+/*
+ * Lanczos upsampling can exceed int16 peak on hot transients before quantization; a hard clip sounds
+ * like a crude limiter. Above a knee, compress smoothly toward ±full scale without exceeding it.
+ */
+int16_t dashcdg_pcm_float_soft_limit_to_i16(float x) {
+    const float knee = 28000.0f;
+    const float lim = 32767.0f;
+    float ax = fabsf(x);
+    float sign = (x < 0.0f) ? -1.0f : 1.0f;
+
+    if (ax <= knee) {
+        return dashcdg_f32_to_i16(x);
+    }
+    {
+        float over = ax - knee;
+        float span = lim - knee;
+        float target = knee + span * (1.0f - expf(-over / (span * 0.35f)));
+
+        if (target > lim) {
+            target = lim;
+        }
+        return dashcdg_f32_to_i16(sign * target);
+    }
+}
+
+void dashcdg_pcm_interleaved_s16_soft_limit_inplace(int16_t *pcm, size_t frame_count, unsigned int channels) {
+    size_t i;
+    size_t n;
+
+    if (pcm == NULL || frame_count == 0U || channels == 0U) {
+        return;
+    }
+    n = frame_count * (size_t) channels;
+    for (i = 0U; i < n; ++i) {
+        pcm[i] = dashcdg_pcm_float_soft_limit_to_i16((float) pcm[i]);
+    }
+}
+
+void dashcdg_pcm_hp80_biquad_reset(struct dashcdg_pcm_hp80_biquad_state *st) {
+    if (st != NULL) {
+        st->x1 = 0.0f;
+        st->x2 = 0.0f;
+        st->y1 = 0.0f;
+        st->y2 = 0.0f;
+    }
+}
+
+/*
+ * Second-order Butterworth high-pass, fc=80 Hz, fs=48000 Hz, RBJ audio EQ cookbook, Q = 1/sqrt(2).
+ */
+static void dashcdg_pcm_hp80_biquad_process_float(
+        struct dashcdg_pcm_hp80_biquad_state *st,
+        float b0,
+        float b1,
+        float b2,
+        float a1,
+        float a2,
+        float x,
+        float *y_out
+) {
+    float y = b0 * x + b1 * st->x1 + b2 * st->x2 - a1 * st->y1 - a2 * st->y2;
+
+    st->x2 = st->x1;
+    st->x1 = x;
+    st->y2 = st->y1;
+    st->y1 = y;
+    *y_out = y;
+}
+
+void dashcdg_pcm_hp80_process_mono(
+        struct dashcdg_pcm_hp80_biquad_state *st,
+        int16_t *samples,
+        size_t frame_count
+) {
+    static const float b0 = 0.9926225427561189f;
+    static const float b1 = -1.9852450855122379f;
+    static const float b2 = 0.9926225427561189f;
+    static const float a1 = -1.9851906578962613f;
+    static const float a2 = 0.9852995131282146f;
+    size_t i;
+
+    if (st == NULL || samples == NULL || frame_count == 0U) {
+        return;
+    }
+
+    for (i = 0U; i < frame_count; ++i) {
+        float xf = (float) samples[i];
+        float y;
+
+        dashcdg_pcm_hp80_biquad_process_float(st, b0, b1, b2, a1, a2, xf, &y);
+        samples[i] = dashcdg_pcm_float_soft_limit_to_i16(y);
+    }
+}
+
+void dashcdg_pcm_hp80_process_stereo_interleaved(
+        struct dashcdg_pcm_hp80_biquad_state *st_l,
+        struct dashcdg_pcm_hp80_biquad_state *st_r,
+        int16_t *interleaved,
+        size_t frame_count
+) {
+    static const float b0 = 0.9926225427561189f;
+    static const float b1 = -1.9852450855122379f;
+    static const float b2 = 0.9926225427561189f;
+    static const float a1 = -1.9851906578962613f;
+    static const float a2 = 0.9852995131282146f;
+    size_t i;
+
+    if (st_l == NULL || st_r == NULL || interleaved == NULL || frame_count == 0U) {
+        return;
+    }
+
+    for (i = 0U; i < frame_count; ++i) {
+        float xl = (float) interleaved[i * 2U];
+        float xr = (float) interleaved[i * 2U + 1U];
+        float yl;
+        float yr;
+
+        dashcdg_pcm_hp80_biquad_process_float(st_l, b0, b1, b2, a1, a2, xl, &yl);
+        dashcdg_pcm_hp80_biquad_process_float(st_r, b0, b1, b2, a1, a2, xr, &yr);
+        interleaved[i * 2U] = dashcdg_pcm_float_soft_limit_to_i16(yl);
+        interleaved[i * 2U + 1U] = dashcdg_pcm_float_soft_limit_to_i16(yr);
+    }
+}
+
 static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
         const int16_t *in,
         size_t in_len,
@@ -90,7 +214,7 @@ static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
             }
             acc += (float) in[(size_t) idx] * taps[k];
         }
-        out[j] = dashcdg_f32_to_i16(acc);
+        out[j] = dashcdg_pcm_float_soft_limit_to_i16(acc);
     }
 }
 
@@ -145,7 +269,7 @@ static void dashcdg_pcm_mono_resample_lanczos(
             }
             acc += (double) in[(size_t) ii] * (double) w;
         }
-        out[j] = dashcdg_f32_to_i16((float) acc);
+        out[j] = dashcdg_pcm_float_soft_limit_to_i16((float) acc);
     }
 }
 
@@ -358,6 +482,14 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
     outs_at_ext_base = dashcdg_pcm_output_frames_for_stream_position(ext_base_in, in_rate, out_rate);
     skip_out = outs_at_chunk_start > outs_at_ext_base ? outs_at_chunk_start - outs_at_ext_base : 0U;
 
+    if (out_frames > ext_out) {
+        memset(out, 0, out_frames * 2U * sizeof(int16_t));
+        goto update_tail;
+    }
+    if (skip_out + out_frames > ext_out) {
+        skip_out = ext_out - out_frames;
+    }
+
     if (work_cap < ext_in || work_cap < ext_out || skip_out + out_frames > ext_out) {
         memset(out, 0, out_frames * 2U * sizeof(int16_t));
         goto update_tail;
@@ -457,6 +589,14 @@ void dashcdg_pcm_mono_resample_overlap(
     ext_base_in = stream_in_samples_before_chunk > prepend ? stream_in_samples_before_chunk - prepend : 0ULL;
     outs_at_ext_base = dashcdg_pcm_output_frames_for_stream_position(ext_base_in, in_rate, out_rate);
     skip_out = outs_at_chunk_start > outs_at_ext_base ? outs_at_chunk_start - outs_at_ext_base : 0U;
+
+    if (out_frames > ext_out) {
+        memset(out, 0, out_frames * sizeof(int16_t));
+        goto update_tail;
+    }
+    if (skip_out + out_frames > ext_out) {
+        skip_out = ext_out - out_frames;
+    }
 
     if (work_cap < ext_in || work_cap < ext_out || skip_out + out_frames > ext_out) {
         memset(out, 0, out_frames * sizeof(int16_t));

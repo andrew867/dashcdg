@@ -45,12 +45,7 @@ static void dashcdg_float_mono_8k_to_pcm48_stereo(
     for (i = 0U; i < FSIZE; ++i) {
         float s = mono_float[i] * 4.0f;
 
-        if (s > 32767.0f) {
-            s = 32767.0f;
-        } else if (s < -32768.0f) {
-            s = -32768.0f;
-        }
-        mono8k[i] = (int16_t) (s < 0.0f ? s - 0.5f : s + 0.5f);
+        mono8k[i] = dashcdg_pcm_float_soft_limit_to_i16(s);
     }
     dashcdg_pcm_mono_resample_overlap(
             c->dec_tail8,

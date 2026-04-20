@@ -3366,6 +3366,10 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
     int reached_eof = 1;
     uint8_t current_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
     uint8_t current_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+    static struct dashcdg_pcm_hp80_biquad_state tx_nb_hp_mono;
+    static struct dashcdg_pcm_hp80_biquad_state tx_nb_hp_l;
+    static struct dashcdg_pcm_hp80_biquad_state tx_nb_hp_r;
+    static uint8_t tx_nb_hp_tracking_codec = 255;
 
     (void) unused;
     dashcdg_win32_thread_timing_boost_begin(&mmcss);
@@ -3439,6 +3443,10 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 next_playback_ms = 0U;
                 frame_index = 0U;
                 reached_eof = 1;
+                dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
+                dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
+                dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
+                tx_nb_hp_tracking_codec = 255;
             }
             if (mp3_path != NULL) {
                 int codec_ready = 1;
@@ -3605,6 +3613,31 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 dashcdg_pcm_stereo_interleaved_to_mono48(pcm, copy_frames, mono_pcm);
             } else if (copy_frames > 0U) {
                 memcpy(mono_pcm, pcm, copy_frames * sizeof(int16_t));
+            }
+
+            if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
+                if (tx_nb_hp_tracking_codec != current_codec_id) {
+                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
+                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
+                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
+                    tx_nb_hp_tracking_codec = current_codec_id;
+                }
+                if (copy_frames > 0U) {
+                    if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
+                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
+                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                        dashcdg_pcm_hp80_process_stereo_interleaved(&tx_nb_hp_l, &tx_nb_hp_r, pcm, copy_frames);
+                    } else {
+                        dashcdg_pcm_hp80_process_mono(&tx_nb_hp_mono, mono_pcm, copy_frames);
+                    }
+                }
+            } else {
+                if (tx_nb_hp_tracking_codec != 255) {
+                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
+                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
+                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
+                    tx_nb_hp_tracking_codec = 255;
+                }
             }
 
             if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {

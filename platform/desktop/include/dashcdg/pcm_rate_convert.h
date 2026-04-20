@@ -4,6 +4,40 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * Butterworth biquad high-pass @ 80 Hz (session 48 kHz). State is per channel; reset on codec
+ * / stream discontinuity so the IIR does not carry unrelated history across sessions.
+ */
+struct dashcdg_pcm_hp80_biquad_state {
+    float x1, x2, y1, y2;
+};
+
+void dashcdg_pcm_hp80_biquad_reset(struct dashcdg_pcm_hp80_biquad_state *st);
+
+/*
+ * Apply 80 Hz HP to mono or stereo-interleaved PCM in place (for narrowband codec paths).
+ */
+void dashcdg_pcm_hp80_process_mono(
+        struct dashcdg_pcm_hp80_biquad_state *st,
+        int16_t *samples,
+        size_t frame_count
+);
+
+void dashcdg_pcm_hp80_process_stereo_interleaved(
+        struct dashcdg_pcm_hp80_biquad_state *st_l,
+        struct dashcdg_pcm_hp80_biquad_state *st_r,
+        int16_t *interleaved,
+        size_t frame_count
+);
+
+/*
+ * Soft saturation toward ±full scale (same knee as Lanczos peak tamer). Use on int16 programme
+ * blocks to reduce hard-clip crackle on hot transients (narrowband paths, post-SRC, etc.).
+ */
+int16_t dashcdg_pcm_float_soft_limit_to_i16(float x);
+
+void dashcdg_pcm_interleaved_s16_soft_limit_inplace(int16_t *pcm, size_t frame_count, unsigned int channels);
+
 /* RX streaming SRC: prepend this many past input samples so Lanczos sees continuity across frames. */
 #define DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES 96
 
