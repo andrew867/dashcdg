@@ -1,9 +1,12 @@
 dashcdg — bundled MP3+G sample library
 =====================================
 
-This directory contains paired .cdg + .mp3 tracks used for transmitter/receiver
-testing (shuffle, seek, cold join, codec switches). The desktop TX and player
-entrypoints scan here by default when no path is given.
+This directory holds paired .cdg + .mp3 tracks for transmitter/receiver testing
+(shuffle, seek, cold join, codec switches). The desktop TX and player entrypoints
+scan here by default when no path is given.
+
+Until you populate pairs, the folder may contain only this README — that is fine;
+add same-stem .cdg + .mp3 files when you have them.
 
 Engineering note
 ----------------
