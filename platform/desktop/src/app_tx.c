@@ -97,6 +97,8 @@
 #define DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS 1000U
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
+#define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 40U
+#define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 3U
 /*
  * Anchor chunks used to ship one ~1 KiB fragment every TX tick (~100–1000 Hz) → multi‑Mbit/s bursts.
  * Cap payload per datagram and enforce a minimum spacing between chunks. First full anchor uses a
@@ -268,6 +270,13 @@ struct dashcdg_tx_state {
     uint64_t audio_queue_starvations;
     uint64_t audio_slow_loop_events;
     uint64_t audio_slow_loop_max_ms;
+    uint64_t audio_send_gap_events;
+    uint64_t audio_send_gap_max_ms;
+    uint64_t audio_send_burst_events;
+    uint64_t audio_send_burst_max_run;
+    uint64_t last_audio_chunk_send_local_ms;
+    uint64_t last_logged_audio_send_gap_events;
+    uint64_t last_logged_audio_send_burst_events;
     uint64_t last_logged_audio_source_open_failures;
     uint64_t last_logged_audio_source_seek_failures;
     uint64_t last_logged_audio_slow_read_events;
@@ -2490,6 +2499,38 @@ static void dashcdg_tx_log_audio_faults_locked(uint64_t now_ms) {
         dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_slow_loop_events = g_tx_state.audio_slow_loop_events;
     }
+    if (g_tx_state.audio_send_gap_events > g_tx_state.last_logged_audio_send_gap_events) {
+        delta = g_tx_state.audio_send_gap_events - g_tx_state.last_logged_audio_send_gap_events;
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_send_gap +%llu max=%llums q=%zu now=%llu",
+                (unsigned long long) delta,
+                (unsigned long long) g_tx_state.audio_send_gap_max_ms,
+                audio_queue_stats.depth,
+                (unsigned long long) now_ms
+        );
+        fprintf(stdout, "%s\n", line);
+        fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
+        g_tx_state.last_logged_audio_send_gap_events = g_tx_state.audio_send_gap_events;
+    }
+    if (g_tx_state.audio_send_burst_events > g_tx_state.last_logged_audio_send_burst_events) {
+        delta = g_tx_state.audio_send_burst_events - g_tx_state.last_logged_audio_send_burst_events;
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_send_burst +%llu maxrun=%llu q=%zu now=%llu",
+                (unsigned long long) delta,
+                (unsigned long long) g_tx_state.audio_send_burst_max_run,
+                audio_queue_stats.depth,
+                (unsigned long long) now_ms
+        );
+        fprintf(stdout, "%s\n", line);
+        fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
+        g_tx_state.last_logged_audio_send_burst_events = g_tx_state.audio_send_burst_events;
+    }
 }
 
 static void dashcdg_tx_print_status_locked(void) {
@@ -2547,7 +2588,7 @@ static void dashcdg_tx_print_status_locked(void) {
     snprintf(
             line,
             sizeof(line),
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB lib=%zu/%zu CDG | audq=%zu hi=%zu ovf=%llu starve=%llu open=%llu seek=%llu rdslow=%llu/%llums rs=%llu enc=%llu loop=%llu/%llums gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu",
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB lib=%zu/%zu CDG | audq=%zu hi=%zu ovf=%llu starve=%llu open=%llu seek=%llu rdslow=%llu/%llums rs=%llu enc=%llu loop=%llu/%llums sendgap=%llu/%llums burst=%llu/%llu gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -2587,6 +2628,10 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) g_tx_state.audio_encode_failures,
             (unsigned long long) g_tx_state.audio_slow_loop_events,
             (unsigned long long) g_tx_state.audio_slow_loop_max_ms,
+            (unsigned long long) g_tx_state.audio_send_gap_events,
+            (unsigned long long) g_tx_state.audio_send_gap_max_ms,
+            (unsigned long long) g_tx_state.audio_send_burst_events,
+            (unsigned long long) g_tx_state.audio_send_burst_max_run,
             (unsigned long long) g_tx_state.audio_frames_generated,
             g_tx_state.audio_producer_finished,
             (long long) audio_lead_ms,
@@ -2732,6 +2777,13 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.audio_queue_starvations = 0;
     g_tx_state.audio_slow_loop_events = 0;
     g_tx_state.audio_slow_loop_max_ms = 0;
+    g_tx_state.audio_send_gap_events = 0;
+    g_tx_state.audio_send_gap_max_ms = 0;
+    g_tx_state.audio_send_burst_events = 0;
+    g_tx_state.audio_send_burst_max_run = 0;
+    g_tx_state.last_audio_chunk_send_local_ms = 0;
+    g_tx_state.last_logged_audio_send_gap_events = 0;
+    g_tx_state.last_logged_audio_send_burst_events = 0;
     g_tx_state.last_logged_audio_source_open_failures = 0;
     g_tx_state.last_logged_audio_source_seek_failures = 0;
     g_tx_state.last_logged_audio_slow_read_events = 0;
@@ -4845,6 +4897,17 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         if (!dashcdg_tx_send_v4_audio_chunk_locked(now_ms, frame, packet, packet_size)) {
             break;
         }
+        if (g_tx_state.last_audio_chunk_send_local_ms != 0U && now_ms > g_tx_state.last_audio_chunk_send_local_ms) {
+            uint64_t send_gap_ms = now_ms - g_tx_state.last_audio_chunk_send_local_ms;
+
+            if (send_gap_ms >= DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS) {
+                g_tx_state.audio_send_gap_events++;
+                if (send_gap_ms > g_tx_state.audio_send_gap_max_ms) {
+                    g_tx_state.audio_send_gap_max_ms = send_gap_ms;
+                }
+            }
+        }
+        g_tx_state.last_audio_chunk_send_local_ms = now_ms;
         g_tx_state.audio_packets_sent++;
         if (g_tx_state.audio_fec_group_size > 0U && g_tx_state.audio_fec_group_id != frame->group_id) {
             dashcdg_tx_send_audio_group_fec_locked(now_ms, g_tx_state.audio_fec_group_id);
@@ -4866,6 +4929,12 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         }
         g_tx_state.pending_audio_frame_valid = 0;
         audio_sent++;
+    }
+    if (audio_sent >= DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS) {
+        g_tx_state.audio_send_burst_events++;
+        if ((uint64_t) audio_sent > g_tx_state.audio_send_burst_max_run) {
+            g_tx_state.audio_send_burst_max_run = (uint64_t) audio_sent;
+        }
     }
 
     if (g_tx_state.audio_producer_finished &&

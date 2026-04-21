@@ -121,6 +121,8 @@
 #define DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES (4U + (DASHCDG_CDG_SNAPSHOT_STATE_BYTES * 2U))
 #define DASHCDG_V4_ANCHOR_CHUNK_COUNT ((DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES + DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE - 1U) / \
         DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE)
+#define DASHCDG_RX_AUDIO_ARRIVAL_GAP_THRESHOLD_MS 40U
+#define DASHCDG_RX_AUDIO_ARRIVAL_BURST_THRESHOLD_MS 3U
 
 static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
     uint64_t now_ms;
@@ -246,6 +248,15 @@ struct receiver_state {
     uint64_t last_logged_audio_reordered_packets;
     uint64_t last_logged_cdg_reordered_batches;
     uint64_t last_logged_stream_underrun_events;
+    uint64_t audio_arrival_gap_events;
+    uint64_t audio_arrival_gap_max_ms;
+    uint64_t audio_arrival_burst_events;
+    uint64_t audio_arrival_burst_max_run;
+    uint64_t audio_last_chunk_local_ms;
+    uint64_t audio_burst_window_start_local_ms;
+    uint32_t audio_burst_run_count;
+    uint64_t last_logged_audio_arrival_gap_events;
+    uint64_t last_logged_audio_arrival_burst_events;
     uint16_t announced_audio_sample_rate;
     uint8_t announced_audio_channels;
     uint16_t announced_playout_delay_ms;
@@ -1062,6 +1073,15 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->last_logged_audio_reordered_packets = 0;
     state->last_logged_cdg_reordered_batches = 0;
     state->last_logged_stream_underrun_events = 0;
+    state->audio_arrival_gap_events = 0;
+    state->audio_arrival_gap_max_ms = 0;
+    state->audio_arrival_burst_events = 0;
+    state->audio_arrival_burst_max_run = 0;
+    state->audio_last_chunk_local_ms = 0;
+    state->audio_burst_window_start_local_ms = 0;
+    state->audio_burst_run_count = 0;
+    state->last_logged_audio_arrival_gap_events = 0;
+    state->last_logged_audio_arrival_burst_events = 0;
     state->announced_audio_sample_rate = 0;
     state->announced_audio_channels = 0;
     state->announced_playout_delay_ms = 0;
@@ -2144,6 +2164,73 @@ static void dashcdg_rx_log_fault_events_locked(struct receiver_state *state, uin
         fflush(stdout);
         state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
     }
+    if (state->audio_arrival_gap_events > state->last_logged_audio_arrival_gap_events) {
+        delta = state->audio_arrival_gap_events - state->last_logged_audio_arrival_gap_events;
+        fprintf(
+                stdout,
+                "[rx] fault: audio_arrival_gap +%llu max=%llums pending=%u buf=%u now=%llu\n",
+                (unsigned long long) delta,
+                (unsigned long long) state->audio_arrival_gap_max_ms,
+                (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
+                (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
+                (unsigned long long) local_now_ms
+        );
+        fflush(stdout);
+        state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
+    }
+    if (state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) {
+        delta = state->audio_arrival_burst_events - state->last_logged_audio_arrival_burst_events;
+        fprintf(
+                stdout,
+                "[rx] fault: audio_arrival_burst +%llu maxrun=%llu pending=%u buf=%u now=%llu\n",
+                (unsigned long long) delta,
+                (unsigned long long) state->audio_arrival_burst_max_run,
+                (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
+                (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
+                (unsigned long long) local_now_ms
+        );
+        fflush(stdout);
+        state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
+    }
+}
+
+static void dashcdg_rx_note_audio_chunk_arrival_locked(struct receiver_state *state, uint64_t local_now_ms) {
+    uint64_t gap_ms;
+
+    if (state == NULL) {
+        return;
+    }
+    if (state->audio_last_chunk_local_ms != 0U && local_now_ms > state->audio_last_chunk_local_ms) {
+        gap_ms = local_now_ms - state->audio_last_chunk_local_ms;
+        if (gap_ms >= DASHCDG_RX_AUDIO_ARRIVAL_GAP_THRESHOLD_MS) {
+            state->audio_arrival_gap_events++;
+            if (gap_ms > state->audio_arrival_gap_max_ms) {
+                state->audio_arrival_gap_max_ms = gap_ms;
+            }
+            state->audio_burst_window_start_local_ms = local_now_ms;
+            state->audio_burst_run_count = 1U;
+        } else {
+            if (state->audio_burst_window_start_local_ms == 0U ||
+                    local_now_ms - state->audio_burst_window_start_local_ms > 5U) {
+                state->audio_burst_window_start_local_ms = local_now_ms;
+                state->audio_burst_run_count = 1U;
+            } else {
+                state->audio_burst_run_count++;
+                if (state->audio_burst_run_count >= DASHCDG_RX_AUDIO_ARRIVAL_BURST_THRESHOLD_MS) {
+                    state->audio_arrival_burst_events++;
+                    if ((uint64_t) state->audio_burst_run_count > state->audio_arrival_burst_max_run) {
+                        state->audio_arrival_burst_max_run = (uint64_t) state->audio_burst_run_count;
+                    }
+                    state->audio_burst_window_start_local_ms = local_now_ms;
+                    state->audio_burst_run_count = 1U;
+                }
+            }
+        }
+    } else {
+        state->audio_burst_window_start_local_ms = local_now_ms;
+        state->audio_burst_run_count = 1U;
+    }
+    state->audio_last_chunk_local_ms = local_now_ms;
 }
 
 static void dashcdg_rx_note_audio_timestamp_progress_locked(
@@ -3483,6 +3570,7 @@ static void dashcdg_rx_print_status_locked(void) {
             " | repair aud=%" DASHCDG_RX_PRIu64 " live=%" DASHCDG_RX_PRIu64 " fail=%" DASHCDG_RX_PRIu64
             " grp=%u/%u parity=%u/%u hot=%u/%u | audio buf=%ums tgt=%u host=%u total=%u trim=%dppm decode_fail=%" DASHCDG_RX_PRIu64
             " queue_ovf=%" DASHCDG_RX_PRIu64 " host_und=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
+            " arrgap=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " burst=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
             " started=%d muted=%d gate=%s render=%s | sync off=%" DASHCDG_RX_PRIi64
             "ms path=%" DASHCDG_RX_PRIi64 "ms step=%" DASHCDG_RX_PRIi64 "/%" DASHCDG_RX_PRIi64 " peak=%" DASHCDG_RX_PRIi64
             "/%" DASHCDG_RX_PRIi64 " upd=%" DASHCDG_RX_PRIu64 " ptp_ok=%" DASHCDG_RX_PRIu64 " fallback=%" DASHCDG_RX_PRIu64
@@ -3547,6 +3635,10 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.audio_queue_overflows,
             (unsigned long long) (g_audio != NULL ? g_audio->stream_underrun_events : 0U),
             (unsigned long long) (g_audio != NULL ? g_audio->stream_underrun_frames : 0U),
+            (unsigned long long) g_receiver.audio_arrival_gap_events,
+            (unsigned long long) g_receiver.audio_arrival_gap_max_ms,
+            (unsigned long long) g_receiver.audio_arrival_burst_events,
+            (unsigned long long) g_receiver.audio_arrival_burst_max_run,
             g_audio_stream_started,
             muted,
             audio_gate,
@@ -4168,6 +4260,7 @@ static void handle_v4_audio_chunk(struct receiver_state *state, const struct das
         return;
     }
 
+    dashcdg_rx_note_audio_chunk_arrival_locked(state, dashcdg_clock_now_ms());
     if (dashcdg_rx_store_v4_audio_frame_locked(state, view)) {
         dashcdg_rx_observe_audio_payload_for_fec_locked(
                 state,
