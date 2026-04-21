@@ -10,7 +10,34 @@
 *.o
 /.idea
 *.tar
-build/
+
+# Build outputs: ignore by default; track only release trees (bin/lib/dist + sneakernet).
+# Parent dirs must be un-ignored before children (git does not re-include under ignored parents).
+/build/*
+!/build/bin/
+/build/bin/*
+!/build/bin/**
+!/build/amd64/
+/build/amd64/*
+!/build/amd64/bin/
+!/build/amd64/bin/**
+!/build/amd64/lib/
+!/build/amd64/lib/**
+!/build/x86/
+/build/x86/*
+!/build/x86/bin/
+!/build/x86/bin/**
+!/build/x86/lib/
+!/build/x86/lib/**
+!/build/x86-retro/
+/build/x86-retro/*
+!/build/x86-retro/bin/
+!/build/x86-retro/bin/**
+!/build/x86-retro/lib/
+!/build/x86-retro/lib/**
+!/build/dist/
+/build/dist/*
+!/build/dist/**
 
 # Local clones / experiments (use scripts/fetch_audio_codec_vendors.sh into audio_modules/*/vendor/)
 third_party/
