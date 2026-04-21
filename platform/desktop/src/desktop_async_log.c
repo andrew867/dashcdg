@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -14,6 +15,7 @@
 static void *dashcdg_async_logger_thread_main(void *userdata) {
     struct dashcdg_async_logger *logger = (struct dashcdg_async_logger *) userdata;
     uint64_t dropped_to_report = 0U;
+    time_t last_flush_time = time(NULL);
 
 #ifdef _WIN32
     (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -26,7 +28,19 @@ static void *dashcdg_async_logger_thread_main(void *userdata) {
 
         pthread_mutex_lock(&logger->mutex);
         while (!logger->shutdown && logger->count == 0U) {
-            pthread_cond_wait(&logger->cond, &logger->mutex);
+            struct timespec wake_time;
+
+            wake_time.tv_sec = time(NULL) + 10;
+            wake_time.tv_nsec = 0;
+            (void) pthread_cond_timedwait(&logger->cond, &logger->mutex, &wake_time);
+            if (logger->count == 0U && logger->sidecar_file != NULL) {
+                time_t now = time(NULL);
+
+                if (now - last_flush_time >= 10) {
+                    fflush(logger->sidecar_file);
+                    last_flush_time = now;
+                }
+            }
         }
         if (logger->count > 0U) {
             item = logger->queue[logger->read_index];
@@ -67,6 +81,14 @@ static void *dashcdg_async_logger_thread_main(void *userdata) {
             }
             if (logger->sidecar_file != NULL) {
                 fprintf(logger->sidecar_file, "%s\n", item.line);
+            }
+        }
+        if (logger->sidecar_file != NULL) {
+            time_t now = time(NULL);
+
+            if (now - last_flush_time >= 10) {
+                fflush(logger->sidecar_file);
+                last_flush_time = now;
             }
         }
     }

@@ -4580,6 +4580,71 @@ static void dashcdg_tx_draw_status_bar_locked(void) {
     g_tx_console.status_bar_valid = 1;
 }
 
+static void dashcdg_tx_draw_status_bar_unlocked(void) {
+    char status_line[512];
+    size_t rows = 0U;
+    size_t cols = 0U;
+    size_t new_length;
+
+    if (!g_tx_console.status_bar_enabled) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_tx_state.mutex);
+    dashcdg_tx_format_status_bar_locked(status_line, sizeof(status_line));
+    pthread_mutex_unlock(&g_tx_state.mutex);
+
+    dashcdg_tx_console_get_dimensions(&rows, &cols);
+    if (rows == 0U) {
+        rows = 1U;
+    }
+    dashcdg_tx_console_sync_scroll_layout(rows);
+    if (cols > 1U && strlen(status_line) >= cols) {
+        status_line[cols - 1U] = '\0';
+    }
+    new_length = strlen(status_line);
+
+    if (g_tx_console.status_bar_valid &&
+            g_tx_console.last_status_row == rows &&
+            g_tx_console.last_status_cols == cols &&
+            strcmp(g_tx_console.last_status_line, status_line) == 0) {
+        return;
+    }
+
+    if (!g_tx_console.status_bar_valid ||
+            g_tx_console.last_status_row != rows ||
+            g_tx_console.last_status_cols != cols) {
+        fprintf(stdout, "\033[s\033[%zu;1H\033[2K%s\033[u", rows, status_line);
+    } else {
+        size_t first_diff = 0U;
+        size_t old_length = g_tx_console.last_status_length;
+
+        while (first_diff < old_length &&
+                first_diff < new_length &&
+                g_tx_console.last_status_line[first_diff] == status_line[first_diff]) {
+            first_diff++;
+        }
+
+        if (first_diff < old_length || first_diff < new_length) {
+            size_t pad_spaces = old_length > new_length ? old_length - new_length : 0U;
+
+            fprintf(stdout, "\033[s\033[%zu;%zuH%s", rows, first_diff + 1U, status_line + first_diff);
+            if (pad_spaces > 0U) {
+                fprintf(stdout, "%*s", (int) pad_spaces, "");
+            }
+            fprintf(stdout, "\033[u");
+        }
+    }
+    fflush(stdout);
+
+    strncpy(g_tx_console.last_status_line, status_line, sizeof(g_tx_console.last_status_line) - 1U);
+    g_tx_console.last_status_line[sizeof(g_tx_console.last_status_line) - 1U] = '\0';
+    g_tx_console.last_status_length = strlen(g_tx_console.last_status_line);
+    g_tx_console.last_status_row = rows;
+    g_tx_console.last_status_cols = cols;
+    g_tx_console.status_bar_valid = 1;
+}
+
 static void dashcdg_tx_print_controls_help(void) {
     fprintf(
             stdout,
@@ -4742,19 +4807,20 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
     dashcdg_tx_console_sync_scroll_layout_for_tty();
     dashcdg_tx_console_scroll_log_past_status_row();
     dashcdg_tx_print_controls_help();
-    pthread_mutex_lock(&g_tx_state.mutex);
     if (g_tx_console.status_bar_enabled) {
-        dashcdg_tx_draw_status_bar_locked();
+        dashcdg_tx_draw_status_bar_unlocked();
     } else {
+        pthread_mutex_lock(&g_tx_state.mutex);
         dashcdg_tx_print_status_locked();
+        pthread_mutex_unlock(&g_tx_state.mutex);
     }
-    pthread_mutex_unlock(&g_tx_state.mutex);
 
     for (;;) {
         int command = dashcdg_tx_console_read_command_nonblocking();
         int shutdown_requested = 0;
         uint64_t now_ms = dashcdg_clock_now_ms();
         size_t fault_line_count = 0U;
+        int status_redraw_due = 0;
 
         pthread_mutex_lock(&g_tx_state.mutex);
         shutdown_requested = g_tx_state.shutdown_requested;
@@ -4763,7 +4829,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
         }
         if (g_tx_console.status_bar_enabled &&
                 (last_status_ms == 0U || now_ms - last_status_ms >= DASHCDG_TX_STATUS_BAR_INTERVAL_MS)) {
-            dashcdg_tx_draw_status_bar_locked();
+            status_redraw_due = 1;
             last_status_ms = now_ms;
         }
         fault_line_count = dashcdg_tx_collect_audio_fault_lines_locked(
@@ -4773,6 +4839,9 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
         );
         pthread_mutex_unlock(&g_tx_state.mutex);
         dashcdg_tx_emit_fault_lines(fault_lines, fault_line_count);
+        if (status_redraw_due) {
+            dashcdg_tx_draw_status_bar_unlocked();
+        }
 
         if (shutdown_requested) {
             break;
