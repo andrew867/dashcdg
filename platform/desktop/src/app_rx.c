@@ -3062,7 +3062,6 @@ static uint16_t dashcdg_rx_portaudio_output_channels(uint8_t wire_channels) {
 /* Opus allows up to 120 ms frames @ 48 kHz → 5760 samples/channel (see TX session audio_frame_ms). */
 #define DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES 5760
 #define DASHCDG_RX_PCM_WORK_SAMPLES_MAX (DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES + DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES)
-#define DASHCDG_RX_AUDIO_CONCEAL_PCM_SAMPLES (DASHCDG_RX_PCM_WORK_SAMPLES_MAX * 2U)
 #define DASHCDG_RX_PCM_INTERLEAVED_SAMPLES_MAX (DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES * 2U)
 
 static int dashcdg_rx_apply_audio_frame_locked(
@@ -3071,6 +3070,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
 ) {
     int16_t pcm[DASHCDG_RX_PCM_INTERLEAVED_SAMPLES_MAX];
     int16_t mono_scratch[DASHCDG_RX_PCM_WORK_SAMPLES_MAX];
+    uint16_t host_output_channels;
     int decoded_frames;
     size_t queued_frames;
     size_t expected_queued_fc;
@@ -3078,6 +3078,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
     if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio == NULL) {
         return 0;
     }
+    host_output_channels = dashcdg_rx_portaudio_output_channels(state->announced_audio_channels);
 
     /*
      * Steady state should hold near the target playout buffer, not hammer the queue path until we
@@ -3108,7 +3109,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
                     mono_scratch,
                     sizeof(mono_scratch) / sizeof(mono_scratch[0])
             );
-            if (decoded_frames > 0 && dashcdg_rx_portaudio_output_channels(state->announced_audio_channels) == 2U) {
+            if (decoded_frames > 0 && host_output_channels == 2U) {
                 if ((size_t) decoded_frames * 2U > sizeof(pcm) / sizeof(pcm[0])) {
                     state->audio_decode_failures++;
                     return -1;
@@ -3229,6 +3230,11 @@ static int dashcdg_rx_apply_audio_frame_locked(
         state->audio_decode_failures++;
         return -1;
     }
+    if ((size_t) decoded_frames * (size_t) (host_output_channels == 0U ? 1U : host_output_channels) >
+            sizeof(pcm) / sizeof(pcm[0])) {
+        state->audio_decode_failures++;
+        return -1;
+    }
 
     {
         uint32_t ses_sr;
@@ -3240,7 +3246,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
         int resampled_output = 0;
         uint32_t buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
         int32_t trim_ppm = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
-        unsigned int host_ch = (unsigned int) dashcdg_rx_portaudio_output_channels(state->announced_audio_channels);
+        unsigned int host_ch = (unsigned int) host_output_channels;
         const int16_t *qptr = pcm;
         size_t qfc = (size_t) decoded_frames;
         int16_t *rs_tmp = NULL;
@@ -3882,6 +3888,16 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
         }
         if (g_audio != NULL) {
             dashcdg_desktop_audio_stop_stream(g_audio);
+            state->pcm_src_overlap_valid = 0U;
+            state->pcm_src_stream_in_samples = 0U;
+            state->pcm_src_stream_out_samples = 0U;
+#if defined(DASHCDG_HAVE_LIBSOXR)
+            dashcdg_pcm_soxr_stream_reset();
+#endif
+            state->audio_resample_trim_ppm = 0;
+            state->last_audio_queue_success_local_ms = 0U;
+            state->last_audio_timestamp_advance_local_ms = 0U;
+            state->last_audio_timestamp_ms = -1;
             if (!dashcdg_desktop_audio_init_stream(
                         g_audio,
                         view->announce.audio_sample_rate,
@@ -4132,6 +4148,9 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
     dashcdg_audio_jitter_clear(&state->audio_jitter);
     state->jitter_audio_decode_primed = 0;
     memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+    state->pcm_src_overlap_valid = 0U;
+    state->pcm_src_stream_in_samples = 0U;
+    state->pcm_src_stream_out_samples = 0U;
 #if defined(DASHCDG_HAVE_LIBSOXR)
     dashcdg_pcm_soxr_stream_reset();
 #endif
