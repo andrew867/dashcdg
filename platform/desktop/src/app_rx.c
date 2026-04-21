@@ -1933,6 +1933,7 @@ static int dashcdg_rx_should_auto_recover_zero_buffer_locked(
     uint32_t buffered_ms;
     size_t pending_audio;
     uint64_t since_last_audio_apply_ms;
+    uint64_t since_last_dg_ms;
 
     if (state == NULL || !state->network_audio_enabled || state->playback_paused ||
             g_audio == NULL || !g_audio_stream_started || g_audio_start_inflight) {
@@ -1948,13 +1949,17 @@ static int dashcdg_rx_should_auto_recover_zero_buffer_locked(
         return 0;
     }
 
-    pending_audio = dashcdg_audio_jitter_occupied_count(&state->audio_jitter);
-    if (pending_audio == 0U) {
+    since_last_audio_apply_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_audio_jitter_apply_local_ms);
+    if (since_last_audio_apply_ms < DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS) {
+        return 0;
+    }
+    since_last_dg_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_datagram_local_ms);
+    if (since_last_dg_ms > 1000U) {
         return 0;
     }
 
-    since_last_audio_apply_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_audio_jitter_apply_local_ms);
-    if (since_last_audio_apply_ms < DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS) {
+    pending_audio = dashcdg_audio_jitter_occupied_count(&state->audio_jitter);
+    if (pending_audio == 0U && !state->audio_jitter.initialized) {
         return 0;
     }
 
