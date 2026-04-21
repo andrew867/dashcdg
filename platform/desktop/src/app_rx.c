@@ -423,6 +423,8 @@ static void dashcdg_rx_refresh_audio_latency_budget_locked(
         uint32_t configured_ring_ms
 );
 static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *state, uint32_t buffered_ms);
+static int dashcdg_rx_audio_backpressure_hold_active_locked(const struct receiver_state *state, uint64_t local_now_ms);
+static int dashcdg_rx_audio_recent_auto_recover_locked(const struct receiver_state *state, uint64_t local_now_ms);
 
 static void dashcdg_rx_dump_pcm_to_file(const int16_t *pcm, size_t frame_count, unsigned int channels) {
     const char *dump_dir;
@@ -1632,8 +1634,6 @@ static void dashcdg_rx_format_audio_gate_locked(
 ) {
     uint32_t buffered_ms;
 
-    (void) local_now_ms;
-
     if (buffer == NULL || buffer_size == 0) {
         return;
     }
@@ -1647,6 +1647,10 @@ static void dashcdg_rx_format_audio_gate_locked(
         snprintf(buffer, buffer_size, "wait-ptp");
     } else if (state->playback_paused) {
         snprintf(buffer, buffer_size, "paused");
+    } else if (dashcdg_rx_audio_backpressure_hold_active_locked(state, local_now_ms)) {
+        snprintf(buffer, buffer_size, "backpressure-hold");
+    } else if (dashcdg_rx_audio_recent_auto_recover_locked(state, local_now_ms)) {
+        snprintf(buffer, buffer_size, "auto-recover");
     } else if (g_audio == NULL) {
         snprintf(buffer, buffer_size, "wait-audio-init");
     } else if (g_audio_stream_started) {
@@ -1955,6 +1959,16 @@ static int dashcdg_rx_should_auto_recover_zero_buffer_locked(
     }
 
     return 1;
+}
+
+static int dashcdg_rx_audio_recent_auto_recover_locked(
+        const struct receiver_state *state,
+        uint64_t local_now_ms
+) {
+    if (state == NULL || state->audio_last_stall_recover_local_ms == 0U) {
+        return 0;
+    }
+    return local_now_ms - state->audio_last_stall_recover_local_ms < DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS;
 }
 
 static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
