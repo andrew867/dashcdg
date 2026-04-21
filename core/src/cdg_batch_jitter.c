@@ -91,6 +91,7 @@ int dashcdg_cdg_batch_jitter_insert(
          * periodic missing graphic stripes during full-screen CDG paints.
          */
         jb->next_packet_index = 0U;
+        jb->highest_packet_index_seen = packet_start_index;
         jb->next_playback_ms = 0U;
         jb->initialized = 1;
     } else if (packet_start_index + (uint64_t) packet_count <= jb->next_packet_index) {
@@ -101,7 +102,7 @@ int dashcdg_cdg_batch_jitter_insert(
             jb->pending_drops++;
         }
         return 0;
-    } else if (count_stats && packet_start_index > jb->next_packet_index) {
+    } else if (count_stats && packet_start_index < jb->highest_packet_index_seen) {
         jb->reordered_batches++;
     }
 
@@ -130,6 +131,9 @@ int dashcdg_cdg_batch_jitter_insert(
     slot->packet_start_index = packet_start_index;
     slot->packet_count = packet_count;
     memcpy(slot->packet_bytes, payload, packet_bytes);
+    if (packet_start_index > jb->highest_packet_index_seen) {
+        jb->highest_packet_index_seen = packet_start_index;
+    }
     return 1;
 }
 

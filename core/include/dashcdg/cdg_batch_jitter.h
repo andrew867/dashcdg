@@ -25,6 +25,7 @@ struct dashcdg_cdg_batch_jitter_buffer {
     struct dashcdg_cdg_batch_jitter_frame slots[DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT];
     int initialized;
     uint64_t next_packet_index;
+    uint64_t highest_packet_index_seen;
     uint64_t next_playback_ms;
     uint64_t reordered_batches;
     uint64_t pending_drops;
