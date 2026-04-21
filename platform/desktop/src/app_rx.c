@@ -3062,12 +3062,14 @@ static uint16_t dashcdg_rx_portaudio_output_channels(uint8_t wire_channels) {
 /* Opus allows up to 120 ms frames @ 48 kHz → 5760 samples/channel (see TX session audio_frame_ms). */
 #define DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES 5760
 #define DASHCDG_RX_PCM_WORK_SAMPLES_MAX (DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES + DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES)
+#define DASHCDG_RX_AUDIO_CONCEAL_PCM_SAMPLES (DASHCDG_RX_PCM_WORK_SAMPLES_MAX * 2U)
+#define DASHCDG_RX_PCM_INTERLEAVED_SAMPLES_MAX (DASHCDG_RX_OPUS_MONO_SCRATCH_SAMPLES * 2U)
 
 static int dashcdg_rx_apply_audio_frame_locked(
         struct receiver_state *state,
         const struct dashcdg_audio_jitter_frame *frame
 ) {
-    int16_t pcm[DASHCDG_AUDIO_SAMPLE_RATE * DASHCDG_AUDIO_CHANNELS / 50U];
+    int16_t pcm[DASHCDG_RX_PCM_INTERLEAVED_SAMPLES_MAX];
     int16_t mono_scratch[DASHCDG_RX_PCM_WORK_SAMPLES_MAX];
     int decoded_frames;
     size_t queued_frames;
@@ -3085,8 +3087,13 @@ static int dashcdg_rx_apply_audio_frame_locked(
     if (g_audio_stream_started && dashcdg_desktop_audio_output_device_ready(g_audio)) {
         uint32_t buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
         uint32_t target_ms = dashcdg_rx_audio_target_buffer_ms_locked(state);
+        uint32_t high_water_ms = target_ms;
+        uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
 
-        if (target_ms > 0U && buffered_ms >= target_ms) {
+        if (frame_ms > 0U) {
+            high_water_ms += (uint32_t) frame_ms;
+        }
+        if (target_ms > 0U && buffered_ms >= high_water_ms) {
             return 0;
         }
     }
