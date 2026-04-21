@@ -13,7 +13,6 @@
 #include <windows.h>
 #include <conio.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <io.h>
 #else
 #include <errno.h>
@@ -326,34 +325,20 @@ struct dashcdg_tx_state {
 static struct dashcdg_tx_state g_tx_state;
 
 #ifdef _WIN32
-static HANDLE g_tx_sidecar_log_file = INVALID_HANDLE_VALUE;
-static HANDLE g_tx_sidecar_pipe_read = INVALID_HANDLE_VALUE;
-static HANDLE g_tx_sidecar_pipe_write = INVALID_HANDLE_VALUE;
-static HANDLE g_tx_console_stdout = INVALID_HANDLE_VALUE;
-static HANDLE g_tx_console_stderr = INVALID_HANDLE_VALUE;
-static pthread_t g_tx_sidecar_thread;
-static int g_tx_sidecar_thread_created = 0;
-
-static void *dashcdg_tx_sidecar_tee_thread_main(void *unused) {
-    char buffer[4096];
-    DWORD bytes_read = 0U;
-
-    (void) unused;
-    while (g_tx_sidecar_pipe_read != INVALID_HANDLE_VALUE &&
-            ReadFile(g_tx_sidecar_pipe_read, buffer, (DWORD) sizeof(buffer), &bytes_read, NULL) &&
-            bytes_read > 0U) {
-        DWORD bytes_written = 0U;
-
-        if (g_tx_console_stdout != INVALID_HANDLE_VALUE) {
-            (void) WriteFile(g_tx_console_stdout, buffer, bytes_read, &bytes_written, NULL);
-        }
-        if (g_tx_sidecar_log_file != INVALID_HANDLE_VALUE) {
-            (void) WriteFile(g_tx_sidecar_log_file, buffer, bytes_read, &bytes_written, NULL);
-        }
-    }
-    return NULL;
-}
+static FILE *g_tx_sidecar_log_file = NULL;
 #endif
+
+static void dashcdg_tx_sidecar_write_line(const char *line) {
+#ifdef _WIN32
+    if (g_tx_sidecar_log_file != NULL && line != NULL) {
+        fputs(line, g_tx_sidecar_log_file);
+        fputc('\n', g_tx_sidecar_log_file);
+        fflush(g_tx_sidecar_log_file);
+    }
+#else
+    (void) line;
+#endif
+}
 
 static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
 #ifdef _WIN32
@@ -365,7 +350,7 @@ static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
     char *dot;
     time_t now_t;
     struct tm now_tm;
-    int pipe_fd;
+    char line[sizeof(log_path) + 32U];
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
@@ -404,50 +389,15 @@ static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
             now_tm.tm_sec,
             (unsigned long) GetCurrentProcessId()
     );
-    g_tx_console_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
-    g_tx_console_stderr = GetStdHandle(STD_ERROR_HANDLE);
-    g_tx_sidecar_log_file = CreateFileA(
-            log_path,
-            FILE_APPEND_DATA,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            NULL,
-            OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL
-    );
-    if (g_tx_sidecar_log_file == INVALID_HANDLE_VALUE) {
+    g_tx_sidecar_log_file = fopen(log_path, "a");
+    if (g_tx_sidecar_log_file == NULL) {
         return;
     }
-    if (!CreatePipe(&g_tx_sidecar_pipe_read, &g_tx_sidecar_pipe_write, NULL, 0)) {
-        CloseHandle(g_tx_sidecar_log_file);
-        g_tx_sidecar_log_file = INVALID_HANDLE_VALUE;
-        return;
-    }
-    (void) SetHandleInformation(g_tx_sidecar_pipe_read, HANDLE_FLAG_INHERIT, 0);
-    pipe_fd = _open_osfhandle((intptr_t) g_tx_sidecar_pipe_write, _O_TEXT);
-    if (pipe_fd < 0) {
-        CloseHandle(g_tx_sidecar_pipe_read);
-        CloseHandle(g_tx_sidecar_pipe_write);
-        CloseHandle(g_tx_sidecar_log_file);
-        g_tx_sidecar_pipe_read = INVALID_HANDLE_VALUE;
-        g_tx_sidecar_pipe_write = INVALID_HANDLE_VALUE;
-        g_tx_sidecar_log_file = INVALID_HANDLE_VALUE;
-        return;
-    }
+    setvbuf(g_tx_sidecar_log_file, NULL, _IOLBF, 0);
+    snprintf(line, sizeof(line), "[tx] sidecar log: %s", log_path);
+    fprintf(stdout, "%s\n", line);
     fflush(stdout);
-    fflush(stderr);
-    (void) _dup2(pipe_fd, _fileno(stdout));
-    (void) _dup2(pipe_fd, _fileno(stderr));
-    (void) _close(pipe_fd);
-    (void) SetStdHandle(STD_OUTPUT_HANDLE, g_tx_sidecar_pipe_write);
-    (void) SetStdHandle(STD_ERROR_HANDLE, g_tx_sidecar_pipe_write);
-    if (pthread_create(&g_tx_sidecar_thread, NULL, dashcdg_tx_sidecar_tee_thread_main, NULL) == 0) {
-        g_tx_sidecar_thread_created = 1;
-    }
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IOLBF, 0);
-    fprintf(stdout, "[tx] sidecar log: %s\n", log_path);
-    fflush(stdout);
+    dashcdg_tx_sidecar_write_line(line);
 #else
     (void) argv0;
 #endif
@@ -2423,99 +2373,121 @@ static int64_t dashcdg_tx_next_cdg_lead_ms_locked(uint64_t playback_ms) {
 static void dashcdg_tx_log_audio_faults_locked(uint64_t now_ms) {
     struct dashcdg_runtime_queue_stats audio_queue_stats;
     uint64_t delta;
+    char line[256];
 
     memset(&audio_queue_stats, 0, sizeof(audio_queue_stats));
     dashcdg_runtime_queue_snapshot(&g_tx_state.audio_ready_queue, &audio_queue_stats);
 
     if (g_tx_state.audio_source_open_failures > g_tx_state.last_logged_audio_source_open_failures) {
         delta = g_tx_state.audio_source_open_failures - g_tx_state.last_logged_audio_source_open_failures;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_open_fail +%llu q=%zu codec=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_open_fail +%llu q=%zu codec=%u now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_source_open_failures = g_tx_state.audio_source_open_failures;
     }
     if (g_tx_state.audio_source_seek_failures > g_tx_state.last_logged_audio_source_seek_failures) {
         delta = g_tx_state.audio_source_seek_failures - g_tx_state.last_logged_audio_source_seek_failures;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_seek_fail +%llu q=%zu codec=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_seek_fail +%llu q=%zu codec=%u now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_source_seek_failures = g_tx_state.audio_source_seek_failures;
     }
     if (g_tx_state.audio_slow_read_events > g_tx_state.last_logged_audio_slow_read_events) {
         delta = g_tx_state.audio_slow_read_events - g_tx_state.last_logged_audio_slow_read_events;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_read_slow +%llu max=%llums q=%zu now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_read_slow +%llu max=%llums q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_tx_state.audio_slow_read_max_ms,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_slow_read_events = g_tx_state.audio_slow_read_events;
     }
     if (g_tx_state.audio_resample_failures > g_tx_state.last_logged_audio_resample_failures) {
         delta = g_tx_state.audio_resample_failures - g_tx_state.last_logged_audio_resample_failures;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_resample_fail +%llu q=%zu now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_resample_fail +%llu q=%zu now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_resample_failures = g_tx_state.audio_resample_failures;
     }
     if (g_tx_state.audio_encode_failures > g_tx_state.last_logged_audio_encode_failures) {
         delta = g_tx_state.audio_encode_failures - g_tx_state.last_logged_audio_encode_failures;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_encode_fail +%llu codec=%u q=%zu now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_encode_fail +%llu codec=%u q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_encode_failures = g_tx_state.audio_encode_failures;
     }
     if (g_tx_state.audio_queue_starvations > g_tx_state.last_logged_audio_queue_starvations) {
         delta = g_tx_state.audio_queue_starvations - g_tx_state.last_logged_audio_queue_starvations;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_queue_starve +%llu q=%zu done=%d pending=%d now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_queue_starve +%llu q=%zu done=%d pending=%d now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 g_tx_state.audio_producer_finished,
                 g_tx_state.pending_audio_frame_valid,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_queue_starvations = g_tx_state.audio_queue_starvations;
     }
     if (g_tx_state.audio_slow_loop_events > g_tx_state.last_logged_audio_slow_loop_events) {
         delta = g_tx_state.audio_slow_loop_events - g_tx_state.last_logged_audio_slow_loop_events;
-        fprintf(
-                stdout,
-                "[tx] fault: audio_thread_slow +%llu max=%llums q=%zu now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] fault: audio_thread_slow +%llu max=%llums q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_tx_state.audio_slow_loop_max_ms,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_slow_loop_events = g_tx_state.audio_slow_loop_events;
     }
 }
@@ -2534,6 +2506,7 @@ static void dashcdg_tx_print_status_locked(void) {
     size_t cdg_schedule_bytes = g_tx_state.cdg_batch_count * sizeof(*g_tx_state.cdg_batches);
     const char *cdg_source_mode = "none";
     struct dashcdg_runtime_queue_stats audio_queue_stats;
+    char line[1024];
 
     memset(&audio_queue_stats, 0, sizeof(audio_queue_stats));
     dashcdg_runtime_queue_snapshot(&g_tx_state.audio_ready_queue, &audio_queue_stats);
@@ -2557,9 +2530,10 @@ static void dashcdg_tx_print_status_locked(void) {
         mode = "MP3+G";
     }
 
-    fprintf(
-            stdout,
-            "[tx] track %zu/%zu: %s | %s | %s | %llu/%llums\n",
+    snprintf(
+            line,
+            sizeof(line),
+            "[tx] track %zu/%zu: %s | %s | %s | %llu/%llums",
             g_tx_state.playlist.current_index + 1U,
             g_tx_state.playlist.count,
             track->title,
@@ -2568,9 +2542,12 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) playback_ms,
             (unsigned long long) g_tx_state.duration_ms
     );
-    fprintf(
-            stdout,
-            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB lib=%zu/%zu CDG | audq=%zu hi=%zu ovf=%llu starve=%llu open=%llu seek=%llu rdslow=%llu/%llums rs=%llu enc=%llu loop=%llu/%llums gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu\n",
+    fprintf(stdout, "%s\n", line);
+    dashcdg_tx_sidecar_write_line(line);
+    snprintf(
+            line,
+            sizeof(line),
+            "[tx] net: dg=%llu fail=%llu bytes=%llu | pkt ann=%llu bc=%llu ch=%llu aud=%llu live=%llu snap=%llu fec=%llu/%llu ovh=%u%% prof=%u/%u ptp=%llu/%llu/%llu | asset %u/%u bytes prefix, chunks %zu/%zu distinct=%zu loops=%llu src=%s sched=%zuB lib=%zu/%zu CDG | audq=%zu hi=%zu ovf=%llu starve=%llu open=%llu seek=%llu rdslow=%llu/%llums rs=%llu enc=%llu loop=%llu/%llums gen=%llu done=%d lead aud=%lldms live=%lldms start_in=%llums head_off=%zu snap_off=%zu",
             (unsigned long long) g_tx_state.datagrams_sent,
             (unsigned long long) g_tx_state.send_failures,
             (unsigned long long) g_tx_state.bytes_sent,
@@ -2618,10 +2595,13 @@ static void dashcdg_tx_print_status_locked(void) {
             g_tx_state.next_asset_offset,
             g_tx_state.cdg_snapshot_offset
     );
+    fprintf(stdout, "%s\n", line);
+    dashcdg_tx_sidecar_write_line(line);
     if (g_tx_state.transport_v4_enabled) {
-        fprintf(
-                stdout,
-                "[tx] v4: prof=%u codec=%u (%s) info=%llu load=%llu anchor=%llu audio=%llu video=%llu repair=%llu clock=%llu first=%llu/%llu/%llu peak=%uB anchor_off=%zu/%zu state=%u\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[tx] v4: prof=%u codec=%u (%s) info=%llu load=%llu anchor=%llu audio=%llu video=%llu repair=%llu clock=%llu first=%llu/%llu/%llu peak=%uB anchor_off=%zu/%zu state=%u",
                 (unsigned int) g_tx_state.v4_audio_profile_id,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
@@ -2640,6 +2620,8 @@ static void dashcdg_tx_print_status_locked(void) {
                 g_tx_state.v4_video_anchor_size,
                 (unsigned int) dashcdg_tx_v4_startup_state_locked(now_ms)
         );
+        fprintf(stdout, "%s\n", line);
+        dashcdg_tx_sidecar_write_line(line);
     }
     fflush(stdout);
 }
