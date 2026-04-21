@@ -4882,6 +4882,13 @@ static void *network_thread(void *user_data) {
 }
 
 static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms);
+static void dashcdg_rx_fill_hud_lines_locked(
+        uint64_t local_now_ms,
+        char *hud_line_a,
+        size_t hud_line_a_size,
+        char *hud_line_b,
+        size_t hud_line_b_size
+);
 
 static void dashcdg_rx_start_audio_async(void) {
     struct dashcdg_desktop_audio *audio = NULL;
