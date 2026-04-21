@@ -86,6 +86,7 @@
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_DEFAULT_LIBRARY_DIR "cdg"
 #define DASHCDG_TX_AUDIO_QUEUE_CAPACITY 128U
+#define DASHCDG_TX_AUDIO_QUEUE_PREFILL_HIGH_WATER_FRAMES (DASHCDG_TX_AUDIO_QUEUE_CAPACITY - 4U)
 #define DASHCDG_TX_AUDIO_CHUNK_FRAMES 4096U
 #define DASHCDG_TX_PCM_FIFO_FRAMES (DASHCDG_AUDIO_FRAME_SAMPLES * 32U)
 #define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
@@ -99,7 +100,8 @@
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 40U
-#define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 3U
+#define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 8U
+#define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 16U
 /*
  * Anchor chunks used to ship one ~1 KiB fragment every TX tick (~100–1000 Hz) → multi‑Mbit/s bursts.
  * Cap payload per datagram and enforce a minimum spacing between chunks. First full anchor uses a
@@ -2006,6 +2008,7 @@ static void dashcdg_tx_dump_pcm48_mono(const int16_t *pcm, size_t frame_count) {
 static void dashcdg_tx_free_live_media_locked(void) {
     dashcdg_runtime_queue_clear(&g_tx_state.audio_ready_queue);
     g_tx_state.pending_audio_frame_valid = 0;
+    g_tx_state.last_audio_chunk_send_local_ms = 0U;
     g_tx_state.audio_producer_finished = 0;
     g_tx_state.audio_frames_generated = 0U;
     g_tx_state.audio_playback_end_ms = 0U;
@@ -2023,6 +2026,7 @@ static int dashcdg_tx_build_audio_frames_locked(const struct dashcdg_tx_track *t
     (void) track;
     dashcdg_runtime_queue_clear(&g_tx_state.audio_ready_queue);
     g_tx_state.pending_audio_frame_valid = 0;
+    g_tx_state.last_audio_chunk_send_local_ms = 0U;
     g_tx_state.audio_producer_finished = track == NULL || track->mp3_path == NULL;
     g_tx_state.audio_frames_generated = 0U;
     g_tx_state.audio_playback_end_ms = 0U;
@@ -3939,17 +3943,20 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             }
         }
 
+        queue_depth = dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue);
+
         if (source == NULL ||
                 (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS && !encoder_ready)) {
             dashcdg_sleep_ms(10);
             continue;
         }
-        if (queue_depth >= DASHCDG_TX_AUDIO_QUEUE_CAPACITY - 1U) {
+        if (queue_depth >= DASHCDG_TX_AUDIO_QUEUE_PREFILL_HIGH_WATER_FRAMES) {
             dashcdg_sleep_ms(5);
             continue;
         }
 
-        while (fifo_frames < DASHCDG_AUDIO_FRAME_SAMPLES && !reached_eof) {
+        while (queue_depth < DASHCDG_TX_AUDIO_QUEUE_PREFILL_HIGH_WATER_FRAMES) {
+            while (fifo_frames < DASHCDG_AUDIO_FRAME_SAMPLES && !reached_eof) {
             uint32_t input_rate = 0U;
             uint16_t input_channels = 0U;
             uint64_t read_start_ms = dashcdg_clock_now_ms();
@@ -4006,232 +4013,238 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 fifo_frames += resampled_frames;
                 free(resampled_pcm);
             }
-        }
-
-        if (fifo_frames == 0U && reached_eof) {
-            pthread_mutex_lock(&g_tx_state.mutex);
-            if (g_tx_state.audio_pipeline_generation == local_generation) {
-                g_tx_state.audio_producer_finished = 1;
-            }
-            pthread_mutex_unlock(&g_tx_state.mutex);
-            dashcdg_sleep_ms(10);
-            continue;
-        }
-
-        {
-            struct dashcdg_tx_audio_frame frame;
-            int16_t pcm[DASHCDG_AUDIO_FRAME_SAMPLES * DASHCDG_AUDIO_CHANNELS];
-            int16_t mono_pcm[DASHCDG_AUDIO_FRAME_SAMPLES];
-            size_t copy_frames = fifo_frames > DASHCDG_AUDIO_FRAME_SAMPLES ? DASHCDG_AUDIO_FRAME_SAMPLES : fifo_frames;
-            int encoded_length;
-
-            memset(&frame, 0, sizeof(frame));
-            memset(pcm, 0, sizeof(pcm));
-            if (copy_frames > 0U) {
-                memcpy(pcm, pcm_fifo, copy_frames * DASHCDG_AUDIO_CHANNELS * sizeof(int16_t));
-            }
-            if (copy_frames > 0U && DASHCDG_AUDIO_CHANNELS >= 2U) {
-                dashcdg_pcm_stereo_interleaved_to_mono48(pcm, copy_frames, mono_pcm);
-            } else if (copy_frames > 0U) {
-                memcpy(mono_pcm, pcm, copy_frames * sizeof(int16_t));
             }
 
-            if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
-                if (tx_nb_hp_tracking_codec != current_codec_id) {
-                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
-                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
-                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
-                    tx_nb_hp_tracking_codec = current_codec_id;
+            if (fifo_frames == 0U && reached_eof) {
+                pthread_mutex_lock(&g_tx_state.mutex);
+                if (g_tx_state.audio_pipeline_generation == local_generation) {
+                    g_tx_state.audio_producer_finished = 1;
                 }
+                pthread_mutex_unlock(&g_tx_state.mutex);
+                break;
+            }
+
+            {
+                struct dashcdg_tx_audio_frame frame;
+                int16_t pcm[DASHCDG_AUDIO_FRAME_SAMPLES * DASHCDG_AUDIO_CHANNELS];
+                int16_t mono_pcm[DASHCDG_AUDIO_FRAME_SAMPLES];
+                size_t copy_frames = fifo_frames > DASHCDG_AUDIO_FRAME_SAMPLES ? DASHCDG_AUDIO_FRAME_SAMPLES : fifo_frames;
+                int encoded_length;
+
+                memset(&frame, 0, sizeof(frame));
+                memset(pcm, 0, sizeof(pcm));
                 if (copy_frames > 0U) {
-                    if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
-                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
-                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
-                        dashcdg_pcm_hp80_process_stereo_interleaved(&tx_nb_hp_l, &tx_nb_hp_r, pcm, copy_frames);
-                    } else {
-                        dashcdg_pcm_hp80_process_mono(&tx_nb_hp_mono, mono_pcm, copy_frames);
-                    }
+                    memcpy(pcm, pcm_fifo, copy_frames * DASHCDG_AUDIO_CHANNELS * sizeof(int16_t));
                 }
-            } else {
-                if (tx_nb_hp_tracking_codec != 255) {
-                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
-                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
-                    dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
-                    tx_nb_hp_tracking_codec = 255;
+                if (copy_frames > 0U && DASHCDG_AUDIO_CHANNELS >= 2U) {
+                    dashcdg_pcm_stereo_interleaved_to_mono48(pcm, copy_frames, mono_pcm);
+                } else if (copy_frames > 0U) {
+                    memcpy(mono_pcm, pcm, copy_frames * sizeof(int16_t));
                 }
-            }
 
-            if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
-                /*
-                 * Speech-oriented codecs overload on full-scale music/drums; ~3 dB headroom keeps peaks
-                 * away from quantizer / clip behavior without touching Opus or CDG-only paths.
-                 */
                 if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
                         current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
                         current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
-                    dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                    if (tx_nb_hp_tracking_codec != current_codec_id) {
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
+                        tx_nb_hp_tracking_codec = current_codec_id;
+                    }
+                    if (copy_frames > 0U) {
+                        dashcdg_pcm_hp80_process_stereo_interleaved(&tx_nb_hp_l, &tx_nb_hp_r, pcm, copy_frames);
+                    }
+                } else if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
+                    if (tx_nb_hp_tracking_codec != current_codec_id) {
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
+                        tx_nb_hp_tracking_codec = current_codec_id;
+                    }
+                    if (copy_frames > 0U) {
+                        dashcdg_pcm_hp80_process_mono(&tx_nb_hp_mono, mono_pcm, copy_frames);
+                    }
+                } else {
+                    if (tx_nb_hp_tracking_codec != 255) {
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_mono);
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_l);
+                        dashcdg_pcm_hp80_biquad_reset(&tx_nb_hp_r);
+                        tx_nb_hp_tracking_codec = 255;
+                    }
+                }
+
+                if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
+                    if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
+                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
+                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                        dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                                pcm,
+                                copy_frames,
+                                2U,
+                                DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                        );
+                    } else {
+                        dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                                mono_pcm,
+                                copy_frames,
+                                1U,
+                                DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                        );
+                    }
+                }
+
+                if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+                    encoded_length = dashcdg_opus_encode_frame(
+                            &encoder,
                             pcm,
-                            copy_frames,
-                            2U,
-                            DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                            frame.encoded_bytes,
+                            sizeof(frame.encoded_bytes)
                     );
-                } else {
-                    dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+                    encoded_length = dashcdg_amr_wb_encoder_run(
+                            amr_wb_encoder,
                             mono_pcm,
-                            copy_frames,
-                            1U,
-                            DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
-                    );
-                }
-            }
-
-            if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
-                encoded_length = dashcdg_opus_encode_frame(
-                        &encoder,
-                        pcm,
-                        frame.encoded_bytes,
-                        sizeof(frame.encoded_bytes)
-                );
-            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
-                encoded_length = dashcdg_amr_wb_encoder_run(
-                        amr_wb_encoder,
-                        mono_pcm,
-                        frame.encoded_bytes,
-                        sizeof(frame.encoded_bytes)
-                );
-            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
-                encoded_length = dashcdg_amr_nb_encoder_run(
-                        amr_nb_encoder,
-                        mono_pcm,
-                        frame.encoded_bytes,
-                        sizeof(frame.encoded_bytes)
-                );
-            } else if (dashcdg_v4_audio_codec_is_nb_ima_payload((uint8_t) current_codec_id)) {
-                encoded_length = dashcdg_nb_ima_encode_pcm48_mono_frame(
-                        &nb_ima_encoder,
-                        mono_pcm,
-                        DASHCDG_AUDIO_FRAME_SAMPLES,
-                        frame.encoded_bytes,
-                        sizeof(frame.encoded_bytes)
-                );
-            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
-                int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
-                const int16_t *src = pcm;
-                size_t stereo_samples = copy_frames * 2U;
-
-                if (evrc_encoder == NULL) {
-                    encoded_length = -1;
-                } else {
-                    if (DASHCDG_AUDIO_CHANNELS != 2U) {
-                        dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
-                        src = stereo_work;
-                    }
-                    encoded_length = dashcdg_evrc_encode_pcm48_stereo_frame(
-                            evrc_encoder,
-                            src,
-                            stereo_samples,
                             frame.encoded_bytes,
                             sizeof(frame.encoded_bytes)
                     );
-                }
-            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
-                int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
-                const int16_t *src = pcm;
-                size_t stereo_samples = copy_frames * 2U;
-
-                if (qcelp_encoder == NULL) {
-                    encoded_length = -1;
-                } else {
-                    if (DASHCDG_AUDIO_CHANNELS != 2U) {
-                        dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
-                        src = stereo_work;
-                    }
-                    encoded_length = dashcdg_qcelp13k_encode_pcm48_stereo_frame(
-                            qcelp_encoder,
-                            src,
-                            stereo_samples,
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+                    encoded_length = dashcdg_amr_nb_encoder_run(
+                            amr_nb_encoder,
+                            mono_pcm,
                             frame.encoded_bytes,
                             sizeof(frame.encoded_bytes)
                     );
-                }
-            } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
-                int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
-                const int16_t *src = pcm;
-                size_t stereo_samples = copy_frames * 2U;
-
-                if (sbc_encoder == NULL) {
-                    encoded_length = -1;
-                } else {
-                    if (DASHCDG_AUDIO_CHANNELS != 2U) {
-                        dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
-                        src = stereo_work;
-                    }
-                    encoded_length = dashcdg_bt_sbc_encode_pcm48_stereo_frame(
-                            sbc_encoder,
-                            src,
-                            stereo_samples,
+                } else if (dashcdg_v4_audio_codec_is_nb_ima_payload((uint8_t) current_codec_id)) {
+                    encoded_length = dashcdg_nb_ima_encode_pcm48_mono_frame(
+                            &nb_ima_encoder,
+                            mono_pcm,
+                            DASHCDG_AUDIO_FRAME_SAMPLES,
                             frame.encoded_bytes,
                             sizeof(frame.encoded_bytes)
                     );
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+                    int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
+                    const int16_t *src = pcm;
+                    size_t stereo_samples = copy_frames * 2U;
+
+                    if (evrc_encoder == NULL) {
+                        encoded_length = -1;
+                    } else {
+                        if (DASHCDG_AUDIO_CHANNELS != 2U) {
+                            dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
+                            src = stereo_work;
+                        }
+                        encoded_length = dashcdg_evrc_encode_pcm48_stereo_frame(
+                                evrc_encoder,
+                                src,
+                                stereo_samples,
+                                frame.encoded_bytes,
+                                sizeof(frame.encoded_bytes)
+                        );
+                    }
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+                    int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
+                    const int16_t *src = pcm;
+                    size_t stereo_samples = copy_frames * 2U;
+
+                    if (qcelp_encoder == NULL) {
+                        encoded_length = -1;
+                    } else {
+                        if (DASHCDG_AUDIO_CHANNELS != 2U) {
+                            dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
+                            src = stereo_work;
+                        }
+                        encoded_length = dashcdg_qcelp13k_encode_pcm48_stereo_frame(
+                                qcelp_encoder,
+                                src,
+                                stereo_samples,
+                                frame.encoded_bytes,
+                                sizeof(frame.encoded_bytes)
+                        );
+                    }
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                    int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
+                    const int16_t *src = pcm;
+                    size_t stereo_samples = copy_frames * 2U;
+
+                    if (sbc_encoder == NULL) {
+                        encoded_length = -1;
+                    } else {
+                        if (DASHCDG_AUDIO_CHANNELS != 2U) {
+                            dashcdg_tx_expand_mono_to_stereo_interleaved(pcm, stereo_work, copy_frames);
+                            src = stereo_work;
+                        }
+                        encoded_length = dashcdg_bt_sbc_encode_pcm48_stereo_frame(
+                                sbc_encoder,
+                                src,
+                                stereo_samples,
+                                frame.encoded_bytes,
+                                sizeof(frame.encoded_bytes)
+                        );
+                    }
+                } else {
+                    encoded_length = -1;
                 }
-            } else {
-                encoded_length = -1;
-            }
-            if (encoded_length <= 0) {
+                if (encoded_length <= 0) {
+                    pthread_mutex_lock(&g_tx_state.mutex);
+                    g_tx_state.audio_encode_failures++;
+                    pthread_mutex_unlock(&g_tx_state.mutex);
+                    if (encoded_length < 0 && current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
+                        dashcdg_sleep_ms(2);
+                    } else {
+                        dashcdg_sleep_ms(5);
+                    }
+                    break;
+                }
+
                 pthread_mutex_lock(&g_tx_state.mutex);
-                g_tx_state.audio_encode_failures++;
-                pthread_mutex_unlock(&g_tx_state.mutex);
-                if (encoded_length < 0 && current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
-                    dashcdg_sleep_ms(2);
-                    continue;
+                if (g_tx_state.audio_pipeline_generation != local_generation) {
+                    pthread_mutex_unlock(&g_tx_state.mutex);
+                    break;
                 }
-                dashcdg_sleep_ms(5);
-                continue;
-            }
-
-            pthread_mutex_lock(&g_tx_state.mutex);
-            if (g_tx_state.audio_pipeline_generation != local_generation) {
+                frame.media_sequence = g_tx_state.audio_media_sequence + 1U;
+                frame.group_id = (uint32_t) (frame_index / DASHCDG_AUDIO_GROUP_SIZE);
+                frame.group_index = (uint8_t) (frame_index % DASHCDG_AUDIO_GROUP_SIZE);
+                frame.frame_ms = DASHCDG_AUDIO_FRAME_MS;
+                frame.audio_profile_id = current_profile_id;
+                frame.codec_id = current_codec_id;
+                frame.encoded_length = (uint16_t) encoded_length;
+                frame.playback_ms = next_playback_ms;
                 pthread_mutex_unlock(&g_tx_state.mutex);
-                continue;
-            }
-            frame.media_sequence = g_tx_state.audio_media_sequence + 1U;
-            frame.group_id = (uint32_t) (frame_index / DASHCDG_AUDIO_GROUP_SIZE);
-            frame.group_index = (uint8_t) (frame_index % DASHCDG_AUDIO_GROUP_SIZE);
-            frame.frame_ms = DASHCDG_AUDIO_FRAME_MS;
-            frame.audio_profile_id = current_profile_id;
-            frame.codec_id = current_codec_id;
-            frame.encoded_length = (uint16_t) encoded_length;
-            frame.playback_ms = next_playback_ms;
-            pthread_mutex_unlock(&g_tx_state.mutex);
 
-            if (!dashcdg_runtime_queue_push(&g_tx_state.audio_ready_queue, &frame, now_ms, 0)) {
+                now_ms = dashcdg_clock_now_ms();
+                if (!dashcdg_runtime_queue_push(&g_tx_state.audio_ready_queue, &frame, now_ms, 0)) {
+                    pthread_mutex_lock(&g_tx_state.mutex);
+                    g_tx_state.audio_queue_overflows++;
+                    pthread_mutex_unlock(&g_tx_state.mutex);
+                    break;
+                }
+
+                if (copy_frames > 0U) {
+                    dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
+                }
+
                 pthread_mutex_lock(&g_tx_state.mutex);
-                g_tx_state.audio_queue_overflows++;
+                if (g_tx_state.audio_pipeline_generation == local_generation) {
+                    g_tx_state.audio_media_sequence = frame.media_sequence;
+                    g_tx_state.audio_frames_generated = frame_index + 1U;
+                    g_tx_state.audio_playback_end_ms = frame.playback_ms + DASHCDG_AUDIO_FRAME_MS;
+                    if (g_tx_state.audio_playback_end_ms > g_tx_state.duration_ms) {
+                        g_tx_state.duration_ms = g_tx_state.audio_playback_end_ms;
+                    }
+                    if (reached_eof && fifo_frames == 0U) {
+                        g_tx_state.audio_producer_finished = 1;
+                    }
+                }
                 pthread_mutex_unlock(&g_tx_state.mutex);
-                dashcdg_sleep_ms(5);
-                continue;
-            }
 
-            if (copy_frames > 0U) {
-                dashcdg_tx_pcm_fifo_consume(pcm_fifo, &fifo_frames, copy_frames);
-            }
-
-            pthread_mutex_lock(&g_tx_state.mutex);
-            if (g_tx_state.audio_pipeline_generation == local_generation) {
-                g_tx_state.audio_media_sequence = frame.media_sequence;
-                g_tx_state.audio_frames_generated = frame_index + 1U;
-                g_tx_state.audio_playback_end_ms = frame.playback_ms + DASHCDG_AUDIO_FRAME_MS;
-                if (g_tx_state.audio_playback_end_ms > g_tx_state.duration_ms) {
-                    g_tx_state.duration_ms = g_tx_state.audio_playback_end_ms;
-                }
-                if (reached_eof && fifo_frames == 0U) {
-                    g_tx_state.audio_producer_finished = 1;
+                next_playback_ms += DASHCDG_AUDIO_FRAME_MS;
+                frame_index++;
+                queue_depth = dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue);
+                if (queue_depth >= DASHCDG_TX_AUDIO_QUEUE_PREFILL_HIGH_WATER_FRAMES) {
+                    break;
                 }
             }
-            pthread_mutex_unlock(&g_tx_state.mutex);
-
-            next_playback_ms += DASHCDG_AUDIO_FRAME_MS;
-            frame_index++;
         }
 
         {
@@ -5065,11 +5078,17 @@ static void *dashcdg_tx_audio_send_thread_main(void *unused) {
             break;
         }
         if (g_tx_state.transport_v4_enabled) {
+            /*
+             * If the sender thread wakes up late under CPU/scheduler pressure, limiting catch-up
+             * to only 4 packets stretches a short hiccup into a long RX underrun/reorder episode.
+             * Audio release still stops at playback_deadline, so allowing a larger per-pass due
+             * burst lets TX recover runway quickly without sending future frames early.
+             */
             (void) dashcdg_tx_send_due_audio_locked(
                     now_ms,
                     packet,
                     sizeof(packet),
-                    DASHCDG_V4_MAX_AUDIO_PER_PASS * 2U
+                    DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS
             );
         }
         sleep_ms = dashcdg_tx_compute_v4_sleep_ms_locked(now_ms);
