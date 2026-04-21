@@ -1859,6 +1859,10 @@ static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *
     if (state == NULL) {
         return 0;
     }
+    if (g_audio == NULL || !g_audio_stream_started || !dashcdg_desktop_audio_output_device_ready(g_audio)) {
+        state->audio_resample_trim_ppm -= state->audio_resample_trim_ppm / 4;
+        return state->audio_resample_trim_ppm;
+    }
 
     error_ms = (int32_t) dashcdg_rx_audio_target_buffer_ms_locked(state) - (int32_t) buffered_ms;
     if (error_ms > -DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS && error_ms < DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS) {
@@ -2838,11 +2842,10 @@ static int dashcdg_rx_apply_audio_frame_locked(
     }
     if (queued_frames == 0U) {
         state->audio_queue_overflows++;
-        state->pcm_src_stream_out_samples += expected_queued_fc;
         return 0;
     }
     state->pcm_src_stream_in_samples += (uint64_t) decoded_frames;
-    state->pcm_src_stream_out_samples += expected_queued_fc;
+    state->pcm_src_stream_out_samples += (uint64_t) queued_frames;
     /*
      * PortAudio may accept a prefix under back-pressure; compare against the frame count we offered
      * (after optional resampling). Partial accept still advances jitter so we do not wedge.
