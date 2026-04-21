@@ -462,6 +462,7 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
         int16_t *tail_r,
         size_t *tail_valid,
         uint64_t stream_in_samples_before_chunk,
+        uint64_t stream_out_samples_before_chunk,
         const int16_t *in,
         size_t in_frames,
         uint32_t in_rate,
@@ -476,7 +477,6 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
     size_t ext_in;
     size_t ext_out;
     size_t skip_out;
-    size_t outs_at_chunk_start;
     size_t outs_at_ext_base;
     uint64_t ext_base_in;
     size_t i;
@@ -505,10 +505,10 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
     ext_in = prepend + in_frames;
     ext_out = (ext_in * (size_t) out_rate + (size_t) in_rate - 1U) / (size_t) in_rate;
 
-    outs_at_chunk_start = dashcdg_pcm_output_frames_for_stream_position(stream_in_samples_before_chunk, in_rate, out_rate);
     ext_base_in = stream_in_samples_before_chunk > prepend ? stream_in_samples_before_chunk - prepend : 0ULL;
     outs_at_ext_base = dashcdg_pcm_output_frames_for_stream_position(ext_base_in, in_rate, out_rate);
-    skip_out = outs_at_chunk_start > outs_at_ext_base ? outs_at_chunk_start - outs_at_ext_base : 0U;
+    skip_out = stream_out_samples_before_chunk > (uint64_t) outs_at_ext_base ?
+            (size_t) (stream_out_samples_before_chunk - (uint64_t) outs_at_ext_base) : 0U;
 
     if (out_frames > ext_out) {
         memset(out, 0, out_frames * 2U * sizeof(int16_t));

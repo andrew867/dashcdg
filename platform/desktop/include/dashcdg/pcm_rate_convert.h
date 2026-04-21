@@ -108,6 +108,7 @@ void dashcdg_pcm_stereo_interleaved_resample_overlap(
         int16_t *tail_r,
         size_t *tail_valid,
         uint64_t stream_in_samples_before_chunk,
+        uint64_t stream_out_samples_before_chunk,
         const int16_t *in,
         size_t in_frames,
         uint32_t in_rate,
