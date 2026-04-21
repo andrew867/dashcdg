@@ -3077,6 +3077,20 @@ static int dashcdg_rx_apply_audio_frame_locked(
         return 0;
     }
 
+    /*
+     * Steady state should hold near the target playout buffer, not hammer the queue path until we
+     * hit the hard ring limit. Retrying every tick at 340/350 ms produced endless "overflow" noise
+     * and audible break-up even though the device was already at the intended latency.
+     */
+    if (g_audio_stream_started && dashcdg_desktop_audio_output_device_ready(g_audio)) {
+        uint32_t buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
+        uint32_t target_ms = dashcdg_rx_audio_target_buffer_ms_locked(state);
+
+        if (target_ms > 0U && buffered_ms >= target_ms) {
+            return 0;
+        }
+    }
+
     if (frame->codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
 #if !defined(DASHCDG_DESKTOP_NO_OPUS)
         if (g_opus_decoder.channels == 1) {
@@ -3333,9 +3347,9 @@ static int dashcdg_rx_apply_audio_frame_locked(
             queued_ms_estimate = (uint32_t) state->announced_audio_frame_ms;
         }
         if (frame->frame_ms > 0U) {
-            queue_limit_ms += (uint32_t) frame->frame_ms;
+            queue_limit_ms += (uint32_t) frame->frame_ms * 2U;
         } else if (state->announced_audio_frame_ms > 0U) {
-            queue_limit_ms += (uint32_t) state->announced_audio_frame_ms;
+            queue_limit_ms += (uint32_t) state->announced_audio_frame_ms * 2U;
         }
         if (state->audio_ring_capacity_ms > 0U && queue_limit_ms > state->audio_ring_capacity_ms) {
             queue_limit_ms = state->audio_ring_capacity_ms;
