@@ -1360,6 +1360,10 @@ size_t dashcdg_desktop_audio_queue_frames(
     }
 
     pthread_mutex_lock(&audio->stream_mutex);
+    if (frame_count > audio->stream_capacity_frames - audio->stream_queued_frames) {
+        pthread_mutex_unlock(&audio->stream_mutex);
+        return 0;
+    }
     /*
      * Re-anchor whenever the stream refills from empty, not just on the very first queue.
      * Otherwise an underrun or track handoff can keep the old base timestamp alive and make
@@ -1371,13 +1375,9 @@ size_t dashcdg_desktop_audio_queue_frames(
         DASHCDG_ATOMIC_SET(audio->timestamp_ms, -1);
     }
 
-    while (written < frame_count && audio->stream_queued_frames < audio->stream_capacity_frames) {
-        size_t free_frames = audio->stream_capacity_frames - audio->stream_queued_frames;
+    while (written < frame_count) {
         size_t copy_frames = frame_count - written;
 
-        if (copy_frames > free_frames) {
-            copy_frames = free_frames;
-        }
         if (copy_frames > audio->stream_capacity_frames - audio->stream_write_frame) {
             copy_frames = audio->stream_capacity_frames - audio->stream_write_frame;
         }
@@ -1392,7 +1392,7 @@ size_t dashcdg_desktop_audio_queue_frames(
         written += copy_frames;
     }
     pthread_mutex_unlock(&audio->stream_mutex);
-    return written;
+    return frame_count;
 }
 
 uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *audio) {
