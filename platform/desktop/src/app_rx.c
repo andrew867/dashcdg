@@ -1084,7 +1084,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->last_logged_live_missing_skips = 0;
     state->last_logged_audio_reordered_packets = 0;
     state->last_logged_cdg_reordered_batches = 0;
-    state->last_logged_stream_underrun_events = 0;
+    state->last_logged_stream_underrun_events = g_audio != NULL ? g_audio->stream_underrun_events : 0;
     state->audio_arrival_gap_events = 0;
     state->audio_arrival_gap_max_ms = 0;
     state->audio_arrival_burst_events = 0;
@@ -4154,6 +4154,12 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
             view->v4_session_info.audio_frame_ms > 0;
 
     if (material_track_change) {
+        if (g_audio != NULL) {
+            dashcdg_desktop_audio_stop_stream(g_audio);
+            dashcdg_desktop_audio_flush_stream_ring(g_audio);
+        }
+        g_audio_stream_started = 0;
+        g_audio_start_inflight = 0;
         receiver_state_reset(state);
     }
 

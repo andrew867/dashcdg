@@ -141,9 +141,18 @@ static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_
     }
 }
 
+struct dashcdg_tx_audio_frame;
+
 static int dashcdg_tx_send_v4_session_info_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size);
 static int dashcdg_tx_send_v4_loading_screen_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size);
 static int dashcdg_tx_send_v4_clock_sync_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size);
+static int dashcdg_tx_send_v4_audio_chunk_locked(
+        uint64_t now_ms,
+        const struct dashcdg_tx_audio_frame *frame,
+        uint8_t *packet,
+        size_t packet_size
+);
+static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t group_id);
 
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
