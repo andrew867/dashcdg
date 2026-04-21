@@ -2387,6 +2387,18 @@ static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
     g_tx_state.playback_anchor_ms = current_ms;
     g_tx_state.playback_anchor_local_ms = now_ms;
     g_tx_state.last_beacon_ms = 0;
+    /*
+     * Pause/unpause changes the canvas source (pause_state vs live_cdg_state) and playback flags.
+     * Force a fresh v4 anchor + clock sync on the next TX tick so receivers do not keep rendering
+     * stale pause/live bridge state after the toggle.
+     */
+    free(g_tx_state.v4_video_anchor_bytes);
+    g_tx_state.v4_video_anchor_bytes = NULL;
+    g_tx_state.v4_video_anchor_size = 0U;
+    g_tx_state.v4_video_anchor_offset = 0U;
+    g_tx_state.last_v4_video_anchor_ms = 0U;
+    g_tx_state.last_v4_video_anchor_chunk_ms = 0U;
+    g_tx_state.last_v4_clock_sync_ms = 0U;
     if (paused) {
         g_tx_state.last_pause_state_update_ms = 0U;
         dashcdg_tx_render_pause_state_locked(now_ms);
@@ -5176,11 +5188,17 @@ static void *dashcdg_tx_status_thread_main(void *unused) {
 }
 
 static void *dashcdg_tx_thread_main(void *unused) {
-    struct dashcdg_win32_mmcss_handle mmcss;
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
 
     (void) unused;
-    dashcdg_win32_thread_timing_boost_begin(&mmcss);
+#ifdef _WIN32
+    /*
+     * Audio release has its own dedicated MMCSS thread. Keeping this mixed control/video sender
+     * thread equally boosted lets startup anchor/video bursts steal runtime from audio and crackle
+     * at natural track boundaries even on the same machine.
+     */
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
 
     for (;;) {
         uint64_t now_ms = dashcdg_clock_now_ms();
@@ -5189,7 +5207,6 @@ static void *dashcdg_tx_thread_main(void *unused) {
         pthread_mutex_lock(&g_tx_state.mutex);
         if (g_tx_state.shutdown_requested) {
             pthread_mutex_unlock(&g_tx_state.mutex);
-            dashcdg_win32_thread_timing_boost_end(&mmcss);
             break;
         }
 
@@ -5216,7 +5233,6 @@ static void *dashcdg_tx_thread_main(void *unused) {
             pthread_mutex_lock(&g_tx_state.mutex);
             if (g_tx_state.shutdown_requested) {
                 pthread_mutex_unlock(&g_tx_state.mutex);
-                dashcdg_win32_thread_timing_boost_end(&mmcss);
                 break;
             }
             dashcdg_tx_tick_v4_locked(now_ms, packet, sizeof(packet));
