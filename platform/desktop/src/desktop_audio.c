@@ -27,6 +27,18 @@ void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio);
 #define DASHCDG_AUDIO_MODE_FILE 0
 #define DASHCDG_AUDIO_MODE_STREAM 1
 
+/*
+ * PortAudio suggested output latency for multicast/network streaming (desktop RX).
+ * Using each device’s defaultHighOutputLatency made Windows 11 / WASAPI often negotiate ~250–300 ms
+ * while other stacks landed near ~120 ms — enough difference that multiple receivers in one room
+ * sound audibly out of sync. The RX PCM ring already holds hundreds of ms for wire/decode jitter;
+ * the host callback buffer mainly covers scheduling variance. Tune with e.g.
+ * -DDASHCDG_PA_NETWORK_STREAM_HOST_LATENCY_SECONDS=0.10 at compile time if a platform underruns.
+ */
+#ifndef DASHCDG_PA_NETWORK_STREAM_HOST_LATENCY_SECONDS
+#define DASHCDG_PA_NETWORK_STREAM_HOST_LATENCY_SECONDS (0.12)
+#endif
+
 static struct dashcdg_pcm_buffer *dashcdg_pcm_buffer_new(uint16_t *buffer, size_t size) {
     struct dashcdg_pcm_buffer *pcm = (struct dashcdg_pcm_buffer *) malloc(sizeof(*pcm));
 
@@ -436,17 +448,11 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     /*
      * Pa_OpenDefaultStream uses the device's default *low* latency. On Windows (WASAPI shared)
      * that is often only ~10–20 ms of host buffering, which glitches when the UI thread is busy.
-     * Network streaming uses the driver's high-latency default with a floor so the callback keeps
-     * up under load; local file playback keeps low latency for scrubbing.
+     * Network streaming uses DASHCDG_PA_NETWORK_STREAM_HOST_LATENCY_SECONDS (see macro above).
+     * Local file playback keeps low latency for scrubbing.
      */
     if (audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
-        host_latency_s = dev_info->defaultHighOutputLatency;
-        if (host_latency_s < 0.12) {
-            host_latency_s = 0.12;
-        }
-        if (host_latency_s > 0.28) {
-            host_latency_s = 0.28;
-        }
+        host_latency_s = (double) DASHCDG_PA_NETWORK_STREAM_HOST_LATENCY_SECONDS;
     } else {
         host_latency_s = dev_info->defaultLowOutputLatency;
         if (host_latency_s < 0.01) {
@@ -583,13 +589,17 @@ const char *dashcdg_desktop_audio_last_stream_open_error(void) {
 #define WAVE_MAPPER ((UINT) -1)
 #endif
 
-/* File playback: small chunks for scrub responsiveness. Network stream: larger chunks and more
- * queued buffers so the refill thread survives CPU spikes (legacy/slow hosts). */
+/* File playback: small chunks for scrub responsiveness. Network stream: tuned so waveOut pulls
+ * often enough that the software PCM ring stays near PortAudio-class depth (Win11 ~120 ms host)
+ * instead of pegging high on WinMM (old 40 ms × 6 buffers starved CDG drain vs audio backpressure).
+ */
 #define DASHCDG_WINMM_BUFFERS_MAX 8U
 #define DASHCDG_WINMM_FILE_CHUNK_MS 20U
-#define DASHCDG_WINMM_STREAM_CHUNK_MS 40U
+#define DASHCDG_WINMM_STREAM_CHUNK_MS 30U
 #define DASHCDG_WINMM_BUFFERS_FILE 4U
-#define DASHCDG_WINMM_BUFFERS_STREAM 6U
+#define DASHCDG_WINMM_BUFFERS_STREAM 4U
+/* ~½ peak driver queue (chunk × buffers) for timestamp_ms / HUD alignment with heard audio. */
+#define DASHCDG_WINMM_STREAM_PIPELINE_LATENCY_MS ((DASHCDG_WINMM_STREAM_CHUNK_MS * DASHCDG_WINMM_BUFFERS_STREAM) / 2U)
 
 struct dashcdg_winmm_ctx {
     HWAVEOUT hwo;
@@ -612,8 +622,7 @@ static void dashcdg_winmm_fill_block(
         size_t frames,
         struct dashcdg_winmm_ctx *ctx
 ) {
-    /* Approximate output delay: WinMM stream path uses ~40 ms chunks × 6 buffers (~240 ms peak queue). */
-    int latency_ms = audio->mode == DASHCDG_AUDIO_MODE_STREAM ? 160 : 80;
+    int latency_ms = audio->mode == DASHCDG_AUDIO_MODE_STREAM ? (int) DASHCDG_WINMM_STREAM_PIPELINE_LATENCY_MS : 80;
 
     if (audio->mode == DASHCDG_AUDIO_MODE_STREAM) {
         (void) ctx;
@@ -1441,7 +1450,7 @@ uint32_t dashcdg_desktop_audio_output_latency_ms(const struct dashcdg_desktop_au
 
 #if DASHCDG_DESKTOP_WIN32_WAVEOUT && defined(_WIN32)
     if (audio->audio_io_ctx != NULL) {
-        return audio->mode == DASHCDG_AUDIO_MODE_STREAM ? 160U : 80U;
+        return audio->mode == DASHCDG_AUDIO_MODE_STREAM ? DASHCDG_WINMM_STREAM_PIPELINE_LATENCY_MS : 80U;
     }
 #endif
 

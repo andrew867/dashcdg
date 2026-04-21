@@ -84,9 +84,15 @@
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
         DASHCDG_MAX_CDG_SNAPSHOT_CHUNK)
+/*
+ * TX currently paces v4 anchors in 512-byte chunks to avoid large startup bursts. RX must track
+ * completion using the same stride; indexing by the protocol max (1024) collapses adjacent anchor
+ * chunks onto the same slot and late joins never finish assembling the first bridge canvas.
+ */
+#define DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE 512U
 #define DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES (4U + (DASHCDG_CDG_SNAPSHOT_STATE_BYTES * 2U))
-#define DASHCDG_V4_ANCHOR_CHUNK_COUNT ((DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES + DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES - 1U) / \
-        DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES)
+#define DASHCDG_V4_ANCHOR_CHUNK_COUNT ((DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES + DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE - 1U) / \
+        DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE)
 
 static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
     uint64_t now_ms;
@@ -1454,7 +1460,7 @@ static void dashcdg_rx_handle_v4_anchor_locked(struct receiver_state *state, con
         );
     }
 
-    chunk_index = view->v4_video_anchor.anchor_offset / DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES;
+    chunk_index = view->v4_video_anchor.anchor_offset / DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE;
     if (chunk_index >= DASHCDG_V4_ANCHOR_CHUNK_COUNT || state->active_v4_anchor_chunk_seen[chunk_index]) {
         return;
     }

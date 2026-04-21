@@ -136,6 +136,10 @@ static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_
     }
 }
 
+static int dashcdg_tx_send_v4_session_info_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size);
+static int dashcdg_tx_send_v4_loading_screen_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size);
+static int dashcdg_tx_send_v4_clock_sync_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size);
+
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
     uint32_t group_id;
@@ -2206,6 +2210,27 @@ static void dashcdg_tx_force_rebroadcast_locked(void) {
     g_tx_state.contiguous_prefix_chunks = 0;
 }
 
+static void dashcdg_tx_send_v4_track_bootstrap_locked(uint64_t now_ms) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+
+    if (!g_tx_state.transport_v4_enabled) {
+        return;
+    }
+
+    /*
+     * Manual next/back/restart can load a new track between the periodic v4 session_info/clock_sync
+     * broadcasts. Until the next periodic tick, receivers may see new-track audio/video against the
+     * previous session timeline and stay wedged on wait-preroll. Broadcast the new session
+     * immediately on every track load so RX resets before consuming the fresh runway.
+     */
+    (void) dashcdg_tx_send_v4_session_info_locked(now_ms, packet, sizeof(packet));
+    if (dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, sizeof(packet)) &&
+            g_tx_state.v4_clock_sync_packets_sent == 1U) {
+        (void) dashcdg_tx_send_v4_clock_sync_locked(now_ms, packet, sizeof(packet));
+    }
+    (void) dashcdg_tx_send_v4_loading_screen_locked(now_ms, packet, sizeof(packet));
+}
+
 static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
     uint64_t current_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
 
@@ -2544,6 +2569,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.session_start_ms = g_tx_state.playback_anchor_local_ms;
     g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
+    dashcdg_tx_send_v4_track_bootstrap_locked(now_ms);
 
     fprintf(
             stdout,
