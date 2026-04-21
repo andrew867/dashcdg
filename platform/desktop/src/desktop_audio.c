@@ -166,6 +166,10 @@ static size_t dashcdg_stream_buffer_consume(
         consumed += copy_frames;
     }
     pthread_mutex_unlock(&audio->stream_mutex);
+    if (consumed < (size_t) frame_count) {
+        audio->stream_underrun_events++;
+        audio->stream_underrun_frames += (uint64_t) ((size_t) frame_count - consumed);
+    }
     return consumed;
 }
 
@@ -207,6 +211,8 @@ static void dashcdg_desktop_audio_flush_stream_ring_locked(struct dashcdg_deskto
     audio->stream_queued_frames = 0;
     audio->stream_base_timestamp_ms = -1;
     audio->stream_played_frames = 0;
+    audio->stream_underrun_events = 0U;
+    audio->stream_underrun_frames = 0U;
 }
 
 void dashcdg_desktop_audio_flush_stream_ring(struct dashcdg_desktop_audio *audio) {
@@ -1271,6 +1277,8 @@ int dashcdg_desktop_audio_init_stream(
     audio->stream_queued_frames = 0;
     audio->stream_played_frames = 0;
     audio->stream_base_timestamp_ms = -1;
+    audio->stream_underrun_events = 0U;
+    audio->stream_underrun_frames = 0U;
     DASHCDG_ATOMIC_SET(audio->timestamp_ms, -1);
     pthread_mutex_unlock(&audio->stream_mutex);
     return 1;

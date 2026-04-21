@@ -55,6 +55,8 @@ struct dashcdg_desktop_audio {
     size_t stream_read_frame;
     size_t stream_write_frame;
     size_t stream_queued_frames;
+    uint64_t stream_underrun_events;
+    uint64_t stream_underrun_frames;
     int16_t *stream_pcm;
     int stream_decoder_open;
     int stream_muted;
