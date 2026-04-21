@@ -95,6 +95,11 @@
 #define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 1500U
 #define DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS 750U
 #define DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS 3000U
+#if defined(DASHCDG_RX_UI_GDI_ONLY)
+#define DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS 20U
+#else
+#define DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS 10U
+#endif
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
@@ -408,6 +413,7 @@ static int g_audio_muted = 0;
 static volatile int g_rx_shutdown_requested = 0;
 static pthread_mutex_t g_render_mutex;
 static struct dashcdg_rx_render_snapshot g_render_snapshot;
+static uint64_t g_rx_last_render_snapshot_local_ms = 0U;
 static FILE *g_rx_pcm_dump_file;
 static size_t g_rx_pcm_dump_frames_written;
 static size_t g_rx_pcm_dump_frame_limit;
@@ -4451,6 +4457,21 @@ static void dashcdg_rx_start_audio_async(void) {
     pthread_mutex_unlock(&g_receiver.mutex);
 }
 
+static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
+    if (g_audio == NULL || !g_audio_stream_started) {
+        return 0;
+    }
+    if (dashcdg_desktop_audio_is_running(g_audio)) {
+        return 0;
+    }
+
+    fprintf(stdout, "[rx] audio: detected stopped host stream; rebuilding live pipeline and restarting device\n");
+    fflush(stdout);
+    g_receiver.audio_last_stall_recover_local_ms = now_ms;
+    dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
+    return 1;
+}
+
 static void *dashcdg_rx_media_thread_main(void *unused) {
     struct dashcdg_win32_mmcss_handle mmcss;
     uint64_t last_status_ms = 0U;
@@ -4462,6 +4483,7 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         uint64_t now_ms = dashcdg_clock_now_ms();
 
         pthread_mutex_lock(&g_receiver.mutex);
+        dashcdg_rx_handle_dead_audio_backend_locked(now_ms);
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
         if (dashcdg_rx_should_auto_recover_zero_buffer_locked(&g_receiver, now_ms)) {
             fprintf(stdout, "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen\n");
@@ -4470,7 +4492,11 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
             dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
         }
         should_start_audio = dashcdg_rx_claim_audio_start_locked(now_ms);
-        dashcdg_rx_publish_render_snapshot_locked(now_ms);
+        if (g_rx_last_render_snapshot_local_ms == 0U ||
+                now_ms - g_rx_last_render_snapshot_local_ms >= DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS) {
+            dashcdg_rx_publish_render_snapshot_locked(now_ms);
+            g_rx_last_render_snapshot_local_ms = now_ms;
+        }
         dashcdg_rx_maybe_send_v4_stats_locked(now_ms);
         if (g_headless && (last_status_ms == 0U || now_ms - last_status_ms >= 1000U)) {
             dashcdg_rx_print_status_locked();
