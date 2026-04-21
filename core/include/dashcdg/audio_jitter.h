@@ -58,6 +58,7 @@ struct dashcdg_audio_jitter_buffer {
     struct dashcdg_audio_jitter_frame slots[DASHCDG_AUDIO_JITTER_SLOT_COUNT];
     int initialized;
     uint32_t next_media_sequence;
+    uint32_t highest_media_sequence_seen;
     uint64_t next_playback_ms;
     uint64_t reordered_packets;
     uint64_t pending_drops;

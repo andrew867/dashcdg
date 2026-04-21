@@ -3214,6 +3214,8 @@ static int dashcdg_rx_apply_audio_frame_locked(
         uint32_t out_sr;
         uint32_t effective_out_sr;
         uint32_t queued_ms_estimate = 0U;
+        uint32_t target_buffer_ms = dashcdg_rx_audio_target_buffer_ms_locked(state);
+        uint32_t queue_limit_ms = target_buffer_ms;
         int resampled_output = 0;
         uint32_t buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
         int32_t trim_ppm = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
@@ -3330,9 +3332,17 @@ static int dashcdg_rx_apply_audio_frame_locked(
         } else if (state->announced_audio_frame_ms > 0U) {
             queued_ms_estimate = (uint32_t) state->announced_audio_frame_ms;
         }
-        if (state->audio_ring_capacity_ms > 0U &&
+        if (frame->frame_ms > 0U) {
+            queue_limit_ms += (uint32_t) frame->frame_ms;
+        } else if (state->announced_audio_frame_ms > 0U) {
+            queue_limit_ms += (uint32_t) state->announced_audio_frame_ms;
+        }
+        if (state->audio_ring_capacity_ms > 0U && queue_limit_ms > state->audio_ring_capacity_ms) {
+            queue_limit_ms = state->audio_ring_capacity_ms;
+        }
+        if (queue_limit_ms > 0U &&
                 queued_ms_estimate > 0U &&
-                buffered_ms + queued_ms_estimate >= state->audio_ring_capacity_ms) {
+                buffered_ms + queued_ms_estimate >= queue_limit_ms) {
             if (rs_tmp != NULL) {
                 free(rs_tmp);
             }

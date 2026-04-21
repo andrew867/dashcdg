@@ -106,6 +106,7 @@ int dashcdg_audio_jitter_insert(
 
     if (!jb->initialized) {
         jb->next_media_sequence = media_sequence;
+        jb->highest_media_sequence_seen = media_sequence;
         jb->next_playback_ms = playback_ms;
         jb->initialized = 1;
     } else if (media_sequence < jb->next_media_sequence) {
@@ -113,7 +114,7 @@ int dashcdg_audio_jitter_insert(
             jb->pending_drops++;
         }
         return 0;
-    } else if (count_stats && media_sequence > jb->next_media_sequence) {
+    } else if (count_stats && media_sequence < jb->highest_media_sequence_seen) {
         jb->reordered_packets++;
     }
 
@@ -146,6 +147,9 @@ int dashcdg_audio_jitter_insert(
     slot->encoded_length = payload_length;
     slot->playback_ms = playback_ms;
     memcpy(slot->encoded_bytes, payload, payload_length);
+    if (media_sequence > jb->highest_media_sequence_seen) {
+        jb->highest_media_sequence_seen = media_sequence;
+    }
     return 1;
 }
 
