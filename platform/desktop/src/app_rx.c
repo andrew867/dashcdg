@@ -88,9 +88,11 @@
 #define DASHCDG_RX_APP_RING_HEADROOM_MS 120U
 #define DASHCDG_RX_MIN_RING_CAPACITY_MS 180U
 #define DASHCDG_RX_MAX_RING_CAPACITY_MS 700U
-#define DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS 10
-#define DASHCDG_RX_QUEUE_SERVO_GAIN_PPM_PER_MS 40
-#define DASHCDG_RX_QUEUE_SERVO_MAX_PPM 4000
+#define DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS 20
+#define DASHCDG_RX_QUEUE_SERVO_GAIN_PPM_PER_MS 2
+#define DASHCDG_RX_QUEUE_SERVO_MAX_PPM 200
+#define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 3000U
+#define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 1500U
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
@@ -295,6 +297,8 @@ struct receiver_state {
     uint32_t audio_ring_capacity_ms;
     uint32_t audio_host_output_latency_ms;
     int32_t audio_resample_trim_ppm;
+    uint64_t audio_servo_enable_after_local_ms;
+    uint64_t audio_last_queue_pressure_local_ms;
 };
 
 static struct receiver_state g_receiver;
@@ -1005,6 +1009,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_ring_capacity_ms = 0U;
     state->audio_host_output_latency_ms = 0U;
     state->audio_resample_trim_ppm = 0;
+    state->audio_servo_enable_after_local_ms = 0U;
+    state->audio_last_queue_pressure_local_ms = 0U;
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -1855,11 +1861,19 @@ static void dashcdg_rx_refresh_audio_latency_budget_locked(
 static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *state, uint32_t buffered_ms) {
     int32_t error_ms;
     int32_t desired_ppm;
+    uint64_t now_ms;
 
     if (state == NULL) {
         return 0;
     }
     if (g_audio == NULL || !g_audio_stream_started || !dashcdg_desktop_audio_output_device_ready(g_audio)) {
+        state->audio_resample_trim_ppm -= state->audio_resample_trim_ppm / 4;
+        return state->audio_resample_trim_ppm;
+    }
+    now_ms = dashcdg_clock_now_ms();
+    if ((state->audio_servo_enable_after_local_ms != 0U && now_ms < state->audio_servo_enable_after_local_ms) ||
+            (state->audio_last_queue_pressure_local_ms != 0U &&
+                    now_ms - state->audio_last_queue_pressure_local_ms < DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS)) {
         state->audio_resample_trim_ppm -= state->audio_resample_trim_ppm / 4;
         return state->audio_resample_trim_ppm;
     }
@@ -2842,6 +2856,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
     }
     if (queued_frames == 0U) {
         state->audio_queue_overflows++;
+        state->audio_last_queue_pressure_local_ms = dashcdg_clock_now_ms();
         return 0;
     }
     state->pcm_src_stream_in_samples += (uint64_t) decoded_frames;
@@ -2852,6 +2867,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
      */
     if (queued_frames != expected_queued_fc) {
         state->audio_queue_overflows++;
+        state->audio_last_queue_pressure_local_ms = dashcdg_clock_now_ms();
     }
 
     return 1;
@@ -3398,6 +3414,9 @@ static void dashcdg_rx_configure_audio_locked(
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
     state->pcm_src_stream_out_samples = 0;
+    state->audio_resample_trim_ppm = 0;
+    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(local_now_ms, DASHCDG_RX_QUEUE_SERVO_WARMUP_MS);
+    state->audio_last_queue_pressure_local_ms = local_now_ms;
     if (!dashcdg_desktop_audio_init_stream(
                 g_audio,
                 sample_rate,
