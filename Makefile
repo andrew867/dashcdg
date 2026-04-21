@@ -270,7 +270,7 @@ CODEC_SBC_OBJS := $(OBJ_DIR)/bt_sbc_sbc.o $(OBJ_DIR)/bt_sbc_sbc_primitives.o
 
 DESKTOP_NB_CODEC_OBJS := $(OBJ_DIR)/desktop_nb_evrc_codec.o $(OBJ_DIR)/desktop_nb_qcelp_codec.o $(OBJ_DIR)/desktop_nb_sbc_codec.o
 
-DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_soxr_stream.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_win32_timing_boost.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
+DESKTOP_LIB_OBJECTS := $(OBJ_DIR)/desktop_audio.o $(OBJ_DIR)/desktop_async_log.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_soxr_stream.o $(OBJ_DIR)/desktop_cdg_source.o $(OBJ_DIR)/desktop_gl_renderer.o $(OBJ_DIR)/desktop_stream_runtime.o $(OBJ_DIR)/desktop_transport_udp.o $(OBJ_DIR)/desktop_win32_gdi_view.o $(OBJ_DIR)/desktop_win32_timing_boost.o $(CODEC_AMR_NB_OBJS) $(CODEC_AMR_WB_OBJS) $(CODEC_AMR_DESKTOP_OBJS) $(CODEC_EVRCC_OBJS) $(CODEC_QCELP_OBJS) $(CODEC_SBC_OBJS) $(DESKTOP_NB_CODEC_OBJS)
 ifneq ($(strip $(SOXR_LINK)),)
 DESKTOP_LIB_OBJECTS += $(OBJ_DIR)/desktop_soxr_resample.o
 endif
@@ -403,6 +403,9 @@ DESKTOP_AUDIO_CPPFLAGS ?=
 
 $(OBJ_DIR)/desktop_audio.o: platform/desktop/src/desktop_audio.c
 	$(CC) $(CFLAGS) $(DESKTOP_AUDIO_CPPFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop_async_log.o: platform/desktop/src/desktop_async_log.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/desktop_pcm_rate_convert.o: platform/desktop/src/pcm_rate_convert.c
 	$(CC) $(CFLAGS) $(SOXR_CPPFLAGS) -c -o $@ $<
