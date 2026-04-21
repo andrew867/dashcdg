@@ -13,15 +13,20 @@
 #include <windows.h>
 
 #include "dashcdg/common.h"
+#include "dashcdg/media_clock.h"
 
 struct dashcdg_win32_gdi_view {
     HWND hwnd;
     int quit;
     dashcdg_win32_gdi_key_cb on_key;
     void *key_user;
+    uint64_t last_present_ms;
     uint8_t bgra_scratch[DASHCDG_CDG_RGBA_BYTES];
     BITMAPINFO bmi;
 };
+
+#define DASHCDG_WIN32_GDI_MAX_FPS 50U
+#define DASHCDG_WIN32_GDI_FRAME_INTERVAL_MS (1000U / DASHCDG_WIN32_GDI_MAX_FPS)
 
 static const wchar_t DASHCDG_GDI_CLASS_NAME[] = L"DashCdgRxGdiView";
 
@@ -227,10 +232,17 @@ int dashcdg_win32_gdi_view_present_rgba(
     RECT cr;
     int cw;
     int ch;
+    uint64_t now_ms;
 
     if (view == NULL || rgba == NULL || rgba_bytes != DASHCDG_CDG_RGBA_BYTES || view->hwnd == NULL) {
         return 0;
     }
+    now_ms = dashcdg_clock_now_ms();
+    if (view->last_present_ms != 0U &&
+            now_ms - view->last_present_ms < (uint64_t) DASHCDG_WIN32_GDI_FRAME_INTERVAL_MS) {
+        return 1;
+    }
+    view->last_present_ms = now_ms;
 
     dashcdg_win32_rgba_to_bgra(
             rgba,
