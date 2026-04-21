@@ -3213,6 +3213,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
         uint32_t ses_sr;
         uint32_t out_sr;
         uint32_t effective_out_sr;
+        uint32_t queued_ms_estimate = 0U;
         int resampled_output = 0;
         uint32_t buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
         int32_t trim_ppm = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
@@ -3321,6 +3322,23 @@ static int dashcdg_rx_apply_audio_frame_locked(
 
         if (resampled_output || dashcdg_v4_audio_codec_is_narrowband(frame->codec_id)) {
             dashcdg_pcm_interleaved_s16_soft_limit_inplace((int16_t *) qptr, qfc, host_ch > 0U ? host_ch : 1U);
+        }
+
+        if (effective_out_sr > 0U && qfc > 0U) {
+            queued_ms_estimate = (uint32_t) (((uint64_t) qfc * 1000U + (uint64_t) effective_out_sr - 1U) /
+                    (uint64_t) effective_out_sr);
+        } else if (state->announced_audio_frame_ms > 0U) {
+            queued_ms_estimate = (uint32_t) state->announced_audio_frame_ms;
+        }
+        if (state->audio_ring_capacity_ms > 0U &&
+                queued_ms_estimate > 0U &&
+                buffered_ms + queued_ms_estimate >= state->audio_ring_capacity_ms) {
+            if (rs_tmp != NULL) {
+                free(rs_tmp);
+            }
+            state->audio_queue_overflows++;
+            state->audio_last_queue_pressure_local_ms = dashcdg_clock_now_ms();
+            return 0;
         }
 
         expected_queued_fc = qfc;
