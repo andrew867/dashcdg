@@ -4876,7 +4876,6 @@ static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
 
 static void *dashcdg_rx_media_thread_main(void *unused) {
     struct dashcdg_win32_mmcss_handle mmcss;
-    uint64_t last_status_ms = 0U;
     char fault_lines[8][256];
 
     (void) unused;
@@ -4915,10 +4914,6 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
             g_rx_last_render_snapshot_local_ms = now_ms;
         }
         dashcdg_rx_maybe_send_v4_stats_locked(now_ms);
-        if (g_headless && (last_status_ms == 0U || now_ms - last_status_ms >= 1000U)) {
-            dashcdg_rx_print_status_locked();
-            last_status_ms = now_ms;
-        }
         pthread_mutex_unlock(&g_receiver.mutex);
 
         if (recovery_line != NULL) {
@@ -4931,6 +4926,30 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         }
 
         dashcdg_sleep_ms(10);
+    }
+
+    return NULL;
+}
+
+static void *dashcdg_rx_status_thread_main(void *unused) {
+    uint64_t last_status_ms = 0U;
+
+    (void) unused;
+
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
+    while (!g_rx_shutdown_requested) {
+        uint64_t now_ms = dashcdg_clock_now_ms();
+
+        if (g_headless && (last_status_ms == 0U || now_ms - last_status_ms >= 1000U)) {
+            pthread_mutex_lock(&g_receiver.mutex);
+            dashcdg_rx_print_status_locked();
+            pthread_mutex_unlock(&g_receiver.mutex);
+            last_status_ms = now_ms;
+        }
+        dashcdg_sleep_ms(25);
     }
 
     return NULL;
@@ -5290,6 +5309,10 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
     const char *title = "dashcdg desktop receiver (GDI)";
     uint64_t next_frame_deadline_ms = 0U;
 
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
     (void) argc;
     if (argv != NULL && argv[0] != NULL) {
         title = argv[0];
@@ -5359,6 +5382,10 @@ static int dashcdg_rx_run_glut_visual_loop(int *argc_ptr, char ***argv_ptr) {
     int argc = argc_ptr != NULL ? *argc_ptr : 0;
     char **argv = argv_ptr != NULL ? *argv_ptr : NULL;
 
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
     glutInit(&argc, argv);
     if (argc_ptr != NULL) {
         *argc_ptr = argc;
@@ -5421,6 +5448,8 @@ static int dashcdg_rx_run_windowed_ui(int argc, char **argv) {
 int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_t rx_thread;
     pthread_t media_thread;
+    pthread_t status_thread;
+    int status_thread_created = 0;
     const char *positionals[2] = { NULL, NULL };
     int positional_index = 0;
     int positionals_consumed = 0;
@@ -5590,9 +5619,17 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
     pthread_create(&rx_thread, NULL, network_thread, &port);
     pthread_create(&media_thread, NULL, dashcdg_rx_media_thread_main, NULL);
+    status_thread_created = pthread_create(&status_thread, NULL, dashcdg_rx_status_thread_main, NULL) == 0;
+    if (!status_thread_created) {
+        fprintf(stderr, "[rx] failed to start status thread\n");
+    }
 
     if (g_headless) {
         pthread_join(media_thread, NULL);
+        if (status_thread_created) {
+            pthread_join(status_thread, NULL);
+            status_thread_created = 0;
+        }
         if (g_rx_logger_enabled) {
             dashcdg_async_logger_shutdown(&g_rx_logger);
             g_rx_logger_enabled = 0;
@@ -5605,6 +5642,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         dashcdg_rx_request_shutdown();
         pthread_join(rx_thread, NULL);
         pthread_join(media_thread, NULL);
+        if (status_thread_created) {
+            pthread_join(status_thread, NULL);
+            status_thread_created = 0;
+        }
         dashcdg_net_cleanup();
         if (g_audio != NULL) {
             dashcdg_desktop_audio_stop_stream(g_audio);
@@ -5626,6 +5667,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     dashcdg_rx_request_shutdown();
     pthread_join(rx_thread, NULL);
     pthread_join(media_thread, NULL);
+    if (status_thread_created) {
+        pthread_join(status_thread, NULL);
+        status_thread_created = 0;
+    }
     dashcdg_net_cleanup();
     if (g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
@@ -5646,6 +5691,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     dashcdg_rx_request_shutdown();
     pthread_join(rx_thread, NULL);
     pthread_join(media_thread, NULL);
+    if (status_thread_created) {
+        pthread_join(status_thread, NULL);
+        status_thread_created = 0;
+    }
     dashcdg_net_cleanup();
     if (g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);

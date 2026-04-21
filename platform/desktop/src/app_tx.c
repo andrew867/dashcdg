@@ -196,7 +196,9 @@ struct dashcdg_tx_state {
 #endif
     struct dashcdg_tx_playlist playlist;
     pthread_t tx_thread;
+    pthread_t tx_audio_send_thread;
     pthread_t control_thread;
+    pthread_t status_thread;
     pthread_t ptp_thread;
     pthread_t audio_thread;
     pthread_t playlist_scan_thread;
@@ -327,6 +329,8 @@ struct dashcdg_tx_state {
     int playlist_scan_running;
     int playlist_scan_thread_created;
     int control_thread_created;
+    int tx_audio_send_thread_created;
+    int status_thread_created;
     int v4_running_logged;
     int paused;
     int shutdown_requested;
@@ -2509,6 +2513,99 @@ static void dashcdg_tx_emit_fault_lines(char lines[][256], size_t line_count) {
     for (i = 0U; i < line_count; i++) {
         dashcdg_tx_async_stdout_line(lines[i]);
     }
+}
+
+static unsigned int dashcdg_tx_send_due_audio_locked(
+        uint64_t now_ms,
+        uint8_t *packet,
+        size_t packet_size,
+        unsigned int max_audio_packets
+) {
+    uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
+    unsigned int audio_sent = 0U;
+
+    while (!g_tx_state.paused &&
+            now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+            audio_sent < max_audio_packets) {
+        const struct dashcdg_tx_audio_frame *frame;
+
+        if (!g_tx_state.pending_audio_frame_valid) {
+            if (!dashcdg_runtime_queue_pop(
+                        &g_tx_state.audio_ready_queue,
+                        &g_tx_state.pending_audio_frame,
+                        now_ms,
+                        0
+                )) {
+                if (!g_tx_state.audio_producer_finished &&
+                        now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms) {
+                    g_tx_state.audio_queue_starvations++;
+                }
+                break;
+            }
+            g_tx_state.pending_audio_frame_valid = 1;
+        }
+
+        frame = &g_tx_state.pending_audio_frame;
+        if (frame->playback_ms > playback_deadline) {
+            break;
+        }
+        if (!dashcdg_tx_send_v4_audio_chunk_locked(now_ms, frame, packet, packet_size)) {
+            break;
+        }
+        if (g_tx_state.last_audio_chunk_send_local_ms != 0U && now_ms > g_tx_state.last_audio_chunk_send_local_ms) {
+            uint64_t send_gap_ms = now_ms - g_tx_state.last_audio_chunk_send_local_ms;
+
+            if (send_gap_ms >= DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS) {
+                g_tx_state.audio_send_gap_events++;
+                if (send_gap_ms > g_tx_state.audio_send_gap_max_ms) {
+                    g_tx_state.audio_send_gap_max_ms = send_gap_ms;
+                }
+            }
+        }
+        g_tx_state.last_audio_chunk_send_local_ms = now_ms;
+        g_tx_state.audio_packets_sent++;
+        if (g_tx_state.audio_fec_group_size > 0U && g_tx_state.audio_fec_group_id != frame->group_id) {
+            dashcdg_tx_send_audio_group_fec_locked(now_ms, g_tx_state.audio_fec_group_id);
+        }
+        if (g_tx_state.audio_fec_group_size == 0U) {
+            g_tx_state.audio_fec_group_id = frame->group_id;
+        }
+        if (g_tx_state.audio_fec_group_size < DASHCDG_AUDIO_GROUP_SIZE) {
+            memcpy(
+                    g_tx_state.audio_fec_payloads[g_tx_state.audio_fec_group_size],
+                    frame->encoded_bytes,
+                    frame->encoded_length
+            );
+            g_tx_state.audio_fec_lengths[g_tx_state.audio_fec_group_size] = frame->encoded_length;
+            g_tx_state.audio_fec_group_size++;
+        }
+        if (frame->group_index + 1U >= DASHCDG_AUDIO_GROUP_SIZE) {
+            dashcdg_tx_send_audio_group_fec_locked(now_ms, frame->group_id);
+        }
+        g_tx_state.pending_audio_frame_valid = 0;
+        audio_sent++;
+    }
+
+    if (audio_sent >= DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS) {
+        g_tx_state.audio_send_burst_events++;
+        if ((uint64_t) audio_sent > g_tx_state.audio_send_burst_max_run) {
+            g_tx_state.audio_send_burst_max_run = (uint64_t) audio_sent;
+        }
+    }
+    if (g_tx_state.audio_producer_finished &&
+            !g_tx_state.pending_audio_frame_valid &&
+            dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue) == 0U &&
+            g_tx_state.audio_fec_group_size > 0U) {
+        dashcdg_tx_send_audio_group_fec_locked(now_ms, g_tx_state.audio_fec_group_id);
+    }
+    if (!g_tx_state.v4_running_logged &&
+            g_tx_state.v4_first_anchor_local_ms != 0U &&
+            g_tx_state.v4_first_audio_local_ms != 0U) {
+        g_tx_state.v4_running_logged = 1;
+        dashcdg_tx_log_v4_event_locked("running", now_ms, dashcdg_tx_current_playback_ms_locked(now_ms));
+    }
+
+    return audio_sent;
 }
 
 static void dashcdg_tx_print_status_locked(void) {
@@ -4779,7 +4876,7 @@ static int dashcdg_tx_handle_command(int command) {
     }
 
     if (handled && command != 'h' && command != '?' && command != 's' && command != 'c') {
-        dashcdg_tx_draw_status_bar_locked();
+        g_tx_console.status_bar_valid = 0;
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
@@ -4793,10 +4890,6 @@ static int dashcdg_tx_handle_command(int command) {
 }
 
 static void *dashcdg_tx_control_thread_main(void *unused) {
-    uint64_t last_status_ms = 0U;
-    size_t last_playlist_total = SIZE_MAX;
-    char fault_lines[9][256];
-
     (void) unused;
 
 #ifdef _WIN32
@@ -4807,41 +4900,14 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
     dashcdg_tx_console_sync_scroll_layout_for_tty();
     dashcdg_tx_console_scroll_log_past_status_row();
     dashcdg_tx_print_controls_help();
-    if (g_tx_console.status_bar_enabled) {
-        dashcdg_tx_draw_status_bar_unlocked();
-    } else {
-        pthread_mutex_lock(&g_tx_state.mutex);
-        dashcdg_tx_print_status_locked();
-        pthread_mutex_unlock(&g_tx_state.mutex);
-    }
 
     for (;;) {
         int command = dashcdg_tx_console_read_command_nonblocking();
         int shutdown_requested = 0;
-        uint64_t now_ms = dashcdg_clock_now_ms();
-        size_t fault_line_count = 0U;
-        int status_redraw_due = 0;
 
         pthread_mutex_lock(&g_tx_state.mutex);
         shutdown_requested = g_tx_state.shutdown_requested;
-        if (g_tx_state.playlist.count != last_playlist_total) {
-            last_playlist_total = g_tx_state.playlist.count;
-        }
-        if (g_tx_console.status_bar_enabled &&
-                (last_status_ms == 0U || now_ms - last_status_ms >= DASHCDG_TX_STATUS_BAR_INTERVAL_MS)) {
-            status_redraw_due = 1;
-            last_status_ms = now_ms;
-        }
-        fault_line_count = dashcdg_tx_collect_audio_fault_lines_locked(
-                now_ms,
-                fault_lines,
-                sizeof(fault_lines) / sizeof(fault_lines[0])
-        );
         pthread_mutex_unlock(&g_tx_state.mutex);
-        dashcdg_tx_emit_fault_lines(fault_lines, fault_line_count);
-        if (status_redraw_due) {
-            dashcdg_tx_draw_status_bar_unlocked();
-        }
 
         if (shutdown_requested) {
             break;
@@ -4876,7 +4942,6 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
      * not for this gate — using it here could stall audio/CDG release indefinitely.
      */
     uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
-    unsigned int audio_sent = 0U;
     unsigned int video_sent = 0U;
 
     if (g_tx_state.last_v4_session_info_ms == 0U ||
@@ -4929,81 +4994,6 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
 
     while (!g_tx_state.paused &&
             now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
-            audio_sent < DASHCDG_V4_MAX_AUDIO_PER_PASS) {
-        const struct dashcdg_tx_audio_frame *frame;
-
-        if (!g_tx_state.pending_audio_frame_valid) {
-            if (!dashcdg_runtime_queue_pop(
-                        &g_tx_state.audio_ready_queue,
-                        &g_tx_state.pending_audio_frame,
-                        now_ms,
-                        0
-                )) {
-                if (!g_tx_state.audio_producer_finished &&
-                        now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms) {
-                    g_tx_state.audio_queue_starvations++;
-                }
-                break;
-            }
-            g_tx_state.pending_audio_frame_valid = 1;
-        }
-
-        frame = &g_tx_state.pending_audio_frame;
-        if (frame->playback_ms > playback_deadline) {
-            break;
-        }
-        if (!dashcdg_tx_send_v4_audio_chunk_locked(now_ms, frame, packet, packet_size)) {
-            break;
-        }
-        if (g_tx_state.last_audio_chunk_send_local_ms != 0U && now_ms > g_tx_state.last_audio_chunk_send_local_ms) {
-            uint64_t send_gap_ms = now_ms - g_tx_state.last_audio_chunk_send_local_ms;
-
-            if (send_gap_ms >= DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS) {
-                g_tx_state.audio_send_gap_events++;
-                if (send_gap_ms > g_tx_state.audio_send_gap_max_ms) {
-                    g_tx_state.audio_send_gap_max_ms = send_gap_ms;
-                }
-            }
-        }
-        g_tx_state.last_audio_chunk_send_local_ms = now_ms;
-        g_tx_state.audio_packets_sent++;
-        if (g_tx_state.audio_fec_group_size > 0U && g_tx_state.audio_fec_group_id != frame->group_id) {
-            dashcdg_tx_send_audio_group_fec_locked(now_ms, g_tx_state.audio_fec_group_id);
-        }
-        if (g_tx_state.audio_fec_group_size == 0U) {
-            g_tx_state.audio_fec_group_id = frame->group_id;
-        }
-        if (g_tx_state.audio_fec_group_size < DASHCDG_AUDIO_GROUP_SIZE) {
-            memcpy(
-                    g_tx_state.audio_fec_payloads[g_tx_state.audio_fec_group_size],
-                    frame->encoded_bytes,
-                    frame->encoded_length
-            );
-            g_tx_state.audio_fec_lengths[g_tx_state.audio_fec_group_size] = frame->encoded_length;
-            g_tx_state.audio_fec_group_size++;
-        }
-        if (frame->group_index + 1U >= DASHCDG_AUDIO_GROUP_SIZE) {
-            dashcdg_tx_send_audio_group_fec_locked(now_ms, frame->group_id);
-        }
-        g_tx_state.pending_audio_frame_valid = 0;
-        audio_sent++;
-    }
-    if (audio_sent >= DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS) {
-        g_tx_state.audio_send_burst_events++;
-        if ((uint64_t) audio_sent > g_tx_state.audio_send_burst_max_run) {
-            g_tx_state.audio_send_burst_max_run = (uint64_t) audio_sent;
-        }
-    }
-
-    if (g_tx_state.audio_producer_finished &&
-            !g_tx_state.pending_audio_frame_valid &&
-            dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue) == 0U &&
-            g_tx_state.audio_fec_group_size > 0U) {
-        dashcdg_tx_send_audio_group_fec_locked(now_ms, g_tx_state.audio_fec_group_id);
-    }
-
-    while (!g_tx_state.paused &&
-            now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
             g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
             g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <= playback_deadline &&
             video_sent < DASHCDG_V4_MAX_VIDEO_PER_PASS) {
@@ -5022,12 +5012,6 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         video_sent++;
     }
 
-    if (!g_tx_state.v4_running_logged &&
-            g_tx_state.v4_first_anchor_local_ms != 0U &&
-            g_tx_state.v4_first_audio_local_ms != 0U) {
-        g_tx_state.v4_running_logged = 1;
-        dashcdg_tx_log_v4_event_locked("running", now_ms, dashcdg_tx_current_playback_ms_locked(now_ms));
-    }
 }
 
 static unsigned int dashcdg_tx_compute_v4_sleep_ms_locked(uint64_t now_ms) {
@@ -5055,10 +5039,96 @@ static unsigned int dashcdg_tx_compute_v4_sleep_ms_locked(uint64_t now_ms) {
     return 4U;
 }
 
+static void *dashcdg_tx_audio_send_thread_main(void *unused) {
+    struct dashcdg_win32_mmcss_handle mmcss;
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+
+    (void) unused;
+    dashcdg_win32_thread_timing_boost_begin(&mmcss);
+
+    for (;;) {
+        uint64_t now_ms = dashcdg_clock_now_ms();
+        unsigned int sleep_ms;
+
+        pthread_mutex_lock(&g_tx_state.mutex);
+        if (g_tx_state.shutdown_requested) {
+            pthread_mutex_unlock(&g_tx_state.mutex);
+            break;
+        }
+        if (g_tx_state.transport_v4_enabled) {
+            (void) dashcdg_tx_send_due_audio_locked(
+                    now_ms,
+                    packet,
+                    sizeof(packet),
+                    DASHCDG_V4_MAX_AUDIO_PER_PASS * 2U
+            );
+        }
+        sleep_ms = dashcdg_tx_compute_v4_sleep_ms_locked(now_ms);
+        pthread_mutex_unlock(&g_tx_state.mutex);
+
+        if (sleep_ms > 0U) {
+            dashcdg_sleep_ms(sleep_ms);
+        }
+    }
+
+    dashcdg_win32_thread_timing_boost_end(&mmcss);
+    return NULL;
+}
+
+static void *dashcdg_tx_status_thread_main(void *unused) {
+    uint64_t last_status_ms = 0U;
+    char fault_lines[9][256];
+
+    (void) unused;
+
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
+    if (g_tx_console.status_bar_enabled) {
+        dashcdg_tx_draw_status_bar_unlocked();
+    } else {
+        pthread_mutex_lock(&g_tx_state.mutex);
+        dashcdg_tx_print_status_locked();
+        pthread_mutex_unlock(&g_tx_state.mutex);
+    }
+
+    for (;;) {
+        uint64_t now_ms = dashcdg_clock_now_ms();
+        size_t fault_line_count = 0U;
+        int shutdown_requested = 0;
+        int status_redraw_due = 0;
+
+        pthread_mutex_lock(&g_tx_state.mutex);
+        shutdown_requested = g_tx_state.shutdown_requested;
+        if (g_tx_console.status_bar_enabled &&
+                (last_status_ms == 0U || now_ms - last_status_ms >= DASHCDG_TX_STATUS_BAR_INTERVAL_MS)) {
+            status_redraw_due = 1;
+            last_status_ms = now_ms;
+        }
+        fault_line_count = dashcdg_tx_collect_audio_fault_lines_locked(
+                now_ms,
+                fault_lines,
+                sizeof(fault_lines) / sizeof(fault_lines[0])
+        );
+        pthread_mutex_unlock(&g_tx_state.mutex);
+
+        if (shutdown_requested) {
+            break;
+        }
+        dashcdg_tx_emit_fault_lines(fault_lines, fault_line_count);
+        if (status_redraw_due) {
+            dashcdg_tx_draw_status_bar_unlocked();
+        }
+        dashcdg_sleep_ms(15);
+    }
+
+    return NULL;
+}
+
 static void *dashcdg_tx_thread_main(void *unused) {
     struct dashcdg_win32_mmcss_handle mmcss;
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
-    size_t previous_offset = 0;
 
     (void) unused;
     dashcdg_win32_thread_timing_boost_begin(&mmcss);
@@ -5083,14 +5153,9 @@ static void *dashcdg_tx_thread_main(void *unused) {
         }
 
         if (g_tx_state.transport_v4_enabled) {
-            unsigned int sleep_ms;
-
             dashcdg_tx_tick_v4_locked(now_ms, packet, sizeof(packet));
-            sleep_ms = dashcdg_tx_compute_v4_sleep_ms_locked(now_ms);
             pthread_mutex_unlock(&g_tx_state.mutex);
-            if (sleep_ms > 0U) {
-                dashcdg_sleep_ms(sleep_ms);
-            }
+            dashcdg_sleep_ms(5);
             continue;
         }
 
@@ -5329,6 +5394,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
             size_t chunk_size = g_tx_state.asset_size - g_tx_state.next_asset_offset;
             size_t packet_size;
             size_t chunk_index;
+            size_t previous_offset = g_tx_state.next_asset_offset;
 
             if (chunk_size > DASHCDG_MAX_ASSET_CHUNK) {
                 chunk_size = DASHCDG_MAX_ASSET_CHUNK;
@@ -5366,7 +5432,6 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 }
             }
 
-            previous_offset = g_tx_state.next_asset_offset;
             chunk_index = g_tx_state.next_asset_offset / DASHCDG_MAX_ASSET_CHUNK;
             if (g_tx_state.chunk_seen != NULL && chunk_index < g_tx_state.chunk_count &&
                     g_tx_state.chunk_seen[chunk_index] == 0) {
@@ -5572,12 +5637,13 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv);
 #endif
 
 static void *dashcdg_tx_render_thread_main(void *user_data) {
-    struct dashcdg_win32_mmcss_handle mmcss;
     struct dashcdg_tx_glut_bootstrap *bootstrap = (struct dashcdg_tx_glut_bootstrap *) user_data;
     int argc = bootstrap != NULL ? bootstrap->argc : 0;
     char **argv = bootstrap != NULL ? bootstrap->argv : NULL;
 
-    dashcdg_win32_thread_timing_boost_begin(&mmcss);
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
     glutInitWindowSize(DASHCDG_VISIBLE_WIDTH * 4, DASHCDG_VISIBLE_HEIGHT * 4);
@@ -5606,7 +5672,6 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
     glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_tx_preview_timer, 0);
     glutMainLoop();
 dashcdg_tx_render_thread_done:
-    dashcdg_win32_thread_timing_boost_end(&mmcss);
     return NULL;
 }
 
@@ -5659,6 +5724,10 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
     struct dashcdg_win32_gdi_view *view = NULL;
     const char *title = "dashcdg transmitter (GDI preview)";
     uint64_t next_frame_deadline_ms = 0U;
+
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
 
     (void) argc;
     if (argv != NULL && argv[0] != NULL) {
@@ -5781,9 +5850,17 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
 #endif /* _WIN32 && (GDI_PREVIEW || GL preview) */
 
 static void dashcdg_tx_cleanup(void) {
+    if (g_tx_state.tx_audio_send_thread_created) {
+        pthread_join(g_tx_state.tx_audio_send_thread, NULL);
+        g_tx_state.tx_audio_send_thread_created = 0;
+    }
     if (g_tx_state.control_thread_created) {
         pthread_join(g_tx_state.control_thread, NULL);
         g_tx_state.control_thread_created = 0;
+    }
+    if (g_tx_state.status_thread_created) {
+        pthread_join(g_tx_state.status_thread, NULL);
+        g_tx_state.status_thread_created = 0;
     }
     if (g_tx_state.playlist_scan_thread_created) {
         pthread_join(g_tx_state.playlist_scan_thread, NULL);
@@ -6262,12 +6339,22 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     fflush(stdout);
 
     pthread_create(&g_tx_state.audio_thread, NULL, dashcdg_tx_audio_thread_main, NULL);
+    g_tx_state.tx_audio_send_thread_created =
+            pthread_create(&g_tx_state.tx_audio_send_thread, NULL, dashcdg_tx_audio_send_thread_main, NULL) == 0;
+    if (!g_tx_state.tx_audio_send_thread_created) {
+        fprintf(stderr, "failed to start TX audio send thread\n");
+    }
     pthread_create(&g_tx_state.tx_thread, NULL, dashcdg_tx_thread_main, NULL);
     pthread_create(&g_tx_state.ptp_thread, NULL, dashcdg_tx_ptp_thread_main, NULL);
     g_tx_state.control_thread_created =
             pthread_create(&g_tx_state.control_thread, NULL, dashcdg_tx_control_thread_main, NULL) == 0;
     if (!g_tx_state.control_thread_created) {
         fprintf(stderr, "failed to start TX control thread\n");
+    }
+    g_tx_state.status_thread_created =
+            pthread_create(&g_tx_state.status_thread, NULL, dashcdg_tx_status_thread_main, NULL) == 0;
+    if (!g_tx_state.status_thread_created) {
+        fprintf(stderr, "failed to start TX status thread\n");
     }
     if (g_tx_state.playlist_scan_running) {
         g_tx_state.playlist_scan_thread_created =
@@ -6280,6 +6367,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 
     if (!g_tx_state.display_requested) {
         pthread_join(g_tx_state.tx_thread, NULL);
+        if (g_tx_state.tx_audio_send_thread_created) {
+            pthread_join(g_tx_state.tx_audio_send_thread, NULL);
+            g_tx_state.tx_audio_send_thread_created = 0;
+        }
         pthread_join(g_tx_state.audio_thread, NULL);
         if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
             dashcdg_socket_close(g_tx_state.ptp_sockfd);
@@ -6301,6 +6392,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
+    if (g_tx_state.tx_audio_send_thread_created) {
+        pthread_join(g_tx_state.tx_audio_send_thread, NULL);
+        g_tx_state.tx_audio_send_thread_created = 0;
+    }
     pthread_join(g_tx_state.audio_thread, NULL);
     if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
         dashcdg_socket_close(g_tx_state.ptp_sockfd);
@@ -6313,6 +6408,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     dashcdg_tx_run_win32_gdi_preview_loop(argc, argv);
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
+    if (g_tx_state.tx_audio_send_thread_created) {
+        pthread_join(g_tx_state.tx_audio_send_thread, NULL);
+        g_tx_state.tx_audio_send_thread_created = 0;
+    }
     pthread_join(g_tx_state.audio_thread, NULL);
     if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
         dashcdg_socket_close(g_tx_state.ptp_sockfd);
@@ -6325,6 +6424,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     fprintf(stderr, "[tx] internal error: display path disabled in retro build\n");
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
+    if (g_tx_state.tx_audio_send_thread_created) {
+        pthread_join(g_tx_state.tx_audio_send_thread, NULL);
+        g_tx_state.tx_audio_send_thread_created = 0;
+    }
     pthread_join(g_tx_state.audio_thread, NULL);
     if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
         dashcdg_socket_close(g_tx_state.ptp_sockfd);
@@ -6337,6 +6440,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     fprintf(stderr, "[tx] internal error: preview window requested but not available in this build\n");
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
+    if (g_tx_state.tx_audio_send_thread_created) {
+        pthread_join(g_tx_state.tx_audio_send_thread, NULL);
+        g_tx_state.tx_audio_send_thread_created = 0;
+    }
     pthread_join(g_tx_state.audio_thread, NULL);
     if (g_tx_state.ptp_sockfd != DASHCDG_INVALID_SOCKET) {
         dashcdg_socket_close(g_tx_state.ptp_sockfd);
