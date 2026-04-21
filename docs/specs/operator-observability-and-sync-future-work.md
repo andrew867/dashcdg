@@ -11,6 +11,7 @@ Consolidate **known limitations** and **planned enhancements** called out across
 | Clock sync | `dashcdg_media_clock`, PTP-style packets, fallback updates | **[v4-display-audio-sync.md](v4-display-audio-sync.md)**, **[receiver-progress-invariants.md](receiver-progress-invariants.md)** |
 | HUD | RX/TX inline status lines, headless counters | Desktop apps |
 | Stats / adaptation | v4 stats aggregation spec (implementation may be partial) | **[v4-network-stats-and-adaptation.md](v4-network-stats-and-adaptation.md)**, **[v4-receiver-stats-aggregation-and-adaptation.md](v4-receiver-stats-aggregation-and-adaptation.md)** |
+| Group playout sync | Program/spec now defined; implementation staged | **[v4-group-playout-sync-idms.md](v4-group-playout-sync-idms.md)**, **[../ops/v4-group-playout-sync-rollout.md](../ops/v4-group-playout-sync-rollout.md)**, **[../test/v4-group-playout-sync-validation.md](../test/v4-group-playout-sync-validation.md)** |
 
 ## Future directions
 

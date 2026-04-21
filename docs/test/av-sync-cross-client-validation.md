@@ -38,3 +38,5 @@ Manual test; no mocks. Goal: confirm **two receivers** stay on the **same lyric/
 
 - `docs/specs/av-sync-network-clients.md`
 - `docs/specs/av-sync-rx-tx-instrumentation.md`
+- `docs/specs/v4-group-playout-sync-idms.md`
+- `docs/test/v4-group-playout-sync-validation.md`
