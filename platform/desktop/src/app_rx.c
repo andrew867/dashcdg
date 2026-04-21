@@ -167,7 +167,6 @@ struct receiver_state {
     uint64_t v4_audio_chunk_packets;
     uint64_t v4_video_delta_packets;
     uint64_t v4_repair_window_packets;
-    uint64_t v4_backfill_packets;
     uint64_t v4_clock_sync_packets;
     uint64_t live_packets_applied;
     uint64_t audio_decode_failures;
@@ -509,12 +508,16 @@ static uint64_t dashcdg_rx_elapsed_ms_safe(uint64_t now_ms, uint64_t then_ms) {
  * Canvas is "ready" once we have applied live CDG/audio/video from the wire (not merely any UDP).
  * Without this, the first clock/session packet clears "no datagrams" and we paint black until the
  * first snapshot exists.
+ *
+ * v4 may deliver Opus frames before any CDG anchor/delta applies; hide the CONNECTING overlay once
+ * media payloads exist so audio playback is not trapped behind a graphics-only gate.
  */
 static int dashcdg_rx_stream_canvas_ready_locked(const struct receiver_state *state) {
     if (state == NULL) {
         return 0;
     }
-    return state->live_packets_applied > 0U || state->v4_bridge_cdg_valid || state->cdg_snapshots_applied > 0U;
+    return state->live_packets_applied > 0U || state->v4_bridge_cdg_valid || state->cdg_snapshots_applied > 0U ||
+            state->v4_audio_chunk_packets > 0U || state->v4_video_delta_packets > 0U;
 }
 
 static void dashcdg_rx_connecting_overlay_decide_locked(
@@ -869,7 +872,6 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->v4_audio_chunk_packets = 0;
     state->v4_video_delta_packets = 0;
     state->v4_repair_window_packets = 0;
-    state->v4_backfill_packets = 0;
     state->v4_clock_sync_packets = 0;
     state->live_packets_applied = 0;
     state->audio_decode_failures = 0;
@@ -951,6 +953,25 @@ static void receiver_state_reset(struct receiver_state *state) {
         state->v4_bridge_cdg_valid = 0;
     }
     dashcdg_cdg_state_init(&state->live_state);
+}
+
+static void receiver_state_drop_asset_assembly_buffers(struct receiver_state *state) {
+    if (state == NULL) {
+        return;
+    }
+    free(state->asset_bytes);
+    state->asset_bytes = NULL;
+    free(state->chunk_seen);
+    state->chunk_seen = NULL;
+    state->chunk_size = 0U;
+    state->chunk_count = 0U;
+    state->received_chunks = 0U;
+    state->duplicate_chunks = 0U;
+    state->contiguous_prefix_chunks = 0U;
+    state->asset_bytes_written = 0U;
+    state->reader_ready = 0;
+    dashcdg_cdg_reader_free(&state->reader);
+    dashcdg_cdg_reader_init(&state->reader);
 }
 
 static int receiver_state_prepare_asset(
@@ -1183,6 +1204,21 @@ static int dashcdg_rx_should_apply_v4_anchor_locked(const struct receiver_state 
         return 0;
     }
     if (state->playback_paused) {
+        return 1;
+    }
+    /*
+     * First anchor/snapshot application must run even when no CDG batch has been inserted yet:
+     * apply_snapshot_locked calls dashcdg_cdg_batch_jitter_apply_snapshot_seek, which initializes
+     * the jitter cursor. Requiring jitter.initialized first deadlocked late joins (anchor before
+     * deltas, or anchor completes before first batch insert).
+     *
+     * If live deltas already advanced the cursor past this anchor boundary, do not rewind.
+     */
+    if (state->cdg_snapshots_applied == 0U) {
+        if (state->cdg_batch_jitter.initialized &&
+                anchor_packet_index < state->cdg_batch_jitter.next_packet_index) {
+            return 0;
+        }
         return 1;
     }
     if (!state->cdg_batch_jitter.initialized) {
@@ -1581,7 +1617,14 @@ static void dashcdg_rx_format_render_gate_locked(
         snprintf(buffer, buffer_size, "anchor-ready");
     } else if (state->reader_ready) {
         snprintf(buffer, buffer_size, "asset-cache-ready");
-    } else if (state->asset_size == 0 || state->chunk_count == 0) {
+    } else if (state->announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4 &&
+            state->asset_size > 0U && state->chunk_count == 0U) {
+        /*
+         * v4 does not assemble the .cdg file on the wire (chunk_count stays 0). This state means
+         * we have session metadata but not yet anchor+deltas on the live canvas — not “asset chunks”.
+         */
+        snprintf(buffer, buffer_size, "v4-startup");
+    } else if (state->asset_size == 0U && state->chunk_count == 0U) {
         snprintf(buffer, buffer_size, "wait-announce");
     } else if (state->cdg_snapshots_applied > 0) {
         snprintf(
@@ -1838,7 +1881,14 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
 
     snapshot.valid = 1;
     snapshot.playback_ms = playback_ms;
-    if (g_receiver.live_packets_applied == 0U && g_receiver.v4_bridge_cdg_valid) {
+    /*
+     * Decoded v4 anchor fills v4_bridge_cdg before apply_snapshot_locked may run (should_apply gate).
+     * Prefer that canvas until the first snapshot commits; then keep the historical rule (bridge
+     * while no live deltas applied yet).
+     */
+    if (g_receiver.v4_bridge_cdg_valid && g_receiver.cdg_snapshots_applied == 0U) {
+        snapshot.state = g_receiver.v4_bridge_cdg;
+    } else if (g_receiver.live_packets_applied == 0U && g_receiver.v4_bridge_cdg_valid) {
         snapshot.state = g_receiver.v4_bridge_cdg;
     } else {
         snapshot.state = g_receiver.live_state;
@@ -2722,7 +2772,11 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                 cdg_din.announced_playout_delay_ms = state->announced_playout_delay_ms;
             }
             cdg_din.late_grace_ms = DASHCDG_CDG_LATE_GRACE_MS;
-            cdg_din.late_gate = (state->cdg_snapshots_applied > 0 || state->live_packets_applied > 0) ? 1 : 0;
+            cdg_din.late_gate =
+                    (state->cdg_snapshots_applied > 0U || state->live_packets_applied > 0U ||
+                            dashcdg_cdg_batch_jitter_occupied_count(&state->cdg_batch_jitter) > 0U)
+                            ? 1
+                            : 0;
             cdg_din.ms_since_prior_cdg_apply = 0U;
             if (state->last_cdg_jitter_apply_local_ms != 0U) {
                 cdg_din.ms_since_prior_cdg_apply = dashcdg_rx_elapsed_ms_safe(
@@ -2813,7 +2867,7 @@ static void dashcdg_rx_print_status_locked(void) {
             " live=%" DASHCDG_RX_PRIu64 " snap=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " fec=%" DASHCDG_RX_PRIu64
             "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " ptp=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
             "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " v4=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
-            "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
+            "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64
             "/%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " unk=%" DASHCDG_RX_PRIu64 " | asset prefix_bytes=%u/%u"
             " chunks=%u/%u rcv=%u dup=%" DASHCDG_RX_PRIu64 " written=%" DASHCDG_RX_PRIu64 " live_applied=%" DASHCDG_RX_PRIu64
             " | jitter aud=%u skip=%" DASHCDG_RX_PRIu64 " drop=%" DASHCDG_RX_PRIu64 " reord=%" DASHCDG_RX_PRIu64
@@ -2848,7 +2902,6 @@ static void dashcdg_rx_print_status_locked(void) {
             (unsigned long long) g_receiver.v4_audio_chunk_packets,
             (unsigned long long) g_receiver.v4_video_delta_packets,
             (unsigned long long) g_receiver.v4_repair_window_packets,
-            (unsigned long long) g_receiver.v4_backfill_packets,
             (unsigned long long) g_receiver.v4_clock_sync_packets,
             (unsigned long long) g_receiver.unknown_packets,
             (unsigned int) prefix_bytes,
@@ -3336,8 +3389,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     }
 
     session_changed = state->session_start_ms != 0 && state->session_start_ms != view->v4_session_info.session_start_ms;
-    asset_changed = state->asset_size != view->v4_session_info.asset_size ||
-            state->chunk_size != DASHCDG_MAX_V4_BACKFILL_CHUNK;
+    asset_changed = state->asset_size != (size_t) view->v4_session_info.asset_size || state->asset_bytes != NULL;
     has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
             view->v4_session_info.audio_channels > 0 &&
             view->v4_session_info.audio_frame_ms > 0;
@@ -3346,10 +3398,14 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         receiver_state_reset(state);
     }
 
-    if (view->v4_session_info.asset_size > 0 &&
-            !receiver_state_prepare_asset(state, view->v4_session_info.asset_size, DASHCDG_MAX_V4_BACKFILL_CHUNK)) {
-        return;
+    /*
+     * v4 does not ship full-file assembly on the wire; session_info.asset_size is metadata only.
+     * Drop any legacy assembly buffers so RX does not calloc the entire .cdg on join.
+     */
+    if (state->asset_bytes != NULL) {
+        receiver_state_drop_asset_assembly_buffers(state);
     }
+    state->asset_size = (size_t) view->v4_session_info.asset_size;
 
     /*
      * Re-open decoders + PCM ring only when session_info advertises different audio parameters,
@@ -3501,41 +3557,6 @@ static void handle_v4_video_delta(struct receiver_state *state, const struct das
                 view->v4_video_delta.delta_bytes
         );
     }
-}
-
-static void handle_v4_backfill_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
-    size_t chunk_index;
-    size_t old_prefix = 0;
-
-    if (state == NULL || view == NULL || view->v4_backfill_chunk.chunk_bytes == NULL ||
-            state->asset_bytes == NULL || state->chunk_seen == NULL) {
-        return;
-    }
-    if ((size_t) view->v4_backfill_chunk.asset_offset + view->v4_backfill_chunk.chunk_length > state->asset_size) {
-        return;
-    }
-
-    memcpy(
-            state->asset_bytes + view->v4_backfill_chunk.asset_offset,
-            view->v4_backfill_chunk.chunk_bytes,
-            view->v4_backfill_chunk.chunk_length
-    );
-    state->asset_bytes_written += view->v4_backfill_chunk.chunk_length;
-
-    chunk_index = view->v4_backfill_chunk.asset_offset / state->chunk_size;
-    if (chunk_index < state->chunk_count && state->chunk_seen[chunk_index] == 0) {
-        state->chunk_seen[chunk_index] = 1;
-        state->received_chunks++;
-    } else if (chunk_index < state->chunk_count) {
-        state->duplicate_chunks++;
-    }
-
-    old_prefix = state->contiguous_prefix_chunks;
-    receiver_state_refresh_prefix(state);
-    if (state->contiguous_prefix_chunks != old_prefix || state->received_chunks == state->chunk_count) {
-        state->last_progress_local_ms = dashcdg_clock_now_ms();
-    }
-    receiver_state_try_finalize(state);
 }
 
 static void handle_v4_repair_window(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -3983,10 +4004,12 @@ static void *network_thread(void *user_data) {
                     break;
                 case DASHCDG_PACKET_V4_AUDIO_CHUNK:
                     g_receiver.v4_audio_chunk_packets++;
+                    g_receiver.v4_loading_screen_active = 0;
                     handle_v4_audio_chunk(&g_receiver, &view);
                     break;
                 case DASHCDG_PACKET_V4_VIDEO_DELTA:
                     g_receiver.v4_video_delta_packets++;
+                    g_receiver.v4_loading_screen_active = 0;
                     handle_v4_video_delta(&g_receiver, &view);
                     break;
                 case DASHCDG_PACKET_V4_REPAIR_WINDOW:
@@ -3998,10 +4021,6 @@ static void *network_thread(void *user_data) {
                         g_receiver.fec_cdg_packets++;
                     }
                     handle_v4_repair_window(&g_receiver, &view);
-                    break;
-                case DASHCDG_PACKET_V4_BACKFILL_CHUNK:
-                    g_receiver.v4_backfill_packets++;
-                    handle_v4_backfill_chunk(&g_receiver, &view);
                     break;
                 case DASHCDG_PACKET_V4_CLOCK_SYNC:
                     g_receiver.v4_clock_sync_packets++;

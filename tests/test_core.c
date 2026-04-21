@@ -319,7 +319,7 @@ static void test_protocol_v4_roundtrip(void) {
     session_info.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
     session_info.video_anchor_mode = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
     session_info.video_delta_mode = DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN;
-    session_info.startup_backfill_mode = 1;
+    session_info.startup_backfill_mode = 0;
     session_info.loading_screen_mode = DASHCDG_V4_LOADING_SCREEN_CONNECTING;
     session_info.asset_size = 8192;
     session_info.session_start_ms = 4567;
@@ -358,7 +358,7 @@ static void test_protocol_v4_roundtrip(void) {
             session_info.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
             session_info.video_anchor_mode = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
             session_info.video_delta_mode = DASHCDG_V4_VIDEO_DELTA_MODE_REPEAT_RUN;
-            session_info.startup_backfill_mode = 1;
+            session_info.startup_backfill_mode = 0;
             session_info.loading_screen_mode = DASHCDG_V4_LOADING_SCREEN_CONNECTING;
             session_info.asset_size = 4096;
             session_info.session_start_ms = 9001;
@@ -450,10 +450,11 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_repair_window.redundancy_index == 1);
     assert(memcmp(view.v4_repair_window.payload_bytes, repair_bytes, sizeof(repair_bytes)) == 0);
 
+    /* Obsolete v4 backfill frame: keep parse/serialize roundtrip for old senders; no live TX. */
     memset(&backfill_chunk, 0, sizeof(backfill_chunk));
     backfill_chunk.asset_offset = 1024;
     backfill_chunk.chunk_length = sizeof(backfill_bytes);
-    backfill_chunk.backfill_mode = 1;
+    backfill_chunk.backfill_mode = 0;
     backfill_chunk.chunk_bytes = backfill_bytes;
     size = dashcdg_protocol_serialize_v4_backfill_chunk(buffer, sizeof(buffer), &header, &backfill_chunk);
     assert(size > 0);
@@ -888,6 +889,7 @@ static void test_cdg_batch_jitter_duplicate_drop(void) {
 
     memset(one_pkt, 0, sizeof(one_pkt));
     dashcdg_cdg_batch_jitter_init(&jb);
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 200U);
     assert(dashcdg_cdg_batch_jitter_insert(&jb, 200U, 1U, one_pkt, 1) == 1);
     assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 1U);
     drops_before = jb.pending_drops;
@@ -905,6 +907,7 @@ static void test_cdg_batch_jitter_apply_note_and_drain_skip(void) {
 
     memset(one_pkt, 0x55, sizeof(one_pkt));
     dashcdg_cdg_batch_jitter_init(&jb);
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 10U);
     assert(dashcdg_cdg_batch_jitter_insert(&jb, 10U, 1U, one_pkt, 0) == 1);
 
     memset(&din, 0, sizeof(din));
@@ -1031,6 +1034,27 @@ static void test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start
     assert(batch->packet_count == 2U);
 }
 
+static void test_cdg_batch_jitter_reorder_applies_lower_index_first(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t six[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
+    struct dashcdg_cdg_batch_jitter_drain_input din;
+    uint64_t miss = 0U;
+
+    memset(six, 0x77, sizeof(six));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 6U, DASHCDG_MAX_CDG_BATCH_PACKETS, six, 0) == 1);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 0U, DASHCDG_MAX_CDG_BATCH_PACKETS, six, 0) == 1);
+    memset(&din, 0, sizeof(din));
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    assert(batch != NULL && batch->packet_start_index == 0U);
+    dashcdg_cdg_batch_jitter_note_applied(&jb, batch);
+    assert(jb.next_packet_index == (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS);
+    batch = NULL;
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    assert(batch != NULL && batch->packet_start_index == 6U);
+}
+
 static void test_cdg_batch_jitter_snapshot_seek_purges_old_slots(void) {
     struct dashcdg_cdg_batch_jitter_buffer jb;
     uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
@@ -1154,6 +1178,7 @@ int main(void) {
     test_cdg_batch_jitter_sender_playback_respects_announced_preroll();
     test_cdg_batch_jitter_does_not_jump_to_oldest_without_real_wait();
     test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start();
+    test_cdg_batch_jitter_reorder_applies_lower_index_first();
     test_cdg_batch_jitter_snapshot_seek_purges_old_slots();
     test_fec_recovery();
     test_nb_ima_codec_roundtrip();

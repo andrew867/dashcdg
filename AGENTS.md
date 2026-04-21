@@ -8,9 +8,13 @@ Windows **desktop-rx** / **desktop-tx** with **v4 multicast**: codec hot-swap (*
 
 Treat **`platform/desktop/src/app_rx.c`**, **`platform/desktop/src/app_tx.c`**, **`platform/desktop/src/pcm_rate_convert.c`**, **`platform/desktop/src/opus_codec.c`**, **`core/src/audio_jitter.c`**, and **`core/src/cdg_batch_jitter.c`** as the primary runtime seams.
 
+v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from TX; `session_info.startup_backfill_mode` is **0**; RX does not assemble a local file from `V4_BACKFILL_CHUNK` and does not `calloc` the full CDG on v4 `session_info` join (`asset_size` remains metadata-only). The **first** decoded v4 anchor must still **`apply_snapshot_locked`** when `cdg_snapshots_applied == 0` so **`dashcdg_cdg_batch_jitter_apply_snapshot_seek`** runs before any CDG deltas — **`dashcdg_rx_should_apply_v4_anchor_locked`** must not require `cdg_batch_jitter.initialized` first (that deadlocked late join).
+
+**v4 video anchor** chunks are **paced** (min interval between chunks; smaller per-datagram payload cap on TX) so periodic RLE anchors do not flood one fragment per TX tick.
+
 ## Root causes addressed in code (historical + retained behavior)
 
-1. **Jitter empty-buffer runaway** — `primed_decode` gates empty / stall-loss skips until first successful decode (`core/src/audio_jitter.c`, `core/src/cdg_batch_jitter.c`).
+1. **Jitter empty-buffer runaway** — `primed_decode` gates empty / stall-loss skips until first successful decode (`core/src/audio_jitter.c`, `core/src/cdg_batch_jitter.c`). CDG jitter must not anchor **`next_packet_index`** to the first UDP datagram (reorder-safe insert at cursor 0 + stale drop + contiguous rewind in **`dashcdg_cdg_batch_jitter_drain_step`**).
 
 2. **`handle_v4_session_info` teardown loop** — Reconfigure only when **audio fields** (or device null) change, not bare `asset_changed` while chunks are still settling (**`need_audio_device_reconfigure`** in **`app_rx.c`**).
 

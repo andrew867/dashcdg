@@ -95,6 +95,18 @@
 #define DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS 250U
 #define DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS 100U
 #define DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS 1000U
+/*
+ * Anchor chunks used to ship one ~1 KiB fragment every TX tick (~100–1000 Hz) → multi‑Mbit/s bursts.
+ * Cap payload per datagram and enforce a minimum spacing between chunks. First full anchor uses a
+ * shorter interval so cold join still completes in a reasonable time; after that, periodic refreshes
+ * use a slower cadence to protect Wi‑Fi / embedded receivers.
+ */
+#define DASHCDG_V4_VIDEO_ANCHOR_CHUNK_PAYLOAD_BYTES 512U
+#define DASHCDG_V4_VIDEO_ANCHOR_CHUNK_INTERVAL_FIRST_MS 8U
+#define DASHCDG_V4_VIDEO_ANCHOR_CHUNK_INTERVAL_STEADY_MS 33U
+#if DASHCDG_V4_VIDEO_ANCHOR_CHUNK_PAYLOAD_BYTES > DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES
+#error "DASHCDG_V4_VIDEO_ANCHOR_CHUNK_PAYLOAD_BYTES exceeds DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES"
+#endif
 #define DASHCDG_V4_MAX_AUDIO_PER_PASS 2U
 #define DASHCDG_V4_MAX_VIDEO_PER_PASS 2U
 #define DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT 1U
@@ -234,13 +246,14 @@ struct dashcdg_tx_state {
     uint64_t v4_audio_chunk_packets_sent;
     uint64_t v4_video_delta_packets_sent;
     uint64_t v4_repair_window_packets_sent;
-    uint64_t v4_backfill_packets_sent;
     uint64_t v4_clock_sync_packets_sent;
     uint8_t *v4_video_anchor_bytes;
     size_t v4_video_anchor_size;
     size_t v4_video_anchor_offset;
     uint32_t v4_video_anchor_id;
     uint64_t v4_video_anchor_packet_index;
+    uint64_t last_v4_video_anchor_chunk_ms;
+    int v4_anchor_first_full_delivery_done;
     uint8_t v4_loading_phase;
     uint8_t v4_audio_profile_id;
     uint8_t v4_audio_codec_id;
@@ -2028,6 +2041,7 @@ static int dashcdg_tx_prepare_v4_video_anchor_locked(uint64_t now_ms) {
     g_tx_state.v4_video_anchor_bytes = encoded;
     g_tx_state.v4_video_anchor_size = encoded_length;
     g_tx_state.v4_video_anchor_offset = 0U;
+    g_tx_state.last_v4_video_anchor_chunk_ms = 0U;
     g_tx_state.v4_video_anchor_id++;
     if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
         g_tx_state.v4_video_anchor_packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
@@ -2159,6 +2173,8 @@ static void dashcdg_tx_force_rebroadcast_locked(void) {
     g_tx_state.last_v4_loading_screen_ms = 0;
     g_tx_state.last_v4_clock_sync_ms = 0;
     g_tx_state.last_v4_video_anchor_ms = 0;
+    g_tx_state.last_v4_video_anchor_chunk_ms = 0U;
+    g_tx_state.v4_anchor_first_full_delivery_done = 0;
     g_tx_state.v4_video_anchor_offset = g_tx_state.v4_video_anchor_size;
     if (g_tx_state.chunk_seen != NULL && g_tx_state.chunk_count > 0U) {
         memset(g_tx_state.chunk_seen, 0, g_tx_state.chunk_count);
@@ -2301,7 +2317,7 @@ static void dashcdg_tx_print_status_locked(void) {
     if (g_tx_state.transport_v4_enabled) {
         fprintf(
                 stdout,
-                "[tx] v4: prof=%u codec=%u (%s) info=%llu load=%llu anchor=%llu audio=%llu video=%llu repair=%llu backfill=%llu clock=%llu first=%llu/%llu/%llu peak=%uB anchor_off=%zu/%zu state=%u\n",
+                "[tx] v4: prof=%u codec=%u (%s) info=%llu load=%llu anchor=%llu audio=%llu video=%llu repair=%llu clock=%llu first=%llu/%llu/%llu peak=%uB anchor_off=%zu/%zu state=%u\n",
                 (unsigned int) g_tx_state.v4_audio_profile_id,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
@@ -2311,7 +2327,6 @@ static void dashcdg_tx_print_status_locked(void) {
                 (unsigned long long) g_tx_state.v4_audio_chunk_packets_sent,
                 (unsigned long long) g_tx_state.v4_video_delta_packets_sent,
                 (unsigned long long) g_tx_state.v4_repair_window_packets_sent,
-                (unsigned long long) g_tx_state.v4_backfill_packets_sent,
                 (unsigned long long) g_tx_state.v4_clock_sync_packets_sent,
                 (unsigned long long) g_tx_state.v4_first_loading_screen_local_ms,
                 (unsigned long long) g_tx_state.v4_first_anchor_local_ms,
@@ -2440,6 +2455,8 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.last_v4_loading_screen_ms = 0U;
     g_tx_state.last_v4_clock_sync_ms = 0U;
     g_tx_state.last_v4_video_anchor_ms = 0U;
+    g_tx_state.last_v4_video_anchor_chunk_ms = 0U;
+    g_tx_state.v4_anchor_first_full_delivery_done = 0;
     g_tx_state.v4_first_loading_screen_local_ms = 0U;
     g_tx_state.v4_first_anchor_local_ms = 0U;
     g_tx_state.v4_first_audio_local_ms = 0U;
@@ -2452,7 +2469,6 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.v4_audio_chunk_packets_sent = 0U;
     g_tx_state.v4_video_delta_packets_sent = 0U;
     g_tx_state.v4_repair_window_packets_sent = 0U;
-    g_tx_state.v4_backfill_packets_sent = 0U;
     g_tx_state.v4_clock_sync_packets_sent = 0U;
     free(g_tx_state.v4_video_anchor_bytes);
     g_tx_state.v4_video_anchor_bytes = NULL;
@@ -2658,7 +2674,7 @@ static int dashcdg_tx_send_v4_session_info_locked(uint64_t now_ms, uint8_t *pack
     payload.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
     payload.video_anchor_mode = DASHCDG_V4_VIDEO_ANCHOR_MODE_RLE_CANVAS;
     payload.video_delta_mode = DASHCDG_V4_VIDEO_DELTA_MODE_CDG_PACKETS;
-    payload.startup_backfill_mode = 1U;
+    payload.startup_backfill_mode = 0U;
     payload.loading_screen_mode = DASHCDG_V4_LOADING_SCREEN_CONNECTING;
     payload.asset_size = (uint32_t) g_tx_state.asset_size;
     payload.session_start_ms = g_tx_state.session_start_ms;
@@ -2733,7 +2749,9 @@ static int dashcdg_tx_send_v4_video_anchor_chunk_locked(uint64_t now_ms, uint8_t
     }
 
     remaining = g_tx_state.v4_video_anchor_size - g_tx_state.v4_video_anchor_offset;
-    chunk_bytes = remaining > DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES ? DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES : remaining;
+    chunk_bytes = remaining > DASHCDG_V4_VIDEO_ANCHOR_CHUNK_PAYLOAD_BYTES
+            ? DASHCDG_V4_VIDEO_ANCHOR_CHUNK_PAYLOAD_BYTES
+            : remaining;
     memset(&payload, 0, sizeof(payload));
     payload.anchor_id = g_tx_state.v4_video_anchor_id;
     payload.anchor_format = DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT;
@@ -2751,6 +2769,9 @@ static int dashcdg_tx_send_v4_video_anchor_chunk_locked(uint64_t now_ms, uint8_t
         return 0;
     }
     g_tx_state.v4_video_anchor_offset += chunk_bytes;
+    if (g_tx_state.v4_video_anchor_offset >= g_tx_state.v4_video_anchor_size) {
+        g_tx_state.v4_anchor_first_full_delivery_done = 1;
+    }
     if (g_tx_state.v4_first_anchor_local_ms == 0U) {
         g_tx_state.v4_first_anchor_local_ms = now_ms;
         dashcdg_tx_log_v4_event_locked("first_anchor", now_ms, dashcdg_tx_current_playback_ms_locked(now_ms));
@@ -2833,65 +2854,6 @@ static int dashcdg_tx_send_v4_video_delta_locked(
         return 0;
     }
     dashcdg_tx_apply_cdg_batch_to_state_locked(batch, &g_tx_state.live_cdg_state);
-    return 1;
-}
-
-static int dashcdg_tx_send_v4_backfill_chunk_locked(uint64_t now_ms, uint8_t *packet, size_t packet_size) {
-    struct dashcdg_v4_backfill_chunk_payload payload;
-    uint8_t chunk_storage[DASHCDG_MAX_V4_BACKFILL_CHUNK];
-    const uint8_t *chunk_bytes;
-    size_t remaining;
-    size_t chunk_size;
-    size_t previous_offset;
-    size_t chunk_index;
-    size_t encoded_size;
-
-    if (g_tx_state.asset_size == 0U) {
-        return 0;
-    }
-
-    remaining = g_tx_state.asset_size - g_tx_state.next_asset_offset;
-    chunk_size = remaining > DASHCDG_MAX_V4_BACKFILL_CHUNK ? DASHCDG_MAX_V4_BACKFILL_CHUNK : remaining;
-    chunk_bytes = dashcdg_cdg_source_memory_view(&g_tx_state.cdg_source, g_tx_state.next_asset_offset, chunk_size);
-    if (chunk_bytes == NULL) {
-        if (!dashcdg_cdg_source_read_bytes(&g_tx_state.cdg_source, g_tx_state.next_asset_offset, chunk_storage, chunk_size)) {
-            return 0;
-        }
-        chunk_bytes = chunk_storage;
-    }
-
-    memset(&payload, 0, sizeof(payload));
-    payload.asset_offset = (uint32_t) g_tx_state.next_asset_offset;
-    payload.chunk_length = (uint16_t) chunk_size;
-    payload.backfill_mode = 1U;
-    payload.chunk_bytes = chunk_bytes;
-
-    g_tx_state.header.flags = g_tx_state.paused ? DASHCDG_PACKET_FLAG_PAUSED : 0U;
-    g_tx_state.header.sequence = g_tx_state.sequence++;
-    g_tx_state.header.sender_time_ms = now_ms;
-    encoded_size = dashcdg_protocol_serialize_v4_backfill_chunk(packet, packet_size, &g_tx_state.header, &payload);
-    if (!dashcdg_tx_send_serialized_packet_locked(packet, encoded_size, &g_tx_state.v4_backfill_packets_sent, now_ms)) {
-        return 0;
-    }
-
-    previous_offset = g_tx_state.next_asset_offset;
-    chunk_index = previous_offset / DASHCDG_MAX_ASSET_CHUNK;
-    if (g_tx_state.chunk_seen != NULL && chunk_index < g_tx_state.chunk_count &&
-            g_tx_state.chunk_seen[chunk_index] == 0) {
-        g_tx_state.chunk_seen[chunk_index] = 1;
-        g_tx_state.distinct_chunks_sent++;
-        if (chunk_index == g_tx_state.contiguous_prefix_chunks) {
-            while (g_tx_state.contiguous_prefix_chunks < g_tx_state.chunk_count &&
-                    g_tx_state.chunk_seen[g_tx_state.contiguous_prefix_chunks] != 0) {
-                g_tx_state.contiguous_prefix_chunks++;
-            }
-        }
-    }
-    g_tx_state.next_asset_offset += chunk_size;
-    if (g_tx_state.next_asset_offset >= g_tx_state.asset_size) {
-        g_tx_state.next_asset_offset = 0U;
-        g_tx_state.asset_loops_completed++;
-    }
     return 1;
 }
 
@@ -4511,7 +4473,16 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
     if (g_tx_state.v4_video_anchor_bytes != NULL &&
             g_tx_state.v4_video_anchor_offset < g_tx_state.v4_video_anchor_size) {
-        dashcdg_tx_send_v4_video_anchor_chunk_locked(now_ms, packet, packet_size);
+        uint64_t anchor_interval_ms = g_tx_state.v4_anchor_first_full_delivery_done
+                ? (uint64_t) DASHCDG_V4_VIDEO_ANCHOR_CHUNK_INTERVAL_STEADY_MS
+                : (uint64_t) DASHCDG_V4_VIDEO_ANCHOR_CHUNK_INTERVAL_FIRST_MS;
+
+        if (g_tx_state.last_v4_video_anchor_chunk_ms == 0U ||
+                now_ms - g_tx_state.last_v4_video_anchor_chunk_ms >= anchor_interval_ms) {
+            if (dashcdg_tx_send_v4_video_anchor_chunk_locked(now_ms, packet, packet_size)) {
+                g_tx_state.last_v4_video_anchor_chunk_ms = now_ms;
+            }
+        }
     }
 
     while (!g_tx_state.paused &&
@@ -4586,10 +4557,6 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
             dashcdg_tx_send_cdg_group_fec_locked(now_ms, batch->group_id);
         }
         video_sent++;
-    }
-
-    if (g_tx_state.asset_size > 0U) {
-        dashcdg_tx_send_v4_backfill_chunk_locked(now_ms, packet, packet_size);
     }
 
     if (!g_tx_state.v4_running_logged &&

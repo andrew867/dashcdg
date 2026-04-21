@@ -218,7 +218,7 @@ struct dashcdg_v4_session_info_payload {
     uint8_t repair_mode;
     uint8_t video_anchor_mode;
     uint8_t video_delta_mode;
-    uint8_t startup_backfill_mode;
+    uint8_t startup_backfill_mode; /* 0: not used; full-file v4 backfill removed from product path */
     uint8_t loading_screen_mode;
     uint32_t asset_size;
     uint64_t session_start_ms;

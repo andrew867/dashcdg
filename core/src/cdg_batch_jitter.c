@@ -84,10 +84,19 @@ int dashcdg_cdg_batch_jitter_insert(
     packet_bytes = (size_t) packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
 
     if (!jb->initialized) {
-        jb->next_packet_index = packet_start_index;
-        jb->next_playback_ms = dashcdg_packet_count_to_ms(packet_start_index);
+        /*
+         * Always start the live cursor at packet index 0. The first datagram that arrives may be a
+         * later batch (UDP reorder or v4 sending two deltas per tick); anchoring next_packet_index
+         * to that first batch made every earlier batch get dropped as "late", which showed up as
+         * periodic missing graphic stripes during full-screen CDG paints.
+         */
+        jb->next_packet_index = 0U;
+        jb->next_playback_ms = 0U;
         jb->initialized = 1;
-    } else if (packet_start_index < jb->next_packet_index) {
+    } else if (packet_start_index + (uint64_t) packet_count <= jb->next_packet_index) {
+        /*
+         * Entire batch lies before the apply cursor — duplicate or replay of already-consumed data.
+         */
         if (count_stats) {
             jb->pending_drops++;
         }
@@ -157,6 +166,26 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
     if (frame != NULL) {
         *out_frame = frame;
         return DASHCDG_CDG_BATCH_DRAIN_APPLY;
+    }
+
+    /*
+     * If the cursor jumped ahead of the earliest buffered batch but that batch is exactly the
+     * contiguous predecessor region (common after aggressive stall recovery), rewind the cursor so
+     * we paint those packets instead of leaving a permanent hole.
+     */
+    {
+        struct dashcdg_cdg_batch_jitter_frame *oldest_gap = dashcdg_cdg_batch_jitter_oldest(jb);
+
+        if (oldest_gap != NULL && oldest_gap->packet_start_index < jb->next_packet_index) {
+            uint64_t oldest_end = oldest_gap->packet_start_index + (uint64_t) oldest_gap->packet_count;
+
+            if (oldest_end == jb->next_packet_index) {
+                jb->next_packet_index = oldest_gap->packet_start_index;
+                jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
+                *out_frame = oldest_gap;
+                return DASHCDG_CDG_BATCH_DRAIN_APPLY;
+            }
+        }
     }
 
     if (in->have_sender_playback && in->late_gate != 0 &&
