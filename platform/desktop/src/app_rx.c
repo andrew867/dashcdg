@@ -3394,7 +3394,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
         }
         if (queue_limit_ms > 0U &&
                 queued_ms_estimate > 0U &&
-                buffered_ms + queued_ms_estimate >= queue_limit_ms) {
+                buffered_ms + queued_ms_estimate > queue_limit_ms) {
             if (rs_tmp != NULL) {
                 free(rs_tmp);
             }
@@ -4162,7 +4162,26 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
  * blank startup until a later key canvas arrives, even though the current session/timeline is
  * unchanged.
  */
-static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state) {
+static void dashcdg_rx_rearm_live_video_after_unpause_locked(struct receiver_state *state, uint64_t now_ms) {
+    if (state == NULL) {
+        return;
+    }
+
+    dashcdg_cdg_batch_jitter_clear(&state->cdg_batch_jitter);
+    memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
+    state->jitter_cdg_decode_primed = 0;
+    state->last_cdg_jitter_apply_local_ms = 0U;
+    state->cdg_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
+            now_ms,
+            dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 0)
+    );
+    state->v4_loading_screen_active = 0;
+    state->v4_bridge_cdg = state->live_state;
+    state->v4_bridge_cdg_valid = 1;
+    state->live_packets_applied = 0U;
+}
+
+static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state, int preserve_playback_anchor) {
     uint64_t now_ms;
 
     if (state == NULL || !state->network_audio_enabled) {
@@ -4229,8 +4248,10 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
      * Drop stale sender playback anchor so the next chunk/clock_sync re-bootstrap matches queued
      * playback_ms — same class of wedge as idle-RX-then-TX (claim_audio_start / tiny ring).
      */
-    state->playback_base_ms = 0U;
-    state->playback_base_sender_ms = 0U;
+    if (!preserve_playback_anchor) {
+        state->playback_base_ms = 0U;
+        state->playback_base_sender_ms = 0U;
+    }
 }
 
 static void handle_v4_session_info(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
@@ -4501,7 +4522,8 @@ static void handle_v4_clock_sync(struct receiver_state *state, const struct dash
     state->playback_paused = (view->header.flags & DASHCDG_PACKET_FLAG_PAUSED) != 0;
     dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
     if (was_paused && !state->playback_paused) {
-        dashcdg_rx_reset_live_media_after_resume_locked(state);
+        dashcdg_rx_rearm_live_video_after_unpause_locked(state, local_now_ms);
+        dashcdg_rx_reset_live_media_after_resume_locked(state, 1);
     }
 }
 
@@ -4557,7 +4579,8 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
     state->playback_base_sender_ms = view->header.sender_time_ms;
     state->playback_paused = (view->header.flags & DASHCDG_PACKET_FLAG_PAUSED) != 0;
     if (was_paused && !state->playback_paused) {
-        dashcdg_rx_reset_live_media_after_resume_locked(state);
+        dashcdg_rx_rearm_live_video_after_unpause_locked(state, local_now_ms);
+        dashcdg_rx_reset_live_media_after_resume_locked(state, 1);
     }
 }
 
@@ -5003,7 +5026,7 @@ static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
     }
 
     g_receiver.audio_last_stall_recover_local_ms = now_ms;
-    dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
+    dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
     return 1;
 }
 
@@ -5027,11 +5050,11 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
         if (dashcdg_rx_should_auto_recover_zero_buffer_locked(&g_receiver, now_ms)) {
             g_receiver.audio_last_stall_recover_local_ms = now_ms;
-            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
+            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
             recovery_line = "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen";
         } else if (dashcdg_rx_should_auto_recover_buffered_silent_locked(&g_receiver, now_ms)) {
             g_receiver.audio_last_stall_recover_local_ms = now_ms;
-            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
+            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
             recovery_line = "[rx] audio: auto-recovering buffered silent stream after stalled DAC timestamp";
         }
         fault_line_count = dashcdg_rx_collect_fault_lines_locked(

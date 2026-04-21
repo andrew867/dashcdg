@@ -2276,10 +2276,26 @@ static uint64_t dashcdg_tx_network_playback_ms_locked(uint64_t now_ms) {
     return enc_frame_start_ms;
 }
 
+static uint64_t dashcdg_tx_media_send_lead_ms_locked(void) {
+    uint64_t lead_ms = (uint64_t) g_tx_state.warmup_ms;
+
+    if ((uint64_t) g_tx_state.announce.playout_delay_ms > lead_ms) {
+        lead_ms = (uint64_t) g_tx_state.announce.playout_delay_ms;
+    }
+    if (lead_ms == 0U) {
+        lead_ms = (uint64_t) DASHCDG_PAYOUT_DELAY_MS;
+    }
+    return lead_ms;
+}
+
+static uint64_t dashcdg_tx_media_send_deadline_ms_locked(uint64_t now_ms) {
+    return now_ms + dashcdg_tx_media_send_lead_ms_locked();
+}
+
 static uint32_t dashcdg_tx_v4_startup_state_locked(uint64_t now_ms) {
     uint64_t playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
 
-    if (now_ms + DASHCDG_PAYOUT_DELAY_MS < g_tx_state.session_start_ms) {
+    if (dashcdg_tx_media_send_deadline_ms_locked(now_ms) < g_tx_state.session_start_ms) {
         return 1U;
     }
     if (g_tx_state.v4_first_anchor_local_ms == 0U) {
@@ -2572,13 +2588,14 @@ static unsigned int dashcdg_tx_send_due_audio_locked(
         size_t packet_size,
         unsigned int max_audio_packets
 ) {
-    uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
+    uint64_t send_deadline_ms = dashcdg_tx_media_send_deadline_ms_locked(now_ms);
     unsigned int audio_sent = 0U;
 
     while (!g_tx_state.paused &&
-            now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+            send_deadline_ms >= g_tx_state.session_start_ms &&
             audio_sent < max_audio_packets) {
         const struct dashcdg_tx_audio_frame *frame;
+        uint64_t frame_due_ms;
 
         if (!g_tx_state.pending_audio_frame_valid) {
             if (!dashcdg_runtime_queue_pop(
@@ -2588,7 +2605,7 @@ static unsigned int dashcdg_tx_send_due_audio_locked(
                         0
                 )) {
                 if (!g_tx_state.audio_producer_finished &&
-                        now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms) {
+                        send_deadline_ms >= g_tx_state.session_start_ms) {
                     g_tx_state.audio_queue_starvations++;
                 }
                 break;
@@ -2597,7 +2614,8 @@ static unsigned int dashcdg_tx_send_due_audio_locked(
         }
 
         frame = &g_tx_state.pending_audio_frame;
-        if (frame->playback_ms > playback_deadline) {
+        frame_due_ms = g_tx_state.session_start_ms + frame->playback_ms;
+        if (frame_due_ms > send_deadline_ms) {
             break;
         }
         if (!dashcdg_tx_send_v4_audio_chunk_locked(now_ms, frame, packet, packet_size)) {
@@ -5001,7 +5019,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
      * or CPU). Encoder-aligned network_playback_ms is for clock_sync/beacons vs chunk tags,
      * not for this gate — using it here could stall audio/CDG release indefinitely.
      */
-    uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
+    uint64_t send_deadline_ms = dashcdg_tx_media_send_deadline_ms_locked(now_ms);
     unsigned int video_sent = 0U;
 
     if (g_tx_state.last_v4_session_info_ms == 0U ||
@@ -5048,9 +5066,10 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
 
     while (!g_tx_state.paused &&
-            now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+            send_deadline_ms >= g_tx_state.session_start_ms &&
             g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
-            g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <= playback_deadline &&
+            g_tx_state.session_start_ms + g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
+                    send_deadline_ms &&
             video_sent < DASHCDG_V4_MAX_VIDEO_PER_PASS) {
         const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
         int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
@@ -5343,10 +5362,11 @@ static void *dashcdg_tx_thread_main(void *unused) {
         }
 
         while (!g_tx_state.paused &&
-                now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms) {
+                dashcdg_tx_media_send_deadline_ms_locked(now_ms) >= g_tx_state.session_start_ms) {
             struct dashcdg_audio_frame_payload payload;
             size_t packet_size;
             const struct dashcdg_tx_audio_frame *frame;
+            uint64_t frame_due_ms;
 
             if (!g_tx_state.pending_audio_frame_valid) {
                 if (!dashcdg_runtime_queue_pop(
@@ -5361,7 +5381,8 @@ static void *dashcdg_tx_thread_main(void *unused) {
             }
 
             frame = &g_tx_state.pending_audio_frame;
-            if (frame->playback_ms > dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+            frame_due_ms = g_tx_state.session_start_ms + frame->playback_ms;
+            if (frame_due_ms > dashcdg_tx_media_send_deadline_ms_locked(now_ms)) {
                 break;
             }
 
@@ -5414,10 +5435,10 @@ static void *dashcdg_tx_thread_main(void *unused) {
         }
 
         while (!g_tx_state.paused &&
-                now_ms + DASHCDG_PAYOUT_DELAY_MS >= g_tx_state.session_start_ms &&
+                dashcdg_tx_media_send_deadline_ms_locked(now_ms) >= g_tx_state.session_start_ms &&
                 g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
-                g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
-                dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS) {
+                g_tx_state.session_start_ms + g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
+                dashcdg_tx_media_send_deadline_ms_locked(now_ms)) {
             const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
             int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                     g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
