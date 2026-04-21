@@ -11,6 +11,8 @@
 
 #ifdef _WIN32
 #include <process.h>
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #endif
 
@@ -448,6 +450,36 @@ static size_t g_rx_pcm_dump_frame_limit;
 static int g_rx_pcm_dump_init_attempted;
 static uint32_t g_rx_receiver_instance_id = 0U;
 
+#ifdef _WIN32
+static HANDLE g_rx_sidecar_log_file = INVALID_HANDLE_VALUE;
+static HANDLE g_rx_sidecar_pipe_read = INVALID_HANDLE_VALUE;
+static HANDLE g_rx_sidecar_pipe_write = INVALID_HANDLE_VALUE;
+static HANDLE g_rx_console_stdout = INVALID_HANDLE_VALUE;
+static HANDLE g_rx_console_stderr = INVALID_HANDLE_VALUE;
+static pthread_t g_rx_sidecar_thread;
+static int g_rx_sidecar_thread_created = 0;
+
+static void *dashcdg_rx_sidecar_tee_thread_main(void *unused) {
+    char buffer[4096];
+    DWORD bytes_read = 0U;
+
+    (void) unused;
+    while (g_rx_sidecar_pipe_read != INVALID_HANDLE_VALUE &&
+            ReadFile(g_rx_sidecar_pipe_read, buffer, (DWORD) sizeof(buffer), &bytes_read, NULL) &&
+            bytes_read > 0U) {
+        DWORD bytes_written = 0U;
+
+        if (g_rx_console_stdout != INVALID_HANDLE_VALUE) {
+            (void) WriteFile(g_rx_console_stdout, buffer, bytes_read, &bytes_written, NULL);
+        }
+        if (g_rx_sidecar_log_file != INVALID_HANDLE_VALUE) {
+            (void) WriteFile(g_rx_sidecar_log_file, buffer, bytes_read, &bytes_written, NULL);
+        }
+    }
+    return NULL;
+}
+#endif
+
 static void dashcdg_rx_init_receiver_instance_id(void) {
     uint64_t seed = (uint64_t) dashcdg_clock_now_ms();
 
@@ -473,7 +505,7 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
     char *dot;
     time_t now_t;
     struct tm now_tm;
-    FILE *fp;
+    int pipe_fd;
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
@@ -512,11 +544,46 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
             now_tm.tm_sec,
             (unsigned long) GetCurrentProcessId()
     );
-    fp = freopen(log_path, "a", stdout);
-    if (fp == NULL) {
+    g_rx_console_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+    g_rx_console_stderr = GetStdHandle(STD_ERROR_HANDLE);
+    g_rx_sidecar_log_file = CreateFileA(
+            log_path,
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+    );
+    if (g_rx_sidecar_log_file == INVALID_HANDLE_VALUE) {
         return;
     }
-    (void) freopen(log_path, "a", stderr);
+    if (!CreatePipe(&g_rx_sidecar_pipe_read, &g_rx_sidecar_pipe_write, NULL, 0)) {
+        CloseHandle(g_rx_sidecar_log_file);
+        g_rx_sidecar_log_file = INVALID_HANDLE_VALUE;
+        return;
+    }
+    (void) SetHandleInformation(g_rx_sidecar_pipe_read, HANDLE_FLAG_INHERIT, 0);
+    pipe_fd = _open_osfhandle((intptr_t) g_rx_sidecar_pipe_write, _O_TEXT);
+    if (pipe_fd < 0) {
+        CloseHandle(g_rx_sidecar_pipe_read);
+        CloseHandle(g_rx_sidecar_pipe_write);
+        CloseHandle(g_rx_sidecar_log_file);
+        g_rx_sidecar_pipe_read = INVALID_HANDLE_VALUE;
+        g_rx_sidecar_pipe_write = INVALID_HANDLE_VALUE;
+        g_rx_sidecar_log_file = INVALID_HANDLE_VALUE;
+        return;
+    }
+    fflush(stdout);
+    fflush(stderr);
+    (void) _dup2(pipe_fd, _fileno(stdout));
+    (void) _dup2(pipe_fd, _fileno(stderr));
+    (void) _close(pipe_fd);
+    (void) SetStdHandle(STD_OUTPUT_HANDLE, g_rx_sidecar_pipe_write);
+    (void) SetStdHandle(STD_ERROR_HANDLE, g_rx_sidecar_pipe_write);
+    if (pthread_create(&g_rx_sidecar_thread, NULL, dashcdg_rx_sidecar_tee_thread_main, NULL) == 0) {
+        g_rx_sidecar_thread_created = 1;
+    }
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
     fprintf(stdout, "[rx] sidecar log: %s\n", log_path);
