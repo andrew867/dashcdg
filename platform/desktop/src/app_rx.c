@@ -88,6 +88,29 @@
 #define DASHCDG_V4_ANCHOR_CHUNK_COUNT ((DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES + DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES - 1U) / \
         DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES)
 
+static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
+    uint64_t now_ms;
+
+    if (next_deadline_ms == NULL || frame_interval_ms == 0U) {
+        return;
+    }
+
+    now_ms = dashcdg_clock_now_ms();
+    if (*next_deadline_ms == 0U) {
+        *next_deadline_ms = now_ms;
+        return;
+    }
+    if (now_ms < *next_deadline_ms) {
+        dashcdg_sleep_ms((unsigned int) (*next_deadline_ms - now_ms));
+        now_ms = dashcdg_clock_now_ms();
+    }
+    if (now_ms > *next_deadline_ms + (uint64_t) frame_interval_ms * 4ULL) {
+        *next_deadline_ms = now_ms + (uint64_t) frame_interval_ms;
+    } else {
+        *next_deadline_ms += (uint64_t) frame_interval_ms;
+    }
+}
+
 static const struct {
     char c;
     uint8_t rows[7];
@@ -2696,7 +2719,6 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
         enum dashcdg_cdg_batch_drain_step cdg_step;
         uint64_t cdg_miss = 0U;
         int progressed = 0;
-        int audio_backpressure = 0;
 
         if (state->audio_jitter.initialized) {
             int audio_skip_hold_active = 0;
@@ -2736,8 +2758,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                 int apply_rc = dashcdg_rx_apply_audio_frame_locked(state, frame);
 
                 if (apply_rc == 0) {
-                    /* Device buffer full: keep the jitter slot and do not advance CDG this pass. */
-                    audio_backpressure = 1;
+                    /* Device buffer full: keep the jitter slot; CDG still drains in the same tick. */
                 } else if (apply_rc < 0) {
                     /*
                      * A decoder failure means this slot is unusable, not backpressure. Drop it so a
@@ -2758,7 +2779,13 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             }
         }
 
-        if (!audio_backpressure && state->cdg_batch_jitter.initialized) {
+        /*
+         * CDG drain must run even when the PCM ring is full (apply_rc==0 / backpressure). Otherwise the
+         * inner loop exits with progressed=0 before any CDG step — WinMM/slow hosts keep the ring
+         * pegged and CDG never advances (late join: audio ok, render_gate stuck on v4-startup/black).
+         * Graphics timing still follows playback_ms / DAC clock from publish_render_snapshot.
+         */
+        if (state->cdg_batch_jitter.initialized) {
             int cdg_skip_hold_active = 0;
 
             memset(&cdg_din, 0, sizeof(cdg_din));
@@ -3380,6 +3407,8 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
 
 static void handle_v4_session_info(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
     int session_changed;
+    int song_id_track_changed;
+    int material_track_change;
     int asset_changed;
     int has_network_audio;
     int need_audio_device_reconfigure;
@@ -3389,12 +3418,22 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     }
 
     session_changed = state->session_start_ms != 0 && state->session_start_ms != view->v4_session_info.session_start_ms;
+    /*
+     * TX sets session_start_ms from wall ms at track load. Two loads in the same millisecond reuse
+     * the same session_start_ms; RX then skipped receiver_state_reset + audio reconfigure, leaving
+     * stale jitter/PCM timestamps — claim_audio_start wedged on wait-preroll (common on slower PIII
+     * / WinMM paths where "next" hits faster than "back" in practice).
+     */
+    song_id_track_changed =
+            state->song_id[0] != '\0' &&
+            strncmp(state->song_id, view->v4_session_info.song_id, sizeof(state->song_id)) != 0;
+    material_track_change = session_changed || song_id_track_changed;
     asset_changed = state->asset_size != (size_t) view->v4_session_info.asset_size || state->asset_bytes != NULL;
     has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
             view->v4_session_info.audio_channels > 0 &&
             view->v4_session_info.audio_frame_ms > 0;
 
-    if (session_changed) {
+    if (material_track_change) {
         receiver_state_reset(state);
     }
 
@@ -3425,7 +3464,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
      * while the PCM ring drains to zero (silent RX until pause/unpause forces reconfigure).
      */
     need_audio_device_reconfigure =
-            session_changed ||
+            material_track_change ||
             g_audio == NULL ||
             !state->rx_audio_applied_valid ||
             view->v4_session_info.audio_sample_rate != state->rx_audio_applied_wire_sr ||
@@ -3454,7 +3493,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     }
     state->network_audio_enabled = has_network_audio;
 
-    if (session_changed || asset_changed || !state->have_clock) {
+    if (material_track_change || asset_changed || !state->have_clock) {
         dashcdg_media_clock_anchor(&state->sender_clock, (int64_t) local_now_ms, (int64_t) view->header.sender_time_ms);
         state->have_clock = 1;
         dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
@@ -4129,6 +4168,17 @@ static unsigned int dashcdg_rx_hud_ms_display_u32(uint64_t ms) {
     return (unsigned int) ms;
 }
 
+static uint32_t dashcdg_rx_hud_round_u32_10ms(uint32_t ms) {
+    return (ms + 5U) / 10U * 10U;
+}
+
+static int dashcdg_rx_hud_round_int_10ms(int v) {
+    if (v >= 0) {
+        return (v + 5) / 10 * 10;
+    }
+    return (v - 5) / 10 * 10;
+}
+
 static void dashcdg_rx_fill_hud_lines_locked(
         uint64_t local_now_ms,
         char *hud_line_a,
@@ -4176,7 +4226,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
     if (dashcdg_rx_local_audio_playback_now_locked(&hud_dac_playback_ms) &&
             dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &hud_snd_playback_ms)) {
         hud_clock_skew_ms = (int) ((int64_t) hud_snd_playback_ms - (int64_t) hud_dac_playback_ms);
-        snprintf(hud_skew_str, sizeof(hud_skew_str), "%d", hud_clock_skew_ms);
+        snprintf(hud_skew_str, sizeof(hud_skew_str), "%d", dashcdg_rx_hud_round_int_10ms(hud_clock_skew_ms));
     } else {
         snprintf(hud_skew_str, sizeof(hud_skew_str), "na");
     }
@@ -4213,7 +4263,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%ums dg:%ums st:%ums pre:%u/%u sk:%s",
                 (unsigned int) g_receiver.announced_audio_codec_id,
                 (unsigned int) g_receiver.announced_audio_profile_id,
-                (unsigned int) audio_buf_ms,
+                (unsigned int) dashcdg_rx_hud_round_u32_10ms(audio_buf_ms),
                 (unsigned int) pending_audio,
                 (unsigned int) pending_cdg,
                 (unsigned int) audio_repairable,
@@ -4275,10 +4325,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
 }
 
 static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms) {
-    uint64_t sender_playback_now_ms = 0U;
     uint32_t buffered_ms;
-    uint32_t output_latency_ms;
-    int64_t queued_base_timestamp_ms = -1;
 
     if (!g_receiver.network_audio_enabled || g_audio_stream_started || g_audio_start_inflight ||
             g_audio == NULL || !g_receiver.have_clock) {
@@ -4290,42 +4337,17 @@ static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms) {
         return 0;
     }
 
-    if (!dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &sender_playback_now_ms)) {
+    if (!dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &(uint64_t){0U})) {
         return 0;
     }
 
-    pthread_mutex_lock(&g_audio->stream_mutex);
-    if (g_audio->stream_queued_frames > 0U) {
-        queued_base_timestamp_ms = g_audio->stream_base_timestamp_ms;
-    }
-    pthread_mutex_unlock(&g_audio->stream_mutex);
-
-    output_latency_ms = dashcdg_desktop_audio_output_latency_ms(g_audio);
-    if (output_latency_ms == 0U) {
-        output_latency_ms = g_receiver.announced_playout_delay_ms / 4U;
-        if (output_latency_ms == 0U) {
-            output_latency_ms = 40U;
-        }
-    }
     /*
-     * Align first audible playout to the sender timeline vs the first queued frame's playback_ms.
-     * Before Pa_OpenStream exists, sender_playback_now vs stream_base_timestamp_ms can disagree on
-     * cold join (clock_sync vs first-audio bootstrap ordering) while the ring still fills — HUD
-     * looks healthy (buffer ms) but claim never opens the DAC. Skip this gate until the host device
-     * is ready; after that, g_audio_stream_started stays set so this path is not re-entered.
-     */
-    if (dashcdg_desktop_audio_output_device_ready(g_audio)) {
-        if (queued_base_timestamp_ms >= 0 &&
-                sender_playback_now_ms + (uint64_t) output_latency_ms < (uint64_t) queued_base_timestamp_ms) {
-            return 0;
-        }
-    }
-
-    /*
-     * Start from a shared sender timeline, not merely "the ring looks full". Without this gate,
-     * two receivers with different local queue-fill speed can both satisfy preroll and begin
-     * audible playout at different moments. The first queued frame's playback_ms is the schedule;
-     * output latency is the only local allowance.
+     * Startup must not compare sender_playback_now against stream_base_timestamp_ms when the host
+     * device is already open (PortAudio stream or WinMM ctx) but g_audio_stream_started is still 0.
+     * Cold join never hits that combination (no device until start_stream); resume-after-unpause and
+     * similar flush paths do — sender vs first-queued playback_ms can disagree until the clock catches
+     * up, which wedged claim on wait-preroll indefinitely. Preroll fill + requiring
+     * dashcdg_rx_sender_playback_now_locked keep startup on the shared sender timeline.
      *
      * g_audio_stream_started is set only after dashcdg_desktop_audio_start_stream succeeds so HUD,
      * CDG drain, and PortAudio refcount stay consistent when open/start fails.
@@ -4478,6 +4500,7 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
     static uint8_t rgba_frame[DASHCDG_CDG_RGBA_BYTES];
     struct dashcdg_win32_gdi_view *view = NULL;
     const char *title = "dashcdg desktop receiver (GDI)";
+    uint64_t next_frame_deadline_ms = 0U;
 
     (void) argc;
     if (argv != NULL && argv[0] != NULL) {
@@ -4505,6 +4528,8 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
         char hud_line_a[256];
         char hud_line_b[256];
         int show_hud = 0;
+
+        dashcdg_frame_limit_wait(&next_frame_deadline_ms, DASHCDG_RENDER_FRAME_INTERVAL_MS);
 
         pthread_mutex_lock(&g_render_mutex);
         if (g_render_snapshot.valid) {
@@ -4534,7 +4559,6 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
         }
 
         dashcdg_win32_gdi_view_present_rgba(view, rgba_frame, sizeof(rgba_frame), show_hud, hud_line_a, hud_line_b);
-        dashcdg_sleep_ms(DASHCDG_RENDER_FRAME_INTERVAL_MS);
     }
 
     dashcdg_win32_gdi_view_destroy(view);

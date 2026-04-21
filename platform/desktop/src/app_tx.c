@@ -113,6 +113,29 @@
 #define DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS 2U
 #define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 
+static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
+    uint64_t now_ms;
+
+    if (next_deadline_ms == NULL || frame_interval_ms == 0U) {
+        return;
+    }
+
+    now_ms = dashcdg_clock_now_ms();
+    if (*next_deadline_ms == 0U) {
+        *next_deadline_ms = now_ms;
+        return;
+    }
+    if (now_ms < *next_deadline_ms) {
+        dashcdg_sleep_ms((unsigned int) (*next_deadline_ms - now_ms));
+        now_ms = dashcdg_clock_now_ms();
+    }
+    if (now_ms > *next_deadline_ms + (uint64_t) frame_interval_ms * 4ULL) {
+        *next_deadline_ms = now_ms + (uint64_t) frame_interval_ms;
+    } else {
+        *next_deadline_ms += (uint64_t) frame_interval_ms;
+    }
+}
+
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
     uint32_t group_id;
@@ -3627,14 +3650,6 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
             }
 
             if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
-                if (copy_frames > 0U) {
-                    dashcdg_pcm_interleaved_s16_gain_q15_inplace(
-                            pcm,
-                            copy_frames,
-                            (unsigned int) DASHCDG_AUDIO_CHANNELS,
-                            DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
-                    );
-                }
                 encoded_length = dashcdg_opus_encode_frame(
                         &encoder,
                         pcm,
@@ -5173,6 +5188,7 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
     static uint8_t rgba_frame[DASHCDG_CDG_RGBA_BYTES];
     struct dashcdg_win32_gdi_view *view = NULL;
     const char *title = "dashcdg transmitter (GDI preview)";
+    uint64_t next_frame_deadline_ms = 0U;
 
     (void) argc;
     if (argv != NULL && argv[0] != NULL) {
@@ -5200,6 +5216,8 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
         char hud_line_a[256];
         char hud_line_b[256];
         int preview_on;
+
+        dashcdg_frame_limit_wait(&next_frame_deadline_ms, DASHCDG_RENDER_FRAME_INTERVAL_MS);
 
         memset(&draw_state, 0, sizeof(draw_state));
         pthread_mutex_lock(&g_tx_state.mutex);
@@ -5285,7 +5303,6 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
         }
 
         dashcdg_win32_gdi_view_present_rgba(view, rgba_frame, sizeof(rgba_frame), show_hud, hud_line_a, hud_line_b);
-        dashcdg_sleep_ms(DASHCDG_RENDER_FRAME_INTERVAL_MS);
     }
 
     dashcdg_win32_gdi_view_destroy(view);
