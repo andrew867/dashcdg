@@ -94,8 +94,6 @@
 #define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 3000U
 #define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 1500U
 #define DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS 750U
-#define DASHCDG_RX_ZERO_BUFFER_HARD_RECOVER_MS 1500U
-#define DASHCDG_RX_ZERO_BUFFER_HARD_RECOVER_RETRY_MS 1200U
 #define DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS 3000U
 #if defined(DASHCDG_RX_UI_GDI_ONLY)
 #define DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS 20U
@@ -184,6 +182,7 @@ struct receiver_state {
     uint64_t playback_base_ms;
     uint64_t playback_base_sender_ms;
     uint64_t last_audio_jitter_apply_local_ms;
+    uint64_t last_audio_queue_success_local_ms;
     uint64_t last_cdg_jitter_apply_local_ms;
     uint64_t audio_skip_hold_until_local_ms;
     uint64_t cdg_skip_hold_until_local_ms;
@@ -920,6 +919,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->playback_base_ms = 0;
     state->playback_base_sender_ms = 0;
     state->last_audio_jitter_apply_local_ms = 0;
+    state->last_audio_queue_success_local_ms = 0;
     state->last_cdg_jitter_apply_local_ms = 0;
     state->audio_skip_hold_until_local_ms = 0;
     state->cdg_skip_hold_until_local_ms = 0;
@@ -1944,68 +1944,49 @@ static int dashcdg_rx_audio_recent_auto_recover_locked(
     return local_now_ms - state->audio_last_stall_recover_local_ms < DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS;
 }
 
-enum dashcdg_rx_zero_buffer_recover_mode {
-    DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE = 0,
-    DASHCDG_RX_ZERO_BUFFER_RECOVER_SOFT = 1,
-    DASHCDG_RX_ZERO_BUFFER_RECOVER_HARD = 2
-};
-
-static enum dashcdg_rx_zero_buffer_recover_mode dashcdg_rx_zero_buffer_recover_mode_locked(
+static int dashcdg_rx_should_auto_recover_zero_buffer_locked(
         const struct receiver_state *state,
         uint64_t local_now_ms
 ) {
     uint32_t buffered_ms;
     size_t pending_audio;
-    uint64_t since_last_audio_apply_ms;
-    uint64_t since_last_progress_ms;
+    uint64_t since_last_audio_queue_success_ms;
     uint64_t since_last_dg_ms;
-    uint64_t since_last_recover_ms;
 
     if (state == NULL || !state->network_audio_enabled || state->playback_paused ||
             g_audio == NULL || g_audio_start_inflight) {
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
+        return 0;
     }
 
     buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
     if (buffered_ms != 0U) {
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
+        return 0;
     }
 
-    since_last_audio_apply_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_audio_jitter_apply_local_ms);
-    since_last_progress_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_progress_local_ms);
-    if (since_last_audio_apply_ms < DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS &&
-            since_last_progress_ms < DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS) {
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
+    if (state->audio_last_stall_recover_local_ms != 0U &&
+            local_now_ms - state->audio_last_stall_recover_local_ms < DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS) {
+        return 0;
+    }
+
+    since_last_audio_queue_success_ms = dashcdg_rx_elapsed_ms_safe(
+            local_now_ms,
+            state->last_audio_queue_success_local_ms
+    );
+    if (since_last_audio_queue_success_ms < DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS) {
+        return 0;
     }
 
     since_last_dg_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_datagram_local_ms);
     if (since_last_dg_ms > 1000U) {
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
+        return 0;
     }
 
     pending_audio = dashcdg_audio_jitter_occupied_count(&state->audio_jitter);
     if (pending_audio == 0U && !state->audio_jitter.initialized) {
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
+        return 0;
     }
 
-    if (!g_audio_stream_started || !dashcdg_desktop_audio_output_device_ready(g_audio) ||
-            !dashcdg_desktop_audio_is_running(g_audio)) {
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_HARD;
-    }
-
-    if (state->audio_last_stall_recover_local_ms != 0U) {
-        since_last_recover_ms = local_now_ms - state->audio_last_stall_recover_local_ms;
-        if (since_last_recover_ms < DASHCDG_RX_ZERO_BUFFER_HARD_RECOVER_RETRY_MS) {
-            return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
-        }
-        if (since_last_audio_apply_ms >= DASHCDG_RX_ZERO_BUFFER_HARD_RECOVER_MS ||
-                since_last_progress_ms >= DASHCDG_RX_ZERO_BUFFER_HARD_RECOVER_MS) {
-            return DASHCDG_RX_ZERO_BUFFER_RECOVER_HARD;
-        }
-        return DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
-    }
-
-    return DASHCDG_RX_ZERO_BUFFER_RECOVER_SOFT;
+    return 1;
 }
 
 static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
@@ -2127,9 +2108,6 @@ static void dashcdg_rx_seed_live_state_before_first_wire_delta_locked(
     int playback_ms;
 
     if (state == NULL || state->playback_paused || state->live_packets_applied != 0U) {
-        return;
-    }
-    if (state->cdg_snapshots_applied > 0U) {
         return;
     }
 
@@ -2973,6 +2951,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
         state->audio_last_queue_pressure_local_ms = dashcdg_clock_now_ms();
         return 0;
     }
+    state->last_audio_queue_success_local_ms = dashcdg_clock_now_ms();
     state->pcm_src_stream_in_samples += (uint64_t) decoded_frames;
     state->pcm_src_stream_out_samples += (uint64_t) queued_frames;
     /*
@@ -3532,6 +3511,7 @@ static void dashcdg_rx_configure_audio_locked(
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
     state->pcm_src_stream_out_samples = 0;
+    state->last_audio_queue_success_local_ms = 0U;
     state->audio_resample_trim_ppm = 0;
     state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(local_now_ms, DASHCDG_RX_QUEUE_SERVO_WARMUP_MS);
     state->audio_last_queue_pressure_local_ms = local_now_ms;
@@ -3673,9 +3653,10 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
 }
 
 /*
- * After unpause, rebuild the live A/V pipeline like a lightweight discontinuity: clear jitter and
- * stale buffered media, but keep the host device open. Reopening PortAudio/waveOut on every
- * pause/unpause needlessly churns the clock and wedges legacy paths.
+ * After unpause or audio-stall recovery, rebuild the live audio path but do not wipe the CDG live
+ * canvas/jitter. Clearing video state here causes resume/recover to fall back to snapshots or
+ * blank startup until a later key canvas arrives, even though the current session/timeline is
+ * unchanged.
  */
 static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state) {
     uint64_t now_ms;
@@ -3686,29 +3667,10 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
     now_ms = dashcdg_clock_now_ms();
 
     dashcdg_audio_jitter_clear(&state->audio_jitter);
-    dashcdg_cdg_batch_jitter_clear(&state->cdg_batch_jitter);
     state->jitter_audio_decode_primed = 0;
-    state->jitter_cdg_decode_primed = 0;
     memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
-    memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
-    dashcdg_cdg_state_init(&state->live_state);
-    state->v4_bridge_cdg_valid = 0;
-    state->live_packets_applied = 0U;
-    /*
-     * dashcdg_rx_seed_live_state_before_first_wire_delta_locked returns early once cdg_snapshots_applied
-     * > 0. After unpause we just wiped live_state — without copying the offline reader here the raster
-     * stays empty until a new snapshot or heavy live delta burst (track change “fixes” it).
-     */
-    if (state->reader_ready) {
-        int playback_ms = dashcdg_rx_playback_ms_for_graphics_locked(state, dashcdg_clock_now_ms());
-
-        if (playback_ms >= 0) {
-            dashcdg_cdg_reader_seek(&state->reader, dashcdg_ms_to_packet_count((uint64_t) playback_ms));
-            state->live_state = state->reader.state;
-        }
-    }
     state->last_audio_jitter_apply_local_ms = 0U;
-    state->last_cdg_jitter_apply_local_ms = 0U;
+    state->last_audio_queue_success_local_ms = 0U;
     /*
      * Warm handoff: DAC/device stay open (rx_audio_applied_valid still true). Same short skip-hold as
      * codec hot-swap — the full 1.5 s cold gate starves refill and HUD shows ~one frame (~20 ms) until
@@ -4494,7 +4456,6 @@ static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
     fprintf(stdout, "[rx] audio: detected stopped host stream; rebuilding live pipeline and restarting device\n");
     fflush(stdout);
     g_receiver.audio_last_stall_recover_local_ms = now_ms;
-    dashcdg_desktop_audio_stop_stream(g_audio);
     dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
     return 1;
 }
@@ -4508,23 +4469,13 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
     while (!g_rx_shutdown_requested) {
         int should_start_audio = 0;
         uint64_t now_ms = dashcdg_clock_now_ms();
-        enum dashcdg_rx_zero_buffer_recover_mode recover_mode = DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE;
 
         pthread_mutex_lock(&g_receiver.mutex);
         dashcdg_rx_handle_dead_audio_backend_locked(now_ms);
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
-        recover_mode = dashcdg_rx_zero_buffer_recover_mode_locked(&g_receiver, now_ms);
-        if (recover_mode != DASHCDG_RX_ZERO_BUFFER_RECOVER_NONE) {
-            if (recover_mode == DASHCDG_RX_ZERO_BUFFER_RECOVER_HARD) {
-                fprintf(stdout, "[rx] audio: hard-recovering stalled zero-buffer stream by restarting host device\n");
-                fflush(stdout);
-                if (g_audio != NULL) {
-                    dashcdg_desktop_audio_stop_stream(g_audio);
-                }
-            } else {
-                fprintf(stdout, "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen\n");
-                fflush(stdout);
-            }
+        if (dashcdg_rx_should_auto_recover_zero_buffer_locked(&g_receiver, now_ms)) {
+            fprintf(stdout, "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen\n");
+            fflush(stdout);
             g_receiver.audio_last_stall_recover_local_ms = now_ms;
             dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
         }
