@@ -2379,98 +2379,83 @@ static int64_t dashcdg_tx_next_cdg_lead_ms_locked(uint64_t playback_ms) {
     return (int64_t) g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms - (int64_t) playback_ms;
 }
 
-static void dashcdg_tx_log_audio_faults_locked(uint64_t now_ms) {
+static size_t dashcdg_tx_collect_audio_fault_lines_locked(
+        uint64_t now_ms,
+        char lines[][256],
+        size_t max_lines
+) {
     struct dashcdg_runtime_queue_stats audio_queue_stats;
     uint64_t delta;
-    char line[256];
+    size_t line_count = 0U;
+
+#define DASHCDG_TX_APPEND_FAULT_LINE(...) \
+    do { \
+        if (line_count < max_lines) { \
+            snprintf(lines[line_count], sizeof(lines[line_count]), __VA_ARGS__); \
+            line_count++; \
+        } \
+    } while (0)
 
     memset(&audio_queue_stats, 0, sizeof(audio_queue_stats));
     dashcdg_runtime_queue_snapshot(&g_tx_state.audio_ready_queue, &audio_queue_stats);
 
     if (g_tx_state.audio_source_open_failures > g_tx_state.last_logged_audio_source_open_failures) {
         delta = g_tx_state.audio_source_open_failures - g_tx_state.last_logged_audio_source_open_failures;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_open_fail +%llu q=%zu codec=%u now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_source_open_failures = g_tx_state.audio_source_open_failures;
     }
     if (g_tx_state.audio_source_seek_failures > g_tx_state.last_logged_audio_source_seek_failures) {
         delta = g_tx_state.audio_source_seek_failures - g_tx_state.last_logged_audio_source_seek_failures;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_seek_fail +%llu q=%zu codec=%u now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_source_seek_failures = g_tx_state.audio_source_seek_failures;
     }
     if (g_tx_state.audio_slow_read_events > g_tx_state.last_logged_audio_slow_read_events) {
         delta = g_tx_state.audio_slow_read_events - g_tx_state.last_logged_audio_slow_read_events;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_read_slow +%llu max=%llums q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_tx_state.audio_slow_read_max_ms,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_slow_read_events = g_tx_state.audio_slow_read_events;
     }
     if (g_tx_state.audio_resample_failures > g_tx_state.last_logged_audio_resample_failures) {
         delta = g_tx_state.audio_resample_failures - g_tx_state.last_logged_audio_resample_failures;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_resample_fail +%llu q=%zu now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_resample_failures = g_tx_state.audio_resample_failures;
     }
     if (g_tx_state.audio_encode_failures > g_tx_state.last_logged_audio_encode_failures) {
         delta = g_tx_state.audio_encode_failures - g_tx_state.last_logged_audio_encode_failures;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_encode_fail +%llu codec=%u q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) g_tx_state.v4_audio_codec_id,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_encode_failures = g_tx_state.audio_encode_failures;
     }
     if (g_tx_state.audio_queue_starvations > g_tx_state.last_logged_audio_queue_starvations) {
         delta = g_tx_state.audio_queue_starvations - g_tx_state.last_logged_audio_queue_starvations;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_queue_starve +%llu q=%zu done=%d pending=%d now=%llu",
                 (unsigned long long) delta,
                 audio_queue_stats.depth,
@@ -2478,58 +2463,53 @@ static void dashcdg_tx_log_audio_faults_locked(uint64_t now_ms) {
                 g_tx_state.pending_audio_frame_valid,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_queue_starvations = g_tx_state.audio_queue_starvations;
     }
     if (g_tx_state.audio_slow_loop_events > g_tx_state.last_logged_audio_slow_loop_events) {
         delta = g_tx_state.audio_slow_loop_events - g_tx_state.last_logged_audio_slow_loop_events;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_thread_slow +%llu max=%llums q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_tx_state.audio_slow_loop_max_ms,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_slow_loop_events = g_tx_state.audio_slow_loop_events;
     }
     if (g_tx_state.audio_send_gap_events > g_tx_state.last_logged_audio_send_gap_events) {
         delta = g_tx_state.audio_send_gap_events - g_tx_state.last_logged_audio_send_gap_events;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_send_gap +%llu max=%llums q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_tx_state.audio_send_gap_max_ms,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_send_gap_events = g_tx_state.audio_send_gap_events;
     }
     if (g_tx_state.audio_send_burst_events > g_tx_state.last_logged_audio_send_burst_events) {
         delta = g_tx_state.audio_send_burst_events - g_tx_state.last_logged_audio_send_burst_events;
-        snprintf(
-                line,
-                sizeof(line),
+        DASHCDG_TX_APPEND_FAULT_LINE(
                 "[tx] fault: audio_send_burst +%llu maxrun=%llu q=%zu now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_tx_state.audio_send_burst_max_run,
                 audio_queue_stats.depth,
                 (unsigned long long) now_ms
         );
-        fprintf(stdout, "%s\n", line);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(line);
         g_tx_state.last_logged_audio_send_burst_events = g_tx_state.audio_send_burst_events;
+    }
+
+#undef DASHCDG_TX_APPEND_FAULT_LINE
+    return line_count;
+}
+
+static void dashcdg_tx_emit_fault_lines(char lines[][256], size_t line_count) {
+    size_t i;
+
+    for (i = 0U; i < line_count; i++) {
+        fprintf(stdout, "%s\n", lines[i]);
+        fflush(stdout);
+        dashcdg_tx_sidecar_write_line(lines[i]);
     }
 }
 
@@ -4752,6 +4732,7 @@ static int dashcdg_tx_handle_command(int command) {
 static void *dashcdg_tx_control_thread_main(void *unused) {
     uint64_t last_status_ms = 0U;
     size_t last_playlist_total = SIZE_MAX;
+    char fault_lines[9][256];
 
     (void) unused;
 
@@ -4771,6 +4752,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
         int command = dashcdg_tx_console_read_command_nonblocking();
         int shutdown_requested = 0;
         uint64_t now_ms = dashcdg_clock_now_ms();
+        size_t fault_line_count = 0U;
 
         pthread_mutex_lock(&g_tx_state.mutex);
         shutdown_requested = g_tx_state.shutdown_requested;
@@ -4782,8 +4764,13 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
             dashcdg_tx_draw_status_bar_locked();
             last_status_ms = now_ms;
         }
-        dashcdg_tx_log_audio_faults_locked(now_ms);
+        fault_line_count = dashcdg_tx_collect_audio_fault_lines_locked(
+                now_ms,
+                fault_lines,
+                sizeof(fault_lines) / sizeof(fault_lines[0])
+        );
         pthread_mutex_unlock(&g_tx_state.mutex);
+        dashcdg_tx_emit_fault_lines(fault_lines, fault_line_count);
 
         if (shutdown_requested) {
             break;
@@ -4972,6 +4959,31 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
 }
 
+static unsigned int dashcdg_tx_compute_v4_sleep_ms_locked(uint64_t now_ms) {
+    uint64_t playback_deadline = dashcdg_tx_current_playback_ms_locked(now_ms) + DASHCDG_PAYOUT_DELAY_MS;
+    int64_t audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(playback_deadline);
+
+    if (g_tx_state.shutdown_requested) {
+        return 0U;
+    }
+    if (g_tx_state.paused) {
+        return 5U;
+    }
+    if (audio_lead_ms <= 0) {
+        return 1U;
+    }
+    if (audio_lead_ms <= 2) {
+        return 1U;
+    }
+    if (audio_lead_ms <= 5) {
+        return 2U;
+    }
+    if (audio_lead_ms <= 10) {
+        return 3U;
+    }
+    return 4U;
+}
+
 static void *dashcdg_tx_thread_main(void *unused) {
     struct dashcdg_win32_mmcss_handle mmcss;
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
@@ -5000,17 +5012,14 @@ static void *dashcdg_tx_thread_main(void *unused) {
         }
 
         if (g_tx_state.transport_v4_enabled) {
-            size_t audio_queue_depth;
+            unsigned int sleep_ms;
 
             dashcdg_tx_tick_v4_locked(now_ms, packet, sizeof(packet));
-            audio_queue_depth = dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue);
+            sleep_ms = dashcdg_tx_compute_v4_sleep_ms_locked(now_ms);
             pthread_mutex_unlock(&g_tx_state.mutex);
-            /*
-             * When the encoder thread falls behind (CPU load), keep the TX loop tight
-             * so the ready queue refills and pending_audio_frame_valid stays true — the
-             * status bar uses a=-1 when there is no popped frame ready to send.
-             */
-            dashcdg_sleep_ms(audio_queue_depth < 16U ? 1U : 10U);
+            if (sleep_ms > 0U) {
+                dashcdg_sleep_ms(sleep_ms);
+            }
             continue;
         }
 
