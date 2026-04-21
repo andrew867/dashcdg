@@ -5,8 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <pthread.h>
+
+#ifdef _WIN32
+#include <process.h>
+#include <windows.h>
+#endif
 
 #if defined(DASHCDG_RX_UI_GDI_ONLY)
 #if !defined(_WIN32)
@@ -423,6 +429,85 @@ static FILE *g_rx_pcm_dump_file;
 static size_t g_rx_pcm_dump_frames_written;
 static size_t g_rx_pcm_dump_frame_limit;
 static int g_rx_pcm_dump_init_attempted;
+static uint32_t g_rx_receiver_instance_id = 0U;
+
+static void dashcdg_rx_init_receiver_instance_id(void) {
+    uint64_t seed = (uint64_t) dashcdg_clock_now_ms();
+
+#ifdef _WIN32
+    seed ^= ((uint64_t) (uint32_t) GetCurrentProcessId()) << 16;
+#endif
+    seed ^= (seed >> 33);
+    seed *= 0xff51afd7ed558ccdULL;
+    seed ^= (seed >> 33);
+    g_rx_receiver_instance_id = (uint32_t) (seed ^ (seed >> 32));
+    if (g_rx_receiver_instance_id == 0U) {
+        g_rx_receiver_instance_id = 1U;
+    }
+}
+
+static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
+#ifdef _WIN32
+    char exe_path[MAX_PATH];
+    char dir_path[MAX_PATH];
+    char stem[128];
+    char log_path[MAX_PATH * 2];
+    char *base;
+    char *dot;
+    time_t now_t;
+    struct tm now_tm;
+    FILE *fp;
+
+    (void) argv0;
+    if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
+        return;
+    }
+    strncpy(dir_path, exe_path, sizeof(dir_path) - 1U);
+    dir_path[sizeof(dir_path) - 1U] = '\0';
+    base = strrchr(dir_path, '\\');
+    if (base == NULL) {
+        base = strrchr(dir_path, '/');
+    }
+    if (base == NULL) {
+        return;
+    }
+    *base++ = '\0';
+    snprintf(stem, sizeof(stem), "%s", base);
+    dot = strrchr(stem, '.');
+    if (dot != NULL) {
+        *dot = '\0';
+    }
+    now_t = time(NULL);
+    if (localtime_s(&now_tm, &now_t) != 0) {
+        memset(&now_tm, 0, sizeof(now_tm));
+    }
+    snprintf(
+            log_path,
+            sizeof(log_path),
+            "%s\\%s-%04d%02d%02d-%02d%02d%02d-p%lu.log",
+            dir_path,
+            stem,
+            now_tm.tm_year + 1900,
+            now_tm.tm_mon + 1,
+            now_tm.tm_mday,
+            now_tm.tm_hour,
+            now_tm.tm_min,
+            now_tm.tm_sec,
+            (unsigned long) GetCurrentProcessId()
+    );
+    fp = freopen(log_path, "a", stdout);
+    if (fp == NULL) {
+        return;
+    }
+    (void) freopen(log_path, "a", stderr);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    fprintf(stdout, "[rx] sidecar log: %s\n", log_path);
+    fflush(stdout);
+#else
+    (void) argv0;
+#endif
+}
 
 static uint32_t dashcdg_rx_audio_host_latency_ms_locked(void);
 static uint32_t dashcdg_rx_audio_target_total_latency_ms_locked(const struct receiver_state *state);
@@ -4218,7 +4303,7 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
     pl.wall_now_ms = now_ms;
     pl.sender_time_observed_ms = sender_observed_ms;
     pl.clock_offset_estimate_ms = (int32_t) g_receiver.sender_offset_ms;
-    pl.playout_delay_ms_config = g_receiver.announced_playout_delay_ms;
+    pl.playout_delay_ms_config = (uint16_t) dashcdg_rx_audio_target_total_latency_ms_locked(&g_receiver);
     pl.audio_buffer_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
     pl.audio_queue_pressure_events = (uint32_t) g_receiver.audio_queue_overflows;
     pl.fec_audio_recovered = (uint32_t) g_receiver.fec_audio_recovered;
@@ -4226,6 +4311,17 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
     pl.loss_pct_x100 = 0U;
     pl.v4_codec_id = g_receiver.announced_audio_codec_id;
     pl.opus_bitrate_bps = 0U;
+    pl.fec_decode_attempts = (uint32_t) (g_receiver.fec_audio_recovered + g_receiver.fec_cdg_recovered +
+            g_receiver.fec_recovery_failures);
+    pl.fec_recovery_failed = (uint32_t) g_receiver.fec_recovery_failures;
+    pl.media_datagrams_lost_estimated = 0U;
+    pl.cdg_fec_recovered = (uint32_t) g_receiver.fec_cdg_recovered;
+    pl.cdg_fec_failed = (uint32_t) g_receiver.fec_recovery_failures;
+    pl.jitter_p95_ms = pl.jitter_rms_ms;
+    pl.jitter_max_ms = pl.jitter_rms_ms;
+    pl.reorder_events = (uint32_t) (g_receiver.audio_jitter.reordered_packets + g_receiver.cdg_batch_jitter.reordered_batches);
+    pl.receiver_instance_id = g_rx_receiver_instance_id;
+    pl.fec_group_size_observed = g_receiver.announced_audio_fec_group_size;
 
     sz = dashcdg_protocol_serialize_v4_rx_stats(packet, sizeof(packet), &hdr, &pl);
     if (sz == 0U) {
@@ -5099,6 +5195,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             return 0;
         }
     }
+
+    dashcdg_rx_maybe_enable_sidecar_log(argv[0]);
+    dashcdg_rx_init_receiver_instance_id();
 
     g_endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
     memset(&g_endpoint_in_addr, 0, sizeof(g_endpoint_in_addr));

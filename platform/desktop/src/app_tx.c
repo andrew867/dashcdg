@@ -306,6 +306,69 @@ struct dashcdg_tx_state {
 
 static struct dashcdg_tx_state g_tx_state;
 
+static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
+#ifdef _WIN32
+    char exe_path[MAX_PATH];
+    char dir_path[MAX_PATH];
+    char stem[128];
+    char log_path[MAX_PATH * 2];
+    char *base;
+    char *dot;
+    time_t now_t;
+    struct tm now_tm;
+    FILE *fp;
+
+    (void) argv0;
+    if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
+        return;
+    }
+    strncpy(dir_path, exe_path, sizeof(dir_path) - 1U);
+    dir_path[sizeof(dir_path) - 1U] = '\0';
+    base = strrchr(dir_path, '\\');
+    if (base == NULL) {
+        base = strrchr(dir_path, '/');
+    }
+    if (base == NULL) {
+        return;
+    }
+    *base++ = '\0';
+    snprintf(stem, sizeof(stem), "%s", base);
+    dot = strrchr(stem, '.');
+    if (dot != NULL) {
+        *dot = '\0';
+    }
+    now_t = time(NULL);
+    if (localtime_s(&now_tm, &now_t) != 0) {
+        memset(&now_tm, 0, sizeof(now_tm));
+    }
+    snprintf(
+            log_path,
+            sizeof(log_path),
+            "%s\\%s-%04d%02d%02d-%02d%02d%02d-p%lu.log",
+            dir_path,
+            stem,
+            now_tm.tm_year + 1900,
+            now_tm.tm_mon + 1,
+            now_tm.tm_mday,
+            now_tm.tm_hour,
+            now_tm.tm_min,
+            now_tm.tm_sec,
+            (unsigned long) GetCurrentProcessId()
+    );
+    fp = freopen(log_path, "a", stdout);
+    if (fp == NULL) {
+        return;
+    }
+    (void) freopen(log_path, "a", stderr);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    fprintf(stdout, "[tx] sidecar log: %s\n", log_path);
+    fflush(stdout);
+#else
+    (void) argv0;
+#endif
+}
+
 struct dashcdg_tx_console_state {
     int input_ready;
     int status_bar_enabled;
@@ -5411,6 +5474,8 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             return 0;
         }
     }
+
+    dashcdg_tx_maybe_enable_sidecar_log(argv[0]);
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
