@@ -11,8 +11,6 @@
 
 #ifdef _WIN32
 #include <process.h>
-#include <fcntl.h>
-#include <io.h>
 #include <windows.h>
 #endif
 
@@ -451,34 +449,20 @@ static int g_rx_pcm_dump_init_attempted;
 static uint32_t g_rx_receiver_instance_id = 0U;
 
 #ifdef _WIN32
-static HANDLE g_rx_sidecar_log_file = INVALID_HANDLE_VALUE;
-static HANDLE g_rx_sidecar_pipe_read = INVALID_HANDLE_VALUE;
-static HANDLE g_rx_sidecar_pipe_write = INVALID_HANDLE_VALUE;
-static HANDLE g_rx_console_stdout = INVALID_HANDLE_VALUE;
-static HANDLE g_rx_console_stderr = INVALID_HANDLE_VALUE;
-static pthread_t g_rx_sidecar_thread;
-static int g_rx_sidecar_thread_created = 0;
-
-static void *dashcdg_rx_sidecar_tee_thread_main(void *unused) {
-    char buffer[4096];
-    DWORD bytes_read = 0U;
-
-    (void) unused;
-    while (g_rx_sidecar_pipe_read != INVALID_HANDLE_VALUE &&
-            ReadFile(g_rx_sidecar_pipe_read, buffer, (DWORD) sizeof(buffer), &bytes_read, NULL) &&
-            bytes_read > 0U) {
-        DWORD bytes_written = 0U;
-
-        if (g_rx_console_stdout != INVALID_HANDLE_VALUE) {
-            (void) WriteFile(g_rx_console_stdout, buffer, bytes_read, &bytes_written, NULL);
-        }
-        if (g_rx_sidecar_log_file != INVALID_HANDLE_VALUE) {
-            (void) WriteFile(g_rx_sidecar_log_file, buffer, bytes_read, &bytes_written, NULL);
-        }
-    }
-    return NULL;
-}
+static FILE *g_rx_sidecar_log_file = NULL;
 #endif
+
+static void dashcdg_rx_sidecar_write_line(const char *line) {
+#ifdef _WIN32
+    if (g_rx_sidecar_log_file != NULL && line != NULL) {
+        fputs(line, g_rx_sidecar_log_file);
+        fputc('\n', g_rx_sidecar_log_file);
+        fflush(g_rx_sidecar_log_file);
+    }
+#else
+    (void) line;
+#endif
+}
 
 static void dashcdg_rx_init_receiver_instance_id(void) {
     uint64_t seed = (uint64_t) dashcdg_clock_now_ms();
@@ -505,7 +489,7 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
     char *dot;
     time_t now_t;
     struct tm now_tm;
-    int pipe_fd;
+    char line[sizeof(log_path) + 32U];
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
@@ -544,50 +528,15 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
             now_tm.tm_sec,
             (unsigned long) GetCurrentProcessId()
     );
-    g_rx_console_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
-    g_rx_console_stderr = GetStdHandle(STD_ERROR_HANDLE);
-    g_rx_sidecar_log_file = CreateFileA(
-            log_path,
-            FILE_APPEND_DATA,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            NULL,
-            OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL
-    );
-    if (g_rx_sidecar_log_file == INVALID_HANDLE_VALUE) {
+    g_rx_sidecar_log_file = fopen(log_path, "a");
+    if (g_rx_sidecar_log_file == NULL) {
         return;
     }
-    if (!CreatePipe(&g_rx_sidecar_pipe_read, &g_rx_sidecar_pipe_write, NULL, 0)) {
-        CloseHandle(g_rx_sidecar_log_file);
-        g_rx_sidecar_log_file = INVALID_HANDLE_VALUE;
-        return;
-    }
-    (void) SetHandleInformation(g_rx_sidecar_pipe_read, HANDLE_FLAG_INHERIT, 0);
-    pipe_fd = _open_osfhandle((intptr_t) g_rx_sidecar_pipe_write, _O_TEXT);
-    if (pipe_fd < 0) {
-        CloseHandle(g_rx_sidecar_pipe_read);
-        CloseHandle(g_rx_sidecar_pipe_write);
-        CloseHandle(g_rx_sidecar_log_file);
-        g_rx_sidecar_pipe_read = INVALID_HANDLE_VALUE;
-        g_rx_sidecar_pipe_write = INVALID_HANDLE_VALUE;
-        g_rx_sidecar_log_file = INVALID_HANDLE_VALUE;
-        return;
-    }
+    setvbuf(g_rx_sidecar_log_file, NULL, _IOLBF, 0);
+    snprintf(line, sizeof(line), "[rx] sidecar log: %s", log_path);
+    fprintf(stdout, "%s\n", line);
     fflush(stdout);
-    fflush(stderr);
-    (void) _dup2(pipe_fd, _fileno(stdout));
-    (void) _dup2(pipe_fd, _fileno(stderr));
-    (void) _close(pipe_fd);
-    (void) SetStdHandle(STD_OUTPUT_HANDLE, g_rx_sidecar_pipe_write);
-    (void) SetStdHandle(STD_ERROR_HANDLE, g_rx_sidecar_pipe_write);
-    if (pthread_create(&g_rx_sidecar_thread, NULL, dashcdg_rx_sidecar_tee_thread_main, NULL) == 0) {
-        g_rx_sidecar_thread_created = 1;
-    }
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IOLBF, 0);
-    fprintf(stdout, "[rx] sidecar log: %s\n", log_path);
-    fflush(stdout);
+    dashcdg_rx_sidecar_write_line(line);
 #else
     (void) argv0;
 #endif
@@ -2139,6 +2088,7 @@ static int dashcdg_rx_audio_recent_auto_recover_locked(
 
 static void dashcdg_rx_log_fault_events_locked(struct receiver_state *state, uint64_t local_now_ms) {
     uint64_t delta;
+    char line[256];
 
     if (state == NULL) {
         return;
@@ -2146,9 +2096,10 @@ static void dashcdg_rx_log_fault_events_locked(struct receiver_state *state, uin
 
     if (state->audio_queue_overflows > state->last_logged_audio_queue_overflows) {
         delta = state->audio_queue_overflows - state->last_logged_audio_queue_overflows;
-        fprintf(
-                stdout,
-                "[rx] fault: audio_queue_overflow +%llu buf=%u tgt=%u host=%u gate=%s now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: audio_queue_overflow +%llu buf=%u tgt=%u host=%u gate=%s now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
                 (unsigned int) dashcdg_rx_audio_target_buffer_ms_locked(state),
@@ -2156,71 +2107,86 @@ static void dashcdg_rx_log_fault_events_locked(struct receiver_state *state, uin
                 dashcdg_rx_audio_recent_auto_recover_locked(state, local_now_ms) ? "auto-recover" : "running",
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_audio_queue_overflows = state->audio_queue_overflows;
     }
 
     if (state->audio_missing_skips > state->last_logged_audio_missing_skips) {
         delta = state->audio_missing_skips - state->last_logged_audio_missing_skips;
-        fprintf(
-                stdout,
-                "[rx] fault: audio_continuity_skip +%llu pending=%u buf=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: audio_continuity_skip +%llu pending=%u buf=%u now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_audio_missing_skips = state->audio_missing_skips;
     }
 
     if (state->live_missing_skips > state->last_logged_live_missing_skips) {
         delta = state->live_missing_skips - state->last_logged_live_missing_skips;
-        fprintf(
-                stdout,
-                "[rx] fault: cdg_continuity_skip +%llu pending=%u live=%llu now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: cdg_continuity_skip +%llu pending=%u live=%llu now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) dashcdg_rx_pending_cdg_count(state),
                 (unsigned long long) state->live_packets_applied,
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_live_missing_skips = state->live_missing_skips;
     }
 
     if (state->audio_jitter.reordered_packets > state->last_logged_audio_reordered_packets) {
         delta = state->audio_jitter.reordered_packets - state->last_logged_audio_reordered_packets;
-        fprintf(
-                stdout,
-                "[rx] fault: audio_reorder +%llu next_seq=%u pending=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: audio_reorder +%llu next_seq=%u pending=%u now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) state->audio_jitter.next_media_sequence,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_audio_reordered_packets = state->audio_jitter.reordered_packets;
     }
 
     if (state->cdg_batch_jitter.reordered_batches > state->last_logged_cdg_reordered_batches) {
         delta = state->cdg_batch_jitter.reordered_batches - state->last_logged_cdg_reordered_batches;
-        fprintf(
-                stdout,
-                "[rx] fault: cdg_reorder +%llu next_pkt=%u pending=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: cdg_reorder +%llu next_pkt=%u pending=%u now=%llu",
                 (unsigned long long) delta,
                 (unsigned int) state->cdg_batch_jitter.next_packet_index,
                 (unsigned int) dashcdg_rx_pending_cdg_count(state),
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_cdg_reordered_batches = state->cdg_batch_jitter.reordered_batches;
     }
 
     if (g_audio != NULL && g_audio->stream_underrun_events > state->last_logged_stream_underrun_events) {
         delta = g_audio->stream_underrun_events - state->last_logged_stream_underrun_events;
-        fprintf(
-                stdout,
-                "[rx] fault: host_underrun +%llu frames=%llu buf=%u tgt=%u ts=%d now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: host_underrun +%llu frames=%llu buf=%u tgt=%u ts=%d now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) g_audio->stream_underrun_frames,
                 (unsigned int) dashcdg_desktop_audio_buffered_ms(g_audio),
@@ -2228,35 +2194,43 @@ static void dashcdg_rx_log_fault_events_locked(struct receiver_state *state, uin
                 (int) DASHCDG_ATOMIC_GET(g_audio->timestamp_ms),
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
     }
     if (state->audio_arrival_gap_events > state->last_logged_audio_arrival_gap_events) {
         delta = state->audio_arrival_gap_events - state->last_logged_audio_arrival_gap_events;
-        fprintf(
-                stdout,
-                "[rx] fault: audio_arrival_gap +%llu max=%llums pending=%u buf=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: audio_arrival_gap +%llu max=%llums pending=%u buf=%u now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) state->audio_arrival_gap_max_ms,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
     }
     if (state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) {
         delta = state->audio_arrival_burst_events - state->last_logged_audio_arrival_burst_events;
-        fprintf(
-                stdout,
-                "[rx] fault: audio_arrival_burst +%llu maxrun=%llu pending=%u buf=%u now=%llu\n",
+        snprintf(
+                line,
+                sizeof(line),
+                "[rx] fault: audio_arrival_burst +%llu maxrun=%llu pending=%u buf=%u now=%llu",
                 (unsigned long long) delta,
                 (unsigned long long) state->audio_arrival_burst_max_run,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
                 (unsigned long long) local_now_ms
         );
+        fprintf(stdout, "%s\n", line);
         fflush(stdout);
+        dashcdg_rx_sidecar_write_line(line);
         state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
     }
 }
@@ -3733,6 +3707,7 @@ static void dashcdg_rx_print_status_locked(void) {
 #pragma GCC diagnostic pop
 #endif
     fflush(stdout);
+    dashcdg_rx_sidecar_write_line("[rx] status emitted; see console for full live line");
 }
 
 static void handle_live_cdg_batch(struct receiver_state *state, const struct dashcdg_packet_view *view) {
