@@ -36,6 +36,7 @@
 #include "dashcdg/media_clock.h"
 #include "dashcdg/net_compat.h"
 #include "dashcdg/opus_codec.h"
+#include "dashcdg/pcm_soxr_stream.h"
 #include "dashcdg/pcm_rate_convert.h"
 #include "dashcdg/protocol.h"
 #include "dashcdg/amr_codec.h"
@@ -1021,6 +1022,9 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
     state->pcm_src_stream_out_samples = 0;
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    dashcdg_pcm_soxr_stream_reset();
+#endif
     state->audio_target_total_latency_ms = 0U;
     state->audio_target_buffer_ms = 0U;
     state->audio_ring_capacity_ms = 0U;
@@ -2937,6 +2941,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
             size_t wm = ext_need > out_fc ? ext_need : out_fc;
             uint64_t stream_in_before = state->pcm_src_stream_in_samples;
             uint64_t stream_out_before = state->pcm_src_stream_out_samples;
+            int used_stream_soxr = 0;
 
             if (wm > (size_t) DASHCDG_RX_PCM_WORK_SAMPLES_MAX) {
                 state->audio_decode_failures++;
@@ -2949,31 +2954,42 @@ static int dashcdg_rx_apply_audio_frame_locked(
                     state->audio_decode_failures++;
                     return -1;
                 }
-                /*
-                 * Live RX uses the overlap/windowed SRC path so chunk boundaries stay continuous.
-                 * That helper now uses libsoxr internally when available instead of a separate
-                 * streaming state machine bolted onto app_rx.
-                 */
-                dashcdg_pcm_stereo_interleaved_resample_overlap(
-                        state->pcm_src_overlap_l,
-                        state->pcm_src_overlap_r,
-                        &state->pcm_src_overlap_valid,
-                        stream_in_before,
-                        stream_out_before,
-                        pcm,
-                        (size_t) decoded_frames,
-                        ses_sr,
-                        rs_tmp,
-                        out_fc,
-                        effective_out_sr,
-                        mono_scratch,
-                        wr_r_st,
-                        wm
-                );
+#if defined(DASHCDG_HAVE_LIBSOXR)
+                if (trim_ppm == 0 &&
+                        dashcdg_pcm_soxr_stream_ensure(ses_sr, effective_out_sr) &&
+                        dashcdg_pcm_soxr_stream_process_interleaved(pcm, (size_t) decoded_frames, rs_tmp, out_fc)) {
+                    used_stream_soxr = 1;
+                    state->pcm_src_overlap_valid = 0U;
+                }
+#endif
+                if (!used_stream_soxr) {
+#if defined(DASHCDG_HAVE_LIBSOXR)
+                    dashcdg_pcm_soxr_stream_reset();
+#endif
+                    dashcdg_pcm_stereo_interleaved_resample_overlap(
+                            state->pcm_src_overlap_l,
+                            state->pcm_src_overlap_r,
+                            &state->pcm_src_overlap_valid,
+                            stream_in_before,
+                            stream_out_before,
+                            pcm,
+                            (size_t) decoded_frames,
+                            ses_sr,
+                            rs_tmp,
+                            out_fc,
+                            effective_out_sr,
+                            mono_scratch,
+                            wr_r_st,
+                            wm
+                    );
+                }
                 qptr = rs_tmp;
                 qfc = out_fc;
                 resampled_output = 1;
             } else {
+#if defined(DASHCDG_HAVE_LIBSOXR)
+                dashcdg_pcm_soxr_stream_reset();
+#endif
                 dashcdg_pcm_stereo_interleaved_resample_overlap(
                         state->pcm_src_overlap_l,
                         state->pcm_src_overlap_r,
@@ -3579,6 +3595,9 @@ static void dashcdg_rx_configure_audio_locked(
     state->pcm_src_overlap_valid = 0;
     state->pcm_src_stream_in_samples = 0;
     state->pcm_src_stream_out_samples = 0;
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    dashcdg_pcm_soxr_stream_reset();
+#endif
     state->last_audio_queue_success_local_ms = 0U;
     state->last_audio_timestamp_advance_local_ms = 0U;
     state->last_audio_timestamp_ms = -1;
@@ -3739,6 +3758,9 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
     dashcdg_audio_jitter_clear(&state->audio_jitter);
     state->jitter_audio_decode_primed = 0;
     memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    dashcdg_pcm_soxr_stream_reset();
+#endif
     state->last_audio_jitter_apply_local_ms = 0U;
     state->last_audio_queue_success_local_ms = 0U;
     state->last_audio_timestamp_advance_local_ms = 0U;
