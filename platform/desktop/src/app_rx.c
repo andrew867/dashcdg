@@ -93,6 +93,8 @@
 #define DASHCDG_RX_QUEUE_SERVO_MAX_PPM 200
 #define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 3000U
 #define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 1500U
+#define DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS 750U
+#define DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS 3000U
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
@@ -299,6 +301,7 @@ struct receiver_state {
     int32_t audio_resample_trim_ppm;
     uint64_t audio_servo_enable_after_local_ms;
     uint64_t audio_last_queue_pressure_local_ms;
+    uint64_t audio_last_stall_recover_local_ms;
 };
 
 static struct receiver_state g_receiver;
@@ -1011,6 +1014,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_resample_trim_ppm = 0;
     state->audio_servo_enable_after_local_ms = 0U;
     state->audio_last_queue_pressure_local_ms = 0U;
+    state->audio_last_stall_recover_local_ms = 0U;
     memset(state->song_id, 0, sizeof(state->song_id));
     dashcdg_media_clock_init(&state->sender_clock);
     dashcdg_cdg_reader_free(&state->reader);
@@ -1916,6 +1920,41 @@ static int dashcdg_rx_audio_backpressure_hold_active_locked(
     }
 
     return buffered_ms >= release_threshold_ms;
+}
+
+static int dashcdg_rx_should_auto_recover_zero_buffer_locked(
+        const struct receiver_state *state,
+        uint64_t local_now_ms
+) {
+    uint32_t buffered_ms;
+    size_t pending_audio;
+    uint64_t since_last_audio_apply_ms;
+
+    if (state == NULL || !state->network_audio_enabled || state->playback_paused ||
+            g_audio == NULL || !g_audio_stream_started || g_audio_start_inflight) {
+        return 0;
+    }
+    if (state->audio_last_stall_recover_local_ms != 0U &&
+            local_now_ms - state->audio_last_stall_recover_local_ms < DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS) {
+        return 0;
+    }
+
+    buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
+    if (buffered_ms != 0U) {
+        return 0;
+    }
+
+    pending_audio = dashcdg_audio_jitter_occupied_count(&state->audio_jitter);
+    if (pending_audio == 0U) {
+        return 0;
+    }
+
+    since_last_audio_apply_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_audio_jitter_apply_local_ms);
+    if (since_last_audio_apply_ms < DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS) {
+        return 0;
+    }
+
+    return 1;
 }
 
 static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
@@ -3588,9 +3627,12 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
  * pause/unpause needlessly churns the clock and wedges legacy paths.
  */
 static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state) {
+    uint64_t now_ms;
+
     if (state == NULL || !state->network_audio_enabled) {
         return;
     }
+    now_ms = dashcdg_clock_now_ms();
 
     dashcdg_audio_jitter_clear(&state->audio_jitter);
     dashcdg_cdg_batch_jitter_clear(&state->cdg_batch_jitter);
@@ -3622,9 +3664,11 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
      * random reconfigure.
      */
     state->audio_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
-            dashcdg_clock_now_ms(),
+            now_ms,
             dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 1)
     );
+    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(now_ms, DASHCDG_RX_QUEUE_SERVO_WARMUP_MS);
+    state->audio_last_queue_pressure_local_ms = now_ms;
 
     if (g_audio != NULL) {
         dashcdg_desktop_audio_flush_stream_ring(g_audio);
@@ -4400,6 +4444,12 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
 
         pthread_mutex_lock(&g_receiver.mutex);
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
+        if (dashcdg_rx_should_auto_recover_zero_buffer_locked(&g_receiver, now_ms)) {
+            fprintf(stdout, "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen\n");
+            fflush(stdout);
+            g_receiver.audio_last_stall_recover_local_ms = now_ms;
+            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver);
+        }
         should_start_audio = dashcdg_rx_claim_audio_start_locked(now_ms);
         dashcdg_rx_publish_render_snapshot_locked(now_ms);
         dashcdg_rx_maybe_send_v4_stats_locked(now_ms);
