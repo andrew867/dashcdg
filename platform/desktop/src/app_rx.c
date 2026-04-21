@@ -4997,28 +4997,17 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
     return NULL;
 }
 
-static void *dashcdg_rx_status_thread_main(void *unused) {
-    uint64_t last_status_ms = 0U;
+static void dashcdg_rx_emit_status_summary(void) {
+    char hud_line_a[256];
+    char hud_line_b[256];
+    uint64_t now_ms = dashcdg_clock_now_ms();
 
-    (void) unused;
+    pthread_mutex_lock(&g_receiver.mutex);
+    dashcdg_rx_fill_hud_lines_locked(now_ms, hud_line_a, sizeof(hud_line_a), hud_line_b, sizeof(hud_line_b));
+    pthread_mutex_unlock(&g_receiver.mutex);
 
-#ifdef _WIN32
-    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-#endif
-
-    while (!g_rx_shutdown_requested) {
-        uint64_t now_ms = dashcdg_clock_now_ms();
-
-        if (g_headless && (last_status_ms == 0U || now_ms - last_status_ms >= 1000U)) {
-            pthread_mutex_lock(&g_receiver.mutex);
-            dashcdg_rx_print_status_locked();
-            pthread_mutex_unlock(&g_receiver.mutex);
-            last_status_ms = now_ms;
-        }
-        dashcdg_sleep_ms(25);
-    }
-
-    return NULL;
+    dashcdg_rx_async_stdout_line(hud_line_a);
+    dashcdg_rx_async_stdout_line(hud_line_b);
 }
 
 /* Windows snprintf + I64u in format strings confuses -Wformat; HUD only needs 32-bit ms. */
@@ -5321,9 +5310,7 @@ static void rx_keyboard(unsigned char key, int x, int y) {
         fflush(stdout);
         pthread_mutex_unlock(&g_receiver.mutex);
     } else if (key == 's' || key == 'S') {
-        pthread_mutex_lock(&g_receiver.mutex);
-        dashcdg_rx_print_status_locked();
-        pthread_mutex_unlock(&g_receiver.mutex);
+        dashcdg_rx_emit_status_summary();
     }
 }
 
@@ -5363,9 +5350,7 @@ static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
         fflush(stdout);
         pthread_mutex_unlock(&g_receiver.mutex);
     } else if (vk == 'S' || vk == 's' || vk == 0x53) {
-        pthread_mutex_lock(&g_receiver.mutex);
-        dashcdg_rx_print_status_locked();
-        pthread_mutex_unlock(&g_receiver.mutex);
+        dashcdg_rx_emit_status_summary();
     }
 }
 
@@ -5514,8 +5499,6 @@ static int dashcdg_rx_run_windowed_ui(int argc, char **argv) {
 int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_t rx_thread;
     pthread_t media_thread;
-    pthread_t status_thread;
-    int status_thread_created = 0;
     const char *positionals[2] = { NULL, NULL };
     int positional_index = 0;
     int positionals_consumed = 0;
@@ -5685,17 +5668,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
     pthread_create(&rx_thread, NULL, network_thread, &port);
     pthread_create(&media_thread, NULL, dashcdg_rx_media_thread_main, NULL);
-    status_thread_created = pthread_create(&status_thread, NULL, dashcdg_rx_status_thread_main, NULL) == 0;
-    if (!status_thread_created) {
-        fprintf(stderr, "[rx] failed to start status thread\n");
-    }
 
     if (g_headless) {
         pthread_join(media_thread, NULL);
-        if (status_thread_created) {
-            pthread_join(status_thread, NULL);
-            status_thread_created = 0;
-        }
         if (g_rx_logger_enabled) {
             dashcdg_async_logger_shutdown(&g_rx_logger);
             g_rx_logger_enabled = 0;
@@ -5708,10 +5683,6 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         dashcdg_rx_request_shutdown();
         pthread_join(rx_thread, NULL);
         pthread_join(media_thread, NULL);
-        if (status_thread_created) {
-            pthread_join(status_thread, NULL);
-            status_thread_created = 0;
-        }
         dashcdg_net_cleanup();
         if (g_audio != NULL) {
             dashcdg_desktop_audio_stop_stream(g_audio);
@@ -5733,10 +5704,6 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     dashcdg_rx_request_shutdown();
     pthread_join(rx_thread, NULL);
     pthread_join(media_thread, NULL);
-    if (status_thread_created) {
-        pthread_join(status_thread, NULL);
-        status_thread_created = 0;
-    }
     dashcdg_net_cleanup();
     if (g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
@@ -5757,10 +5724,6 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     dashcdg_rx_request_shutdown();
     pthread_join(rx_thread, NULL);
     pthread_join(media_thread, NULL);
-    if (status_thread_created) {
-        pthread_join(status_thread, NULL);
-        status_thread_created = 0;
-    }
     dashcdg_net_cleanup();
     if (g_audio != NULL) {
         dashcdg_desktop_audio_stop_stream(g_audio);
