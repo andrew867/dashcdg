@@ -93,9 +93,9 @@
 #define DASHCDG_RX_APP_RING_SAFETY_MS 40U
 #define DASHCDG_RX_MIN_APP_RING_TARGET_MS 120U
 #define DASHCDG_RX_MAX_APP_RING_TARGET_MS 500U
-#define DASHCDG_RX_APP_RING_HEADROOM_MS 120U
+#define DASHCDG_RX_APP_RING_HEADROOM_MS 180U
 #define DASHCDG_RX_MIN_RING_CAPACITY_MS 180U
-#define DASHCDG_RX_MAX_RING_CAPACITY_MS 700U
+#define DASHCDG_RX_MAX_RING_CAPACITY_MS 900U
 #define DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS 20
 #define DASHCDG_RX_QUEUE_SERVO_GAIN_PPM_PER_MS 2
 #define DASHCDG_RX_QUEUE_SERVO_MAX_PPM 200
@@ -2221,6 +2221,12 @@ static void dashcdg_rx_note_audio_chunk_arrival_locked(struct receiver_state *st
     if (state == NULL) {
         return;
     }
+    if (state->audio_skip_hold_until_local_ms != 0U && local_now_ms < state->audio_skip_hold_until_local_ms) {
+        state->audio_last_chunk_local_ms = local_now_ms;
+        state->audio_burst_window_start_local_ms = local_now_ms;
+        state->audio_burst_run_count = 1U;
+        return;
+    }
     if (state->audio_last_chunk_local_ms != 0U && local_now_ms > state->audio_last_chunk_local_ms) {
         gap_ms = local_now_ms - state->audio_last_chunk_local_ms;
         if (gap_ms >= DASHCDG_RX_AUDIO_ARRIVAL_GAP_THRESHOLD_MS) {
@@ -3750,6 +3756,7 @@ static uint32_t dashcdg_rx_network_stream_ring_ms(uint16_t playout_delay_ms, uin
     uint32_t total_target_ms;
     uint32_t host_ms;
     uint32_t target_buffer_ms;
+    uint32_t ring_headroom_ms;
 
     (void) codec_id;
 
@@ -3766,7 +3773,15 @@ static uint32_t dashcdg_rx_network_stream_ring_ms(uint16_t playout_delay_ms, uin
     if (target_buffer_ms > DASHCDG_RX_MAX_APP_RING_TARGET_MS) {
         target_buffer_ms = DASHCDG_RX_MAX_APP_RING_TARGET_MS;
     }
-    target_buffer_ms += DASHCDG_RX_APP_RING_HEADROOM_MS;
+    ring_headroom_ms = DASHCDG_RX_APP_RING_HEADROOM_MS;
+    if (total_target_ms > target_buffer_ms) {
+        uint32_t runway_gap_ms = total_target_ms - target_buffer_ms;
+
+        if (runway_gap_ms > ring_headroom_ms) {
+            ring_headroom_ms = runway_gap_ms;
+        }
+    }
+    target_buffer_ms += ring_headroom_ms;
     if (target_buffer_ms < DASHCDG_RX_MIN_RING_CAPACITY_MS) {
         target_buffer_ms = DASHCDG_RX_MIN_RING_CAPACITY_MS;
     }
@@ -4160,6 +4175,9 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         }
         g_audio_stream_started = 0;
         g_audio_start_inflight = 0;
+        state->audio_last_chunk_local_ms = 0U;
+        state->audio_burst_window_start_local_ms = 0U;
+        state->audio_burst_run_count = 0U;
         receiver_state_reset(state);
     }
 
