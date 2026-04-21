@@ -1894,6 +1894,30 @@ static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *
     return state->audio_resample_trim_ppm;
 }
 
+static int dashcdg_rx_audio_backpressure_hold_active_locked(
+        const struct receiver_state *state,
+        uint64_t local_now_ms
+) {
+    uint32_t buffered_ms;
+    uint32_t target_ms;
+    uint32_t release_threshold_ms;
+
+    if (state == NULL || state->audio_last_queue_pressure_local_ms == 0U ||
+            local_now_ms - state->audio_last_queue_pressure_local_ms >= DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS ||
+            g_audio == NULL || !g_audio_stream_started) {
+        return 0;
+    }
+
+    buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
+    target_ms = dashcdg_rx_audio_target_buffer_ms_locked(state);
+    release_threshold_ms = target_ms;
+    if (state->announced_audio_frame_ms > 0U) {
+        release_threshold_ms += (uint32_t) state->announced_audio_frame_ms;
+    }
+
+    return buffered_ms >= release_threshold_ms;
+}
+
 static int dashcdg_rx_apply_graphics_trim_ms(int playback_ms) {
     int64_t v = (int64_t) playback_ms + (int64_t) g_rx_graphics_trim_ms;
 
@@ -2926,6 +2950,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
 
         if (state->audio_jitter.initialized) {
             int audio_skip_hold_active = 0;
+            int audio_backpressure_hold_active = 0;
 
             memset(&din, 0, sizeof(din));
             din.have_sender_playback = have_sender_playback;
@@ -2950,35 +2975,38 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                 din.ms_since_prior_audio_apply = 0U;
                 din.primed_decode = 0;
             }
+            audio_backpressure_hold_active = dashcdg_rx_audio_backpressure_hold_active_locked(state, local_now_ms);
 
-            step = dashcdg_audio_jitter_drain_step(&state->audio_jitter, &din, &frame, &miss_delta);
-            if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
-                state->audio_missing_skips += miss_delta;
-                state->last_audio_jitter_apply_local_ms = local_now_ms;
-                state->last_progress_local_ms = local_now_ms;
-                progressed = 1;
-            } else if (step == DASHCDG_AUDIO_DRAIN_APPLY && frame != NULL) {
-                uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
-                int apply_rc = dashcdg_rx_apply_audio_frame_locked(state, frame);
-
-                if (apply_rc == 0) {
-                    /* Device buffer full: keep the jitter slot; CDG still drains in the same tick. */
-                } else if (apply_rc < 0) {
-                    /*
-                     * A decoder failure means this slot is unusable, not backpressure. Drop it so a
-                     * bad codec hop/frame cannot pin next_media_sequence forever, but do not mark the
-                     * jitter session as decode-primed from a failed frame.
-                     */
-                    dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
+            if (!audio_backpressure_hold_active) {
+                step = dashcdg_audio_jitter_drain_step(&state->audio_jitter, &din, &frame, &miss_delta);
+                if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
+                    state->audio_missing_skips += miss_delta;
                     state->last_audio_jitter_apply_local_ms = local_now_ms;
                     state->last_progress_local_ms = local_now_ms;
                     progressed = 1;
-                } else {
-                    dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
-                    state->jitter_audio_decode_primed = 1;
-                    state->last_audio_jitter_apply_local_ms = local_now_ms;
-                    state->last_progress_local_ms = local_now_ms;
-                    progressed = 1;
+                } else if (step == DASHCDG_AUDIO_DRAIN_APPLY && frame != NULL) {
+                    uint8_t frame_ms = frame->frame_ms > 0 ? frame->frame_ms : state->announced_audio_frame_ms;
+                    int apply_rc = dashcdg_rx_apply_audio_frame_locked(state, frame);
+
+                    if (apply_rc == 0) {
+                        /* Device buffer full: keep the jitter slot; CDG still drains in the same tick. */
+                    } else if (apply_rc < 0) {
+                        /*
+                         * A decoder failure means this slot is unusable, not backpressure. Drop it so a
+                         * bad codec hop/frame cannot pin next_media_sequence forever, but do not mark the
+                         * jitter session as decode-primed from a failed frame.
+                         */
+                        dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
+                        state->last_audio_jitter_apply_local_ms = local_now_ms;
+                        state->last_progress_local_ms = local_now_ms;
+                        progressed = 1;
+                    } else {
+                        dashcdg_audio_jitter_note_applied(&state->audio_jitter, frame, frame_ms);
+                        state->jitter_audio_decode_primed = 1;
+                        state->last_audio_jitter_apply_local_ms = local_now_ms;
+                        state->last_progress_local_ms = local_now_ms;
+                        progressed = 1;
+                    }
                 }
             }
         }
