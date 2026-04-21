@@ -35,6 +35,7 @@
 #include "dashcdg/cdg_raster.h"
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
+#include "dashcdg/desktop_async_log.h"
 #include "dashcdg/fec.h"
 #if DASHCDG_RX_HAVE_GLUT
 #include "dashcdg/gl_renderer.h"
@@ -447,21 +448,19 @@ static size_t g_rx_pcm_dump_frames_written;
 static size_t g_rx_pcm_dump_frame_limit;
 static int g_rx_pcm_dump_init_attempted;
 static uint32_t g_rx_receiver_instance_id = 0U;
+static struct dashcdg_async_logger g_rx_logger;
+static int g_rx_logger_enabled;
 
-#ifdef _WIN32
-static FILE *g_rx_sidecar_log_file = NULL;
-#endif
+static void dashcdg_rx_async_stdout_line(const char *line) {
+    if (g_rx_logger_enabled && line != NULL) {
+        dashcdg_async_logger_log_line(&g_rx_logger, DASHCDG_ASYNC_LOG_STDOUT, line);
+    }
+}
 
 static void dashcdg_rx_sidecar_write_line(const char *line) {
-#ifdef _WIN32
-    if (g_rx_sidecar_log_file != NULL && line != NULL) {
-        fputs(line, g_rx_sidecar_log_file);
-        fputc('\n', g_rx_sidecar_log_file);
-        fflush(g_rx_sidecar_log_file);
+    if (g_rx_logger_enabled && line != NULL) {
+        dashcdg_async_logger_log_line(&g_rx_logger, DASHCDG_ASYNC_LOG_SIDECAR_ONLY, line);
     }
-#else
-    (void) line;
-#endif
 }
 
 static void dashcdg_rx_init_receiver_instance_id(void) {
@@ -528,15 +527,12 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
             now_tm.tm_sec,
             (unsigned long) GetCurrentProcessId()
     );
-    g_rx_sidecar_log_file = fopen(log_path, "a");
-    if (g_rx_sidecar_log_file == NULL) {
+    if (!dashcdg_async_logger_init(&g_rx_logger, log_path)) {
         return;
     }
-    setvbuf(g_rx_sidecar_log_file, NULL, _IOLBF, 0);
+    g_rx_logger_enabled = 1;
     snprintf(line, sizeof(line), "[rx] sidecar log: %s", log_path);
-    fprintf(stdout, "%s\n", line);
-    fflush(stdout);
-    dashcdg_rx_sidecar_write_line(line);
+    dashcdg_rx_async_stdout_line(line);
 #else
     (void) argv0;
 #endif
@@ -2215,9 +2211,7 @@ static void dashcdg_rx_emit_fault_lines(char lines[][256], size_t line_count) {
     size_t i;
 
     for (i = 0U; i < line_count; i++) {
-        fprintf(stdout, "%s\n", lines[i]);
-        fflush(stdout);
-        dashcdg_rx_sidecar_write_line(lines[i]);
+        dashcdg_rx_async_stdout_line(lines[i]);
     }
 }
 
@@ -4928,9 +4922,7 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         pthread_mutex_unlock(&g_receiver.mutex);
 
         if (recovery_line != NULL) {
-            fprintf(stdout, "%s\n", recovery_line);
-            fflush(stdout);
-            dashcdg_rx_sidecar_write_line(recovery_line);
+            dashcdg_rx_async_stdout_line(recovery_line);
         }
         dashcdg_rx_emit_fault_lines(fault_lines, fault_line_count);
 
@@ -5601,6 +5593,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
     if (g_headless) {
         pthread_join(media_thread, NULL);
+        if (g_rx_logger_enabled) {
+            dashcdg_async_logger_shutdown(&g_rx_logger);
+            g_rx_logger_enabled = 0;
+        }
         return 0;
     }
 
@@ -5619,6 +5615,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         pthread_mutex_destroy(&g_render_mutex);
         pthread_mutex_destroy(&g_receiver.mutex);
         receiver_state_reset(&g_receiver);
+        if (g_rx_logger_enabled) {
+            dashcdg_async_logger_shutdown(&g_rx_logger);
+            g_rx_logger_enabled = 0;
+        }
         return 1;
     }
 #else
@@ -5636,6 +5636,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_mutex_destroy(&g_render_mutex);
     pthread_mutex_destroy(&g_receiver.mutex);
     receiver_state_reset(&g_receiver);
+    if (g_rx_logger_enabled) {
+        dashcdg_async_logger_shutdown(&g_rx_logger);
+        g_rx_logger_enabled = 0;
+    }
     return 1;
 #endif
 
@@ -5652,5 +5656,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_mutex_destroy(&g_render_mutex);
     pthread_mutex_destroy(&g_receiver.mutex);
     receiver_state_reset(&g_receiver);
+    if (g_rx_logger_enabled) {
+        dashcdg_async_logger_shutdown(&g_rx_logger);
+        g_rx_logger_enabled = 0;
+    }
     return 0;
 }

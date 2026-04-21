@@ -47,6 +47,7 @@
 #include "dashcdg/cdg_source.h"
 #include "dashcdg/common.h"
 #include "dashcdg/desktop_audio.h"
+#include "dashcdg/desktop_async_log.h"
 #include "dashcdg/fec.h"
 #include "dashcdg/file_io.h"
 #if DASHCDG_TX_HAVE_GL_PREVIEW
@@ -332,21 +333,19 @@ struct dashcdg_tx_state {
 };
 
 static struct dashcdg_tx_state g_tx_state;
+static struct dashcdg_async_logger g_tx_logger;
+static int g_tx_logger_enabled;
 
-#ifdef _WIN32
-static FILE *g_tx_sidecar_log_file = NULL;
-#endif
+static void dashcdg_tx_async_stdout_line(const char *line) {
+    if (g_tx_logger_enabled && line != NULL) {
+        dashcdg_async_logger_log_line(&g_tx_logger, DASHCDG_ASYNC_LOG_STDOUT, line);
+    }
+}
 
 static void dashcdg_tx_sidecar_write_line(const char *line) {
-#ifdef _WIN32
-    if (g_tx_sidecar_log_file != NULL && line != NULL) {
-        fputs(line, g_tx_sidecar_log_file);
-        fputc('\n', g_tx_sidecar_log_file);
-        fflush(g_tx_sidecar_log_file);
+    if (g_tx_logger_enabled && line != NULL) {
+        dashcdg_async_logger_log_line(&g_tx_logger, DASHCDG_ASYNC_LOG_SIDECAR_ONLY, line);
     }
-#else
-    (void) line;
-#endif
 }
 
 static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
@@ -398,15 +397,12 @@ static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
             now_tm.tm_sec,
             (unsigned long) GetCurrentProcessId()
     );
-    g_tx_sidecar_log_file = fopen(log_path, "a");
-    if (g_tx_sidecar_log_file == NULL) {
+    if (!dashcdg_async_logger_init(&g_tx_logger, log_path)) {
         return;
     }
-    setvbuf(g_tx_sidecar_log_file, NULL, _IOLBF, 0);
+    g_tx_logger_enabled = 1;
     snprintf(line, sizeof(line), "[tx] sidecar log: %s", log_path);
-    fprintf(stdout, "%s\n", line);
-    fflush(stdout);
-    dashcdg_tx_sidecar_write_line(line);
+    dashcdg_tx_async_stdout_line(line);
 #else
     (void) argv0;
 #endif
@@ -1379,6 +1375,10 @@ static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
     int did_shuffle = 0;
 
     (void) unused;
+
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
 
     pthread_mutex_lock(&g_tx_state.mutex);
     directory = g_tx_state.playlist_scan_directory == NULL ? NULL : dashcdg_strdup(g_tx_state.playlist_scan_directory);
@@ -2507,9 +2507,7 @@ static void dashcdg_tx_emit_fault_lines(char lines[][256], size_t line_count) {
     size_t i;
 
     for (i = 0U; i < line_count; i++) {
-        fprintf(stdout, "%s\n", lines[i]);
-        fflush(stdout);
-        dashcdg_tx_sidecar_write_line(lines[i]);
+        dashcdg_tx_async_stdout_line(lines[i]);
     }
 }
 
@@ -4736,6 +4734,10 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
 
     (void) unused;
 
+#ifdef _WIN32
+    (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
     dashcdg_tx_console_init();
     dashcdg_tx_console_sync_scroll_layout_for_tty();
     dashcdg_tx_console_scroll_log_past_status_row();
@@ -5747,6 +5749,10 @@ static void dashcdg_tx_cleanup(void) {
     dashcdg_runtime_queue_free(&g_tx_state.audio_ready_queue);
     dashcdg_tx_playlist_free(&g_tx_state.playlist);
     dashcdg_tx_console_shutdown();
+    if (g_tx_logger_enabled) {
+        dashcdg_async_logger_shutdown(&g_tx_logger);
+        g_tx_logger_enabled = 0;
+    }
     dashcdg_net_cleanup();
     pthread_mutex_destroy(&g_tx_state.mutex);
 }
