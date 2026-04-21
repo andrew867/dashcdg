@@ -1918,6 +1918,11 @@ static int dashcdg_rx_u64_playback_ms_to_int_safe(uint64_t ms) {
     return (int) ms;
 }
 
+static int dashcdg_rx_is_stale_prior_session_media_locked(
+        const struct receiver_state *state,
+        const struct dashcdg_packet_view *view
+);
+
 static uint32_t dashcdg_rx_audio_host_latency_ms_locked(void) {
     uint32_t host_ms = 0U;
 
@@ -2959,6 +2964,9 @@ static void dashcdg_rx_observe_fec_parity_locked(struct receiver_state *state, c
             view->fec_parity.payload_bytes == 0 || view->fec_parity.payload_xor == NULL) {
         return;
     }
+    if (dashcdg_rx_is_stale_prior_session_media_locked(state, view)) {
+        return;
+    }
 
     if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
         group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, view->fec_parity.group_id);
@@ -2981,6 +2989,23 @@ static void dashcdg_rx_observe_fec_parity_locked(struct receiver_state *state, c
     } else if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_CDG) {
         dashcdg_rx_try_recover_cdg_group_locked(state, group);
     }
+}
+
+static int dashcdg_rx_is_stale_prior_session_media_locked(
+        const struct receiver_state *state,
+        const struct dashcdg_packet_view *view
+) {
+    uint64_t warmup_window_ms;
+
+    if (state == NULL || view == NULL || state->session_start_ms == 0U) {
+        return 0;
+    }
+
+    warmup_window_ms = state->announced_playout_delay_ms > 0U
+            ? (uint64_t) state->announced_playout_delay_ms
+            : (uint64_t) DASHCDG_RX_DEFAULT_TOTAL_LATENCY_MS;
+
+    return view->header.sender_time_ms + warmup_window_ms < state->session_start_ms;
 }
 
 static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -4373,6 +4398,9 @@ static void handle_v4_audio_chunk(struct receiver_state *state, const struct das
     if (state == NULL || view == NULL || !state->network_audio_enabled) {
         return;
     }
+    if (dashcdg_rx_is_stale_prior_session_media_locked(state, view)) {
+        return;
+    }
 
     dashcdg_rx_note_audio_chunk_arrival_locked(state, dashcdg_clock_now_ms());
     if (dashcdg_rx_store_v4_audio_frame_locked(state, view)) {
@@ -4388,6 +4416,9 @@ static void handle_v4_audio_chunk(struct receiver_state *state, const struct das
 
 static void handle_v4_video_delta(struct receiver_state *state, const struct dashcdg_packet_view *view) {
     if (state == NULL || view == NULL || view->v4_video_delta.delta_bytes == NULL) {
+        return;
+    }
+    if (dashcdg_rx_is_stale_prior_session_media_locked(state, view)) {
         return;
     }
     if (view->v4_video_delta.delta_format != DASHCDG_V4_VIDEO_DELTA_MODE_CDG_PACKETS) {
@@ -4415,6 +4446,9 @@ static void handle_v4_repair_window(struct receiver_state *state, const struct d
     struct dashcdg_rx_fec_group *group = NULL;
 
     if (state == NULL || view == NULL || view->v4_repair_window.payload_bytes == NULL) {
+        return;
+    }
+    if (dashcdg_rx_is_stale_prior_session_media_locked(state, view)) {
         return;
     }
     if (view->v4_repair_window.repair_mode != DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY) {
