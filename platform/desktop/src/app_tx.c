@@ -170,6 +170,15 @@ static int dashcdg_tx_build_encoded_silence_for_codec(
         uint8_t *encoded_bytes,
         uint16_t *encoded_length
 );
+static void dashcdg_tx_destroy_audio_encoder_for_codec(
+        uint8_t codec_id,
+        struct dashcdg_opus_encoder *opus_encoder,
+        void **amr_wb_encoder,
+        void **amr_nb_encoder,
+        void **evrc_encoder,
+        void **qcelp_encoder,
+        void **sbc_encoder
+);
 
 struct dashcdg_tx_audio_frame {
     uint32_t media_sequence;
@@ -4052,6 +4061,34 @@ static int dashcdg_tx_init_audio_encoder_for_codec(
     return 1;
 }
 
+static int dashcdg_tx_recreate_audio_encoder_for_codec(
+        uint8_t codec_id,
+        struct dashcdg_opus_encoder *opus_encoder,
+        void **amr_wb_encoder,
+        void **amr_nb_encoder,
+        void **evrc_encoder,
+        void **qcelp_encoder,
+        void **sbc_encoder
+) {
+    dashcdg_tx_destroy_audio_encoder_for_codec(
+            codec_id,
+            opus_encoder,
+            amr_wb_encoder,
+            amr_nb_encoder,
+            evrc_encoder,
+            qcelp_encoder,
+            sbc_encoder
+    );
+    return dashcdg_tx_init_audio_encoder_for_codec(
+            codec_id,
+            amr_wb_encoder,
+            amr_nb_encoder,
+            evrc_encoder,
+            qcelp_encoder,
+            sbc_encoder
+    );
+}
+
 static void dashcdg_tx_destroy_audio_encoder_for_codec(
         uint8_t codec_id,
         struct dashcdg_opus_encoder *opus_encoder,
@@ -4714,9 +4751,46 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                     encoded_length = -1;
                 }
                 if (encoded_length <= 0) {
+                    int recreated = 0;
+                    struct dashcdg_tx_audio_frame silence_template;
+
                     pthread_mutex_lock(&g_tx_state.mutex);
                     g_tx_state.audio_encode_failures++;
                     pthread_mutex_unlock(&g_tx_state.mutex);
+                    if (current_codec_id != DASHCDG_V4_AUDIO_CODEC_OPUS) {
+                        recreated = dashcdg_tx_recreate_audio_encoder_for_codec(
+                                (uint8_t) current_codec_id,
+                                &encoder,
+                                &amr_wb_encoder,
+                                &amr_nb_encoder,
+                                &evrc_encoder,
+                                &qcelp_encoder,
+                                &sbc_encoder
+                        );
+                    }
+                    if (recreated) {
+                        memset(&silence_template, 0, sizeof(silence_template));
+                        pthread_mutex_lock(&g_tx_state.mutex);
+                        memset(&g_tx_state.silence_audio_frame_template, 0, sizeof(g_tx_state.silence_audio_frame_template));
+                        g_tx_state.silence_audio_frame_valid = 0;
+                        pthread_mutex_unlock(&g_tx_state.mutex);
+                        if (dashcdg_tx_build_encoded_silence_for_codec(
+                                    (uint8_t) current_codec_id,
+                                    silence_template.encoded_bytes,
+                                    &silence_template.encoded_length
+                            )) {
+                            pthread_mutex_lock(&g_tx_state.mutex);
+                            if (g_tx_state.audio_pipeline_generation == local_generation) {
+                                silence_template.frame_ms = DASHCDG_AUDIO_FRAME_MS;
+                                silence_template.audio_profile_id = current_profile_id;
+                                silence_template.codec_id = current_codec_id;
+                                g_tx_state.silence_audio_frame_template = silence_template;
+                                g_tx_state.silence_audio_frame_valid = 1;
+                            }
+                            pthread_mutex_unlock(&g_tx_state.mutex);
+                        }
+                        continue;
+                    }
                     if (encoded_length < 0 && current_codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
                         dashcdg_sleep_ms(2);
                     } else {

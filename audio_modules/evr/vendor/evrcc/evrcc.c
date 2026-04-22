@@ -37,6 +37,9 @@ typedef struct EvrcEncoderContext {
 
 void* evrc_encoder_init(int16_t min_rate,int16_t max_rate,int16_t noise_suppression) {
 	EvrcEncoderContext* context = (EvrcEncoderContext*)malloc(sizeof(EvrcEncoderContext));
+	if( context == NULL ) {
+		return NULL;
+	}
 	memset(context,0,sizeof(EvrcEncoderContext));
 	context->min_rate = min_rate;
 	context->max_rate = max_rate;
