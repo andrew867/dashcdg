@@ -560,6 +560,9 @@ $(TEST_OPUS_ROUNDTRIP_BIN): $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJE
 $(TEST_NB_CODEC_ADAPTERS_BIN): \
 	$(OBJ_DIR)/test_nb_codec_adapters.o \
 	$(OBJ_DIR)/desktop_pcm_rate_convert.o \
+	$(CODEC_AMR_DESKTOP_OBJS) \
+	$(CODEC_AMR_NB_OBJS) \
+	$(CODEC_AMR_WB_OBJS) \
 	$(OBJ_DIR)/desktop_nb_evrc_codec.o \
 	$(OBJ_DIR)/desktop_nb_sbc_codec.o \
 	$(CODEC_EVRCC_OBJS) \
@@ -568,6 +571,9 @@ $(TEST_NB_CODEC_ADAPTERS_BIN): \
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ \
 		$(OBJ_DIR)/test_nb_codec_adapters.o \
 		$(OBJ_DIR)/desktop_pcm_rate_convert.o \
+		$(CODEC_AMR_DESKTOP_OBJS) \
+		$(CODEC_AMR_NB_OBJS) \
+		$(CODEC_AMR_WB_OBJS) \
 		$(OBJ_DIR)/desktop_nb_evrc_codec.o \
 		$(OBJ_DIR)/desktop_nb_sbc_codec.o \
 		$(CODEC_EVRCC_OBJS) \
