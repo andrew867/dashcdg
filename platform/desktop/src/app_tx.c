@@ -102,6 +102,7 @@
 #define DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS 100U
 #define DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS 1000U
 #define DASHCDG_V4_STARTUP_ANCHOR_MIN_MS 500U
+#define DASHCDG_V4_RESILIENT_STARTUP_PREROLL_MS 500U
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 40U
@@ -2380,7 +2381,7 @@ static uint64_t dashcdg_tx_audio_send_lead_ms_locked(void) {
     if (!g_tx_state.transport_v4_enabled) {
         lead_ms = (uint64_t) g_tx_state.announce.playout_delay_ms;
     } else if (dashcdg_v4_audio_codec_is_narrowband(g_tx_state.v4_audio_codec_id)) {
-        lead_ms = 240U;
+        lead_ms = DASHCDG_V4_RESILIENT_STARTUP_PREROLL_MS;
     } else {
         lead_ms = (uint64_t) DASHCDG_PAYOUT_DELAY_MS;
     }
@@ -3365,7 +3366,7 @@ static int dashcdg_tx_send_v4_session_info_locked(uint64_t now_ms, uint8_t *pack
     payload.audio_frame_ms = DASHCDG_AUDIO_FRAME_MS;
     if (dashcdg_v4_audio_codec_is_narrowband(g_tx_state.v4_audio_codec_id)) {
         payload.audio_bitrate_or_mode = 24U;
-        payload.startup_preroll_ms = 240U;
+        payload.startup_preroll_ms = DASHCDG_V4_RESILIENT_STARTUP_PREROLL_MS;
         payload.audio_join_redundancy = 2U;
     } else {
         payload.audio_bitrate_or_mode = DASHCDG_AUDIO_BITRATE_KBPS;
