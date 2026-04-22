@@ -5223,6 +5223,8 @@ static void dashcdg_rx_start_audio_async(void) {
 }
 
 static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
+    int use_legacy_recovery_fallback = dashcdg_rx_should_use_legacy_recovery_fallback();
+
     if (g_audio == NULL || !g_audio_stream_started) {
         return 0;
     }
@@ -5231,7 +5233,11 @@ static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
     }
 
     g_receiver.audio_last_stall_recover_local_ms = now_ms;
-    dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
+    if (use_legacy_recovery_fallback) {
+        dashcdg_rx_reprime_audio_after_host_underrun_locked(&g_receiver);
+    } else {
+        dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
+    }
     return 1;
 }
 

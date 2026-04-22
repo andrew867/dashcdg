@@ -2186,7 +2186,16 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
             (g_tx_state.v4_video_anchor_bytes == NULL || g_tx_state.v4_video_anchor_offset >= g_tx_state.v4_video_anchor_size) &&
             (g_tx_state.last_v4_video_anchor_ms == 0U ||
              now_ms - g_tx_state.last_v4_video_anchor_ms >= DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS)) {
-        if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
+        if (!g_tx_state.v4_anchor_first_full_delivery_done && g_tx_state.v4_video_anchor_id == 0U) {
+            /*
+             * The first startup anchor must represent the exact track-start canvas.
+             * If we derive it from next_cdg_batch_index after any startup live deltas
+             * have already advanced, receivers can briefly show the true first block,
+             * then the first anchor/snapshot replaces the canvas from a later packet
+             * boundary and wipes that left-edge content back to background colour.
+             */
+            anchor_packet_index = 0U;
+        } else if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             anchor_packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
         } else {
             anchor_packet_index = dashcdg_cdg_source_packet_count(&g_tx_state.cdg_source);
