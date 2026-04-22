@@ -117,6 +117,32 @@
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_CDG_SNAPSHOT_CHUNK_COUNT ((DASHCDG_CDG_SNAPSHOT_STATE_BYTES + DASHCDG_MAX_CDG_SNAPSHOT_CHUNK - 1U) / \
         DASHCDG_MAX_CDG_SNAPSHOT_CHUNK)
+
+#ifdef _WIN32
+static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
+    static int cached = -1;
+
+    if (cached >= 0) {
+        return cached;
+    }
+    {
+        OSVERSIONINFOA vi;
+
+        memset(&vi, 0, sizeof(vi));
+        vi.dwOSVersionInfoSize = sizeof(vi);
+        if (!GetVersionExA(&vi)) {
+            cached = 0;
+        } else {
+            cached = vi.dwMajorVersion < 6U;
+        }
+    }
+    return cached;
+}
+#else
+static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
+    return 0;
+}
+#endif
 /*
  * TX currently paces v4 anchors in 512-byte chunks to avoid large startup bursts. RX must track
  * completion using the same stride; indexing by the protocol max (1024) collapses adjacent anchor
@@ -5208,6 +5234,7 @@ static int dashcdg_rx_handle_dead_audio_backend_locked(uint64_t now_ms) {
 static void *dashcdg_rx_media_thread_main(void *unused) {
     struct dashcdg_win32_mmcss_handle mmcss;
     char fault_lines[8][256];
+    int use_legacy_recovery_fallback = dashcdg_rx_should_use_legacy_recovery_fallback();
 
     (void) unused;
     dashcdg_win32_thread_timing_boost_begin(&mmcss);
@@ -5220,7 +5247,11 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         pthread_mutex_lock(&g_receiver.mutex);
         dashcdg_rx_note_audio_timestamp_progress_locked(&g_receiver, now_ms);
         if (dashcdg_rx_handle_dead_audio_backend_locked(now_ms)) {
-            recovery_line = "[rx] audio: detected stopped host stream; rebuilding live pipeline and restarting device";
+            if (use_legacy_recovery_fallback) {
+                recovery_line = "[rx] audio: detected stopped host stream; legacy-safe restart gating engaged";
+            } else {
+                recovery_line = "[rx] audio: detected stopped host stream; rebuilding live pipeline and restarting device";
+            }
         }
         if (recovery_line == NULL &&
                 dashcdg_rx_should_auto_recover_host_underrun_locked(&g_receiver, now_ms)) {
@@ -5234,12 +5265,22 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
         if (dashcdg_rx_should_auto_recover_zero_buffer_locked(&g_receiver, now_ms)) {
             g_receiver.audio_last_stall_recover_local_ms = now_ms;
-            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
-            recovery_line = "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen";
+            if (use_legacy_recovery_fallback) {
+                dashcdg_rx_reprime_audio_after_host_underrun_locked(&g_receiver);
+                recovery_line = "[rx] audio: legacy-safe re-prime after stalled zero-buffer stream";
+            } else {
+                dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
+                recovery_line = "[rx] audio: auto-recovering stalled zero-buffer stream without device reopen";
+            }
         } else if (dashcdg_rx_should_auto_recover_buffered_silent_locked(&g_receiver, now_ms)) {
             g_receiver.audio_last_stall_recover_local_ms = now_ms;
-            dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
-            recovery_line = "[rx] audio: auto-recovering buffered silent stream after stalled DAC timestamp";
+            if (use_legacy_recovery_fallback) {
+                dashcdg_rx_reprime_audio_after_host_underrun_locked(&g_receiver);
+                recovery_line = "[rx] audio: legacy-safe re-prime after buffered silent stall";
+            } else {
+                dashcdg_rx_reset_live_media_after_resume_locked(&g_receiver, 0);
+                recovery_line = "[rx] audio: auto-recovering buffered silent stream after stalled DAC timestamp";
+            }
         }
         fault_line_count = dashcdg_rx_collect_fault_lines_locked(
                 &g_receiver,
