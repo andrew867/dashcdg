@@ -2218,13 +2218,13 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     if (state->audio_queue_overflows > state->last_logged_audio_queue_overflows) {
         delta = state->audio_queue_overflows - state->last_logged_audio_queue_overflows;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: audio_queue_overflow +%llu buf=%u tgt=%u host=%u gate=%s now=%llu",
-                (unsigned long long) delta,
+                "[rx] fault: audio_queue_overflow +%" DASHCDG_RX_PRIu64 " buf=%u tgt=%u host=%u gate=%s now=%" DASHCDG_RX_PRIu64,
+                delta,
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
                 (unsigned int) dashcdg_rx_audio_target_buffer_ms_locked(state),
                 (unsigned int) dashcdg_rx_audio_host_latency_ms_locked(),
                 dashcdg_rx_audio_recent_auto_recover_locked(state, local_now_ms) ? "auto-recover" : "running",
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_audio_queue_overflows = state->audio_queue_overflows;
     }
@@ -2232,11 +2232,11 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     if (state->audio_missing_skips > state->last_logged_audio_missing_skips) {
         delta = state->audio_missing_skips - state->last_logged_audio_missing_skips;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: audio_continuity_skip +%llu pending=%u buf=%u now=%llu",
-                (unsigned long long) delta,
+                "[rx] fault: audio_continuity_skip +%" DASHCDG_RX_PRIu64 " pending=%u buf=%u now=%" DASHCDG_RX_PRIu64,
+                delta,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_audio_missing_skips = state->audio_missing_skips;
     }
@@ -2244,11 +2244,11 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     if (state->live_missing_skips > state->last_logged_live_missing_skips) {
         delta = state->live_missing_skips - state->last_logged_live_missing_skips;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: cdg_continuity_skip +%llu pending=%u live=%llu now=%llu",
-                (unsigned long long) delta,
+                "[rx] fault: cdg_continuity_skip +%" DASHCDG_RX_PRIu64 " pending=%u live=%" DASHCDG_RX_PRIu64 " now=%" DASHCDG_RX_PRIu64,
+                delta,
                 (unsigned int) dashcdg_rx_pending_cdg_count(state),
-                (unsigned long long) state->live_packets_applied,
-                (unsigned long long) local_now_ms
+                state->live_packets_applied,
+                local_now_ms
         );
         state->last_logged_live_missing_skips = state->live_missing_skips;
     }
@@ -2256,11 +2256,11 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     if (state->audio_jitter.reordered_packets > state->last_logged_audio_reordered_packets) {
         delta = state->audio_jitter.reordered_packets - state->last_logged_audio_reordered_packets;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: audio_reorder +%llu next_seq=%u pending=%u now=%llu",
-                (unsigned long long) delta,
+                "[rx] fault: audio_reorder +%" DASHCDG_RX_PRIu64 " next_seq=%u pending=%u now=%" DASHCDG_RX_PRIu64,
+                delta,
                 (unsigned int) state->audio_jitter.next_media_sequence,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_audio_reordered_packets = state->audio_jitter.reordered_packets;
     }
@@ -2268,11 +2268,11 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     if (state->cdg_batch_jitter.reordered_batches > state->last_logged_cdg_reordered_batches) {
         delta = state->cdg_batch_jitter.reordered_batches - state->last_logged_cdg_reordered_batches;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: cdg_reorder +%llu next_pkt=%u pending=%u now=%llu",
-                (unsigned long long) delta,
+                "[rx] fault: cdg_reorder +%" DASHCDG_RX_PRIu64 " next_pkt=%u pending=%u now=%" DASHCDG_RX_PRIu64,
+                delta,
                 (unsigned int) state->cdg_batch_jitter.next_packet_index,
                 (unsigned int) dashcdg_rx_pending_cdg_count(state),
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_cdg_reordered_batches = state->cdg_batch_jitter.reordered_batches;
     }
@@ -2280,37 +2280,37 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     if (g_audio != NULL && g_audio->stream_underrun_events > state->last_logged_stream_underrun_events) {
         delta = g_audio->stream_underrun_events - state->last_logged_stream_underrun_events;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: host_underrun +%llu frames=%llu buf=%u tgt=%u ts=%d now=%llu",
-                (unsigned long long) delta,
-                (unsigned long long) g_audio->stream_underrun_frames,
+                "[rx] fault: host_underrun +%" DASHCDG_RX_PRIu64 " frames=%" DASHCDG_RX_PRIu64 " buf=%u tgt=%u ts=%d now=%" DASHCDG_RX_PRIu64,
+                delta,
+                g_audio->stream_underrun_frames,
                 (unsigned int) dashcdg_desktop_audio_buffered_ms(g_audio),
                 (unsigned int) dashcdg_rx_audio_target_buffer_ms_locked(state),
                 (int) DASHCDG_ATOMIC_GET(g_audio->timestamp_ms),
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
     }
     if (state->audio_arrival_gap_events > state->last_logged_audio_arrival_gap_events) {
         delta = state->audio_arrival_gap_events - state->last_logged_audio_arrival_gap_events;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: audio_arrival_gap +%llu max=%llums pending=%u buf=%u now=%llu",
-                (unsigned long long) delta,
-                (unsigned long long) state->audio_arrival_gap_max_ms,
+                "[rx] fault: audio_arrival_gap +%" DASHCDG_RX_PRIu64 " max=%" DASHCDG_RX_PRIu64 "ms pending=%u buf=%u now=%" DASHCDG_RX_PRIu64,
+                delta,
+                state->audio_arrival_gap_max_ms,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
     }
     if (state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) {
         delta = state->audio_arrival_burst_events - state->last_logged_audio_arrival_burst_events;
         DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: audio_arrival_burst +%llu maxrun=%llu pending=%u buf=%u now=%llu",
-                (unsigned long long) delta,
-                (unsigned long long) state->audio_arrival_burst_max_run,
+                "[rx] fault: audio_arrival_burst +%" DASHCDG_RX_PRIu64 " maxrun=%" DASHCDG_RX_PRIu64 " pending=%u buf=%u now=%" DASHCDG_RX_PRIu64,
+                delta,
+                state->audio_arrival_burst_max_run,
                 (unsigned int) dashcdg_audio_jitter_occupied_count(&state->audio_jitter),
                 (unsigned int) (g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U),
-                (unsigned long long) local_now_ms
+                local_now_ms
         );
         state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
     }

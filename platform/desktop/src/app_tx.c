@@ -2346,6 +2346,22 @@ static uint64_t dashcdg_tx_media_send_lead_ms_locked(void) {
     return lead_ms;
 }
 
+static uint64_t dashcdg_tx_audio_send_lead_ms_locked(void) {
+    uint64_t lead_ms;
+
+    if (!g_tx_state.transport_v4_enabled) {
+        lead_ms = (uint64_t) g_tx_state.announce.playout_delay_ms;
+    } else if (dashcdg_v4_audio_codec_is_narrowband(g_tx_state.v4_audio_codec_id)) {
+        lead_ms = 240U;
+    } else {
+        lead_ms = (uint64_t) DASHCDG_PAYOUT_DELAY_MS;
+    }
+    if (lead_ms == 0U) {
+        lead_ms = (uint64_t) DASHCDG_PAYOUT_DELAY_MS;
+    }
+    return lead_ms;
+}
+
 static uint64_t dashcdg_tx_media_send_deadline_ms_locked(uint64_t now_ms) {
     return now_ms + dashcdg_tx_media_send_lead_ms_locked();
 }
@@ -2736,7 +2752,7 @@ static unsigned int dashcdg_tx_send_due_audio_locked(
         size_t packet_size,
         unsigned int max_audio_packets
 ) {
-    uint64_t send_deadline_ms = dashcdg_tx_media_send_deadline_ms_locked(now_ms);
+    uint64_t send_deadline_ms = now_ms + dashcdg_tx_audio_send_lead_ms_locked();
     unsigned int audio_sent = 0U;
 
     while (!g_tx_state.paused &&
@@ -3152,7 +3168,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.announce.audio_channels = track->mp3_path != NULL ? DASHCDG_AUDIO_CHANNELS : 0U;
     g_tx_state.announce.audio_frame_ms = track->mp3_path != NULL ? DASHCDG_AUDIO_FRAME_MS : 0U;
     g_tx_state.announce.audio_bitrate_kbps = track->mp3_path != NULL ? DASHCDG_AUDIO_BITRATE_KBPS : 0U;
-    g_tx_state.announce.playout_delay_ms = DASHCDG_PAYOUT_DELAY_MS;
+    g_tx_state.announce.playout_delay_ms = track->mp3_path != NULL ? (uint16_t) dashcdg_tx_audio_send_lead_ms_locked() : DASHCDG_PAYOUT_DELAY_MS;
     g_tx_state.announce.audio_fec_group_size = track->mp3_path != NULL ? DASHCDG_AUDIO_GROUP_SIZE : 0U;
     g_tx_state.announce.cdg_fec_group_size = DASHCDG_CDG_GROUP_SIZE;
     g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
@@ -5736,11 +5752,12 @@ static void *dashcdg_tx_thread_main(void *unused) {
         }
 
         while (!g_tx_state.paused &&
-                dashcdg_tx_media_send_deadline_ms_locked(now_ms) >= g_tx_state.session_start_ms) {
+                (now_ms + dashcdg_tx_audio_send_lead_ms_locked()) >= g_tx_state.session_start_ms) {
             struct dashcdg_audio_frame_payload payload;
             size_t packet_size;
             const struct dashcdg_tx_audio_frame *frame;
             uint64_t frame_due_ms;
+            uint64_t audio_send_deadline_ms = now_ms + dashcdg_tx_audio_send_lead_ms_locked();
 
             if (!g_tx_state.pending_audio_frame_valid) {
                 if (!dashcdg_runtime_queue_pop(
@@ -5756,7 +5773,7 @@ static void *dashcdg_tx_thread_main(void *unused) {
 
             frame = &g_tx_state.pending_audio_frame;
             frame_due_ms = g_tx_state.session_start_ms + frame->playback_ms;
-            if (frame_due_ms > dashcdg_tx_media_send_deadline_ms_locked(now_ms)) {
+            if (frame_due_ms > audio_send_deadline_ms) {
                 break;
             }
 
