@@ -1740,6 +1740,26 @@ static const char *dashcdg_tx_v4_codec_cli_name(uint8_t codec_id) {
     }
 }
 
+static void dashcdg_tx_reset_audio_switch_state_locked(void) {
+    const struct dashcdg_tx_track *track = dashcdg_tx_current_track();
+
+    dashcdg_runtime_queue_clear(&g_tx_state.audio_ready_queue);
+    g_tx_state.pending_audio_frame_valid = 0;
+    g_tx_state.last_audio_chunk_send_local_ms = 0U;
+    g_tx_state.last_audio_sent_playback_ms = 0U;
+    g_tx_state.last_audio_sent_media_sequence = 0U;
+    g_tx_state.audio_sent_any_frame = 0;
+    g_tx_state.audio_frames_generated = 0U;
+    g_tx_state.audio_playback_end_ms = 0U;
+    g_tx_state.audio_fec_group_size = 0U;
+    g_tx_state.audio_fec_group_id = 0U;
+    memset(g_tx_state.audio_fec_payloads, 0, sizeof(g_tx_state.audio_fec_payloads));
+    memset(g_tx_state.audio_fec_lengths, 0, sizeof(g_tx_state.audio_fec_lengths));
+    memset(&g_tx_state.silence_audio_frame_template, 0, sizeof(g_tx_state.silence_audio_frame_template));
+    g_tx_state.silence_audio_frame_valid = 0;
+    g_tx_state.audio_producer_finished = track == NULL || track->mp3_path == NULL;
+}
+
 static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) || defined(DASHCDG_DESKTOP_NO_OPUS)
     static const uint8_t cycle[] = {
@@ -1776,6 +1796,7 @@ static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
     next_idx = ((idx + delta) % n + n) % n;
     g_tx_state.v4_audio_codec_id = cycle[next_idx];
     dashcdg_tx_sync_v4_profile_for_codec_locked();
+    dashcdg_tx_reset_audio_switch_state_locked();
     g_tx_state.audio_pipeline_generation++;
     g_tx_state.last_v4_session_info_ms = 0U;
 }
@@ -1786,6 +1807,7 @@ static int dashcdg_tx_select_v4_audio_codec_locked(uint8_t codec_id) {
     }
     g_tx_state.v4_audio_codec_id = codec_id;
     dashcdg_tx_sync_v4_profile_for_codec_locked();
+    dashcdg_tx_reset_audio_switch_state_locked();
     g_tx_state.audio_pipeline_generation++;
     g_tx_state.last_v4_session_info_ms = 0U;
     return 1;
