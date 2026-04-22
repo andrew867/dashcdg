@@ -1410,6 +1410,8 @@ static int dashcdg_rx_apply_snapshot_locked(struct receiver_state *state) {
             state->active_snapshot_bytes + offset,
             DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT
     );
+    state->v4_bridge_cdg = state->live_state;
+    state->v4_bridge_cdg_valid = 1;
     local_now_ms = dashcdg_clock_now_ms();
 
     /*
@@ -2757,7 +2759,9 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
      */
     if (g_receiver.v4_bridge_cdg_valid && g_receiver.cdg_snapshots_applied == 0U) {
         snapshot.state = g_receiver.v4_bridge_cdg;
-    } else if (g_receiver.live_packets_applied == 0U && g_receiver.v4_bridge_cdg_valid) {
+    } else if (g_receiver.live_packets_applied == 0U &&
+            g_receiver.cdg_snapshots_applied == 0U &&
+            g_receiver.v4_bridge_cdg_valid) {
         snapshot.state = g_receiver.v4_bridge_cdg;
     } else {
         snapshot.state = g_receiver.live_state;
@@ -4368,18 +4372,18 @@ static void dashcdg_rx_rearm_live_video_after_unpause_locked(struct receiver_sta
         return;
     }
 
-    dashcdg_cdg_batch_jitter_clear(&state->cdg_batch_jitter);
-    memset(state->cdg_fec_groups, 0, sizeof(state->cdg_fec_groups));
-    state->jitter_cdg_decode_primed = 0;
-    state->last_cdg_jitter_apply_local_ms = 0U;
-    state->cdg_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
-            now_ms,
-            dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 0)
-    );
+    if (state->last_cdg_jitter_apply_local_ms == 0U) {
+        state->last_cdg_jitter_apply_local_ms = now_ms;
+    }
+    if (state->cdg_skip_hold_until_local_ms < now_ms) {
+        state->cdg_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(
+                now_ms,
+                dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 0)
+        );
+    }
     state->v4_loading_screen_active = 0;
     state->v4_bridge_cdg = state->live_state;
     state->v4_bridge_cdg_valid = 1;
-    state->live_packets_applied = 0U;
 }
 
 static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state, int preserve_playback_anchor) {
@@ -4728,7 +4732,7 @@ static void handle_v4_clock_sync(struct receiver_state *state, const struct dash
     dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
     if (was_paused && !state->playback_paused) {
         dashcdg_rx_rearm_live_video_after_unpause_locked(state, local_now_ms);
-        dashcdg_rx_reset_live_media_after_resume_locked(state, 1);
+        dashcdg_rx_reprime_audio_after_host_underrun_locked(state);
     }
 }
 
@@ -4785,7 +4789,7 @@ static void handle_clock_beacon(struct receiver_state *state, const struct dashc
     state->playback_paused = (view->header.flags & DASHCDG_PACKET_FLAG_PAUSED) != 0;
     if (was_paused && !state->playback_paused) {
         dashcdg_rx_rearm_live_video_after_unpause_locked(state, local_now_ms);
-        dashcdg_rx_reset_live_media_after_resume_locked(state, 1);
+        dashcdg_rx_reprime_audio_after_host_underrun_locked(state);
     }
 }
 
