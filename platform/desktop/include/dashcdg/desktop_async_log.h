@@ -6,6 +6,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#if defined(_WIN32) && defined(_WIN32_WINNT) && (_WIN32_WINNT <= 0x0501)
+#define DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK 1
+#else
+#define DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK 0
+#endif
+
 enum dashcdg_async_log_stream {
     DASHCDG_ASYNC_LOG_STDOUT = 0,
     DASHCDG_ASYNC_LOG_STDERR = 1,

@@ -104,14 +104,18 @@ int dashcdg_async_logger_init(struct dashcdg_async_logger *logger, const char *s
         return 0;
     }
     memset(logger, 0, sizeof(*logger));
-    pthread_mutex_init(&logger->mutex, NULL);
-    pthread_cond_init(&logger->cond, NULL);
     if (sidecar_path != NULL && sidecar_path[0] != '\0') {
         logger->sidecar_file = fopen(sidecar_path, "a");
         if (logger->sidecar_file != NULL) {
             setvbuf(logger->sidecar_file, NULL, _IOFBF, 64 * 1024);
         }
     }
+#if DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
+    logger->started = 1;
+    return 1;
+#else
+    pthread_mutex_init(&logger->mutex, NULL);
+    pthread_cond_init(&logger->cond, NULL);
     if (pthread_create(&logger->thread, NULL, dashcdg_async_logger_thread_main, logger) != 0) {
         if (logger->sidecar_file != NULL) {
             fclose(logger->sidecar_file);
@@ -123,12 +127,14 @@ int dashcdg_async_logger_init(struct dashcdg_async_logger *logger, const char *s
     }
     logger->started = 1;
     return 1;
+#endif
 }
 
 void dashcdg_async_logger_shutdown(struct dashcdg_async_logger *logger) {
     if (logger == NULL) {
         return;
     }
+#if !DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
     if (logger->started) {
         pthread_mutex_lock(&logger->mutex);
         logger->shutdown = 1;
@@ -137,13 +143,18 @@ void dashcdg_async_logger_shutdown(struct dashcdg_async_logger *logger) {
         pthread_join(logger->thread, NULL);
         logger->started = 0;
     }
+#else
+    logger->started = 0;
+#endif
     if (logger->sidecar_file != NULL) {
         fflush(logger->sidecar_file);
         fclose(logger->sidecar_file);
         logger->sidecar_file = NULL;
     }
+#if !DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
     pthread_cond_destroy(&logger->cond);
     pthread_mutex_destroy(&logger->mutex);
+#endif
 }
 
 void dashcdg_async_logger_log_line(
@@ -157,6 +168,20 @@ void dashcdg_async_logger_log_line(
     if (logger == NULL || !logger->started || line == NULL || line[0] == '\0') {
         return;
     }
+
+#if DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
+    if (stream != DASHCDG_ASYNC_LOG_SIDECAR_ONLY) {
+        FILE *out = stream == DASHCDG_ASYNC_LOG_STDERR ? stderr : stdout;
+
+        fprintf(out, "%s\n", line);
+        fflush(out);
+    }
+    if (logger->sidecar_file != NULL) {
+        fprintf(logger->sidecar_file, "%s\n", line);
+        fflush(logger->sidecar_file);
+    }
+    return;
+#endif
 
     pthread_mutex_lock(&logger->mutex);
     if (logger->count >= DASHCDG_ASYNC_LOG_QUEUE_CAPACITY) {
