@@ -2,7 +2,12 @@
 
 ## Purpose
 
-Single index for **planned but not finished** desktop transport, resilience, TX CD+G, and observability work. Each row links the **normative spec** (what “done” means) and the **test plan** (how we prove it). Implementation order may overlap; dependencies are noted.
+Single index for **planned but not finished** desktop transport, resilience, TX CD+G, and observability work. Each row links the **normative spec** (what “done” means) and the **test plan** (how we prove it).
+
+Concrete execution order is now defined in:
+
+- [../ops/v4-priority-implementation-plan.md](../ops/v4-priority-implementation-plan.md)
+- [../ops/v4-group-playout-sync-rollout.md](../ops/v4-group-playout-sync-rollout.md)
 
 ## Snapshot: `v0.1.0`
 
@@ -12,26 +17,39 @@ sneakernet packaging) matches **what we build and run today**. The rows below ar
 still **research / hardening**, not a claim that the tree is broken — they are the
 backlog that keeps “possible” from turning into “mythical”.
 
-## Workstreams
+## Priority order
+
+1. **Tranche 0**: stabilize current v4 behavior and freeze validation gates
+2. **Tranche A**: baseline convergence capture and observability
+3. **Tranche B**: TX-as-controller group playout sync / IDMS
+4. **Tranche C**: impaired-network and rapid-switch hardening
+5. **Tranche D**: quality, efficiency, and operator-facing follow-through
+6. **Tranche E**: v5 and future platform expansion
+
+## Workstreams by tranche
 
 | Tranche | Spec(s) | Test plan(s) | Notes |
 | --- | --- | --- | --- |
-| **Long impaired-network soaks** — logs, burst-loss thresholds | [bad-network-transport.md](bad-network-transport.md), [v4-transport-stability-and-timing.md](v4-transport-stability-and-timing.md) | [long-impairment-soak-validation.md](../test/long-impairment-soak-validation.md), [desktop-impairment-validation.md](../test/desktop-impairment-validation.md), [bad-network-transport-validation.md](../test/bad-network-transport-validation.md) | Quantify recovery vs burst length/rate; archive TX/RX/relay logs. |
-| **Rapid track switches under sustained TX pressure** | [tx-cdg-source-model.md](tx-cdg-source-model.md), [v4-codec-switching-contract.md](v4-codec-switching-contract.md) | [rapid-track-switch-pressure-validation.md](../test/rapid-track-switch-pressure-validation.md) | Encode queue, anchor rebuild, no wedge on next/prev under load. |
-| **Bad-network transport redesign + audio profiles** | [bad-network-transport.md](bad-network-transport.md), [bad-network-audio-profiles.md](bad-network-audio-profiles.md), [bad-network-transport-next-phases.md](bad-network-transport-next-phases.md) | [bad-network-transport-validation.md](../test/bad-network-transport-validation.md), long soak (above) | First-tranche lock and phases are explicit; wire breaks only where spec says. |
-| **TX CD+G slimdown / source model + late join** | [tx-cdg-source-model.md](tx-cdg-source-model.md) | [tx-cdg-source-late-join-regression-plan.md](../test/tx-cdg-source-late-join-regression-plan.md), [desktop-proof-plan.md](../test/desktop-proof-plan.md) | Preserve ASSET_CHUNK, snapshots, live deltas per source model stages. |
-| **Narrowband / low-bitrate perceived quality** | [narrowband-low-bitrate-audio-quality.md](narrowband-low-bitrate-audio-quality.md), [v4-audio-codecs.md](v4-audio-codecs.md) | Sections 5–6 in that spec + [v4-audio-codec-validation.md](../test/v4-audio-codec-validation.md) | Hypotheses and acceptance bars; implementation optional per tranche. |
-| **PCM SRC — libsoxr on desktop (`DASHCDG_HAVE_LIBSOXR`)** | [pcm-libsoxr-desktop-src.md](pcm-libsoxr-desktop-src.md) | [pcm-libsoxr-regression.md](../test/pcm-libsoxr-regression.md), `make test` (`test-pcm-rate-convert`) | One-shot + overlap SRC for TX/RX adapters; legacy FIR/Lanczos retained only when libsoxr unavailable. |
-| **PTP, operator UI, metrics UI** | [operator-observability-and-sync-future-work.md](operator-observability-and-sync-future-work.md), [v4-network-stats-and-adaptation.md](v4-network-stats-and-adaptation.md) | [v4-network-observability-validation.md](../test/v4-network-observability-validation.md) | Documented limitations; future acceptance criteria. |
-| **V5 simulcast / IGMP / ladder** | [v5-multistream-adaptation-architecture.md](v5-multistream-adaptation-architecture.md) | v4 soak + future v5-specific matrix (TBD) | After v4 stability; parallel audio groups + join policy. |
+| **Tranche 0: current v4 stabilization** | current desktop runtime + [../ops/v4-priority-implementation-plan.md](../ops/v4-priority-implementation-plan.md) | existing smoke/soak matrix plus platform-specific regression runs | Startup, rollover, recovery, legacy crash, cadence, and validation freeze before new sync work. |
+| **Tranche A: baseline convergence + observability** | [../ops/v4-group-playout-sync-rollout.md](../ops/v4-group-playout-sync-rollout.md), [v4-network-stats-and-adaptation.md](v4-network-stats-and-adaptation.md) | [v4-group-playout-sync-validation.md](../test/v4-group-playout-sync-validation.md), [v4-network-observability-validation.md](../test/v4-network-observability-validation.md) | Capture current spread first; complete RX measurement fields before controller logic. |
+| **Tranche B: group playout sync / IDMS** | [../ops/v4-group-playout-sync-rollout.md](../ops/v4-group-playout-sync-rollout.md), [v4-group-playout-sync-idms.md](v4-group-playout-sync-idms.md) | [v4-group-playout-sync-validation.md](../test/v4-group-playout-sync-validation.md) | TX-as-controller first; measurement mode before real target following. |
+| **Tranche C.1: long impaired-network soaks** | [bad-network-transport.md](bad-network-transport.md), [v4-transport-stability-and-timing.md](v4-transport-stability-and-timing.md) | [long-impairment-soak-validation.md](../test/long-impairment-soak-validation.md), [desktop-impairment-validation.md](../test/desktop-impairment-validation.md), [bad-network-transport-validation.md](../test/bad-network-transport-validation.md) | Quantify recovery vs burst length/rate; archive TX/RX/relay logs. |
+| **Tranche C.2: rapid track switches under sustained TX pressure** | [tx-cdg-source-model.md](tx-cdg-source-model.md), [v4-codec-switching-contract.md](v4-codec-switching-contract.md) | [rapid-track-switch-pressure-validation.md](../test/rapid-track-switch-pressure-validation.md) | Encode queue, anchor rebuild, no wedge on next/prev under load. |
+| **Tranche C.3: bad-network transport + audio-profile hardening** | [bad-network-transport.md](bad-network-transport.md), [bad-network-audio-profiles.md](bad-network-audio-profiles.md), [bad-network-transport-next-phases.md](bad-network-transport-next-phases.md) | [bad-network-transport-validation.md](../test/bad-network-transport-validation.md), long soak (above) | First-tranche lock and phases are explicit; wire breaks only where spec says. |
+| **Tranche D.1: TX CD+G slimdown / source model + late join** | [tx-cdg-source-model.md](tx-cdg-source-model.md) | [tx-cdg-source-late-join-regression-plan.md](../test/tx-cdg-source-late-join-regression-plan.md), [desktop-proof-plan.md](../test/desktop-proof-plan.md) | Preserve ASSET_CHUNK, snapshots, live deltas per source model stages. |
+| **Tranche D.2: narrowband / low-bitrate perceived quality** | [narrowband-low-bitrate-audio-quality.md](narrowband-low-bitrate-audio-quality.md), [v4-audio-codecs.md](v4-audio-codecs.md) | sections 5–6 in that spec + [v4-audio-codec-validation.md](../test/v4-audio-codec-validation.md) | Hypotheses and acceptance bars; implementation optional per tranche. |
+| **Tranche D.3: PCM SRC — libsoxr on desktop (`DASHCDG_HAVE_LIBSOXR`)** | [pcm-libsoxr-desktop-src.md](pcm-libsoxr-desktop-src.md) | [pcm-libsoxr-regression.md](../test/pcm-libsoxr-regression.md), `make test` (`test-pcm-rate-convert`) | One-shot + overlap SRC for TX/RX adapters; legacy FIR/Lanczos retained only when libsoxr unavailable. |
+| **Tranche D.4: PTP, operator UI, metrics UI** | [operator-observability-and-sync-future-work.md](operator-observability-and-sync-future-work.md), [v4-network-stats-and-adaptation.md](v4-network-stats-and-adaptation.md) | [v4-network-observability-validation.md](../test/v4-network-observability-validation.md) | Documented limitations; future acceptance criteria. |
+| **Tranche E: V5 simulcast / IGMP / ladder** | [v5-multistream-adaptation-architecture.md](v5-multistream-adaptation-architecture.md) | v4 soak + future v5-specific matrix (TBD) | After v4 stability; parallel audio groups + join policy. |
 
-## Suggested sequencing (non-binding)
+## Sequencing summary
 
-1. **Soak + threshold quantification** on the current stable build — establishes baseline numbers before changing transport or TX memory.
-2. **Rapid track-switch pressure** tests — catches regressions early when touching TX scheduler or CDG source.
-3. **Bad-network phases** from [bad-network-transport-next-phases.md](bad-network-transport-next-phases.md) — aligned with [bad-network-transport.md](bad-network-transport.md).
-4. **TX CD+G slimdown** stages from [tx-cdg-source-model.md](tx-cdg-source-model.md) — each stage gated by [tx-cdg-source-late-join-regression-plan.md](../test/tx-cdg-source-late-join-regression-plan.md).
-5. **Observability / PTP / UI** — incremental; see future-work spec.
+1. **Complete Tranche 0** before changing sync-control architecture.
+2. **Run Tranche A** to capture real convergence behavior and complete measurement.
+3. **Implement Tranche B** only after measurement mode is stable.
+4. **Use Tranche C** to harden transport and operator pressure paths.
+5. **Finish Tranche D** for quality, efficiency, and operator visibility.
+6. **Keep Tranche E** separate so v5 planning does not destabilize v4.
 
 ## Criteria agreed (product)
 

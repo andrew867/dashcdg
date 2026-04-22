@@ -101,6 +101,7 @@
 #define DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS 250U
 #define DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS 100U
 #define DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS 1000U
+#define DASHCDG_V4_STARTUP_ANCHOR_MIN_MS 500U
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 40U
@@ -2200,12 +2201,19 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
              */
             size_t startup_end_index = g_tx_state.next_cdg_batch_index + DASHCDG_CDG_GROUP_SIZE;
             const struct dashcdg_tx_cdg_batch *covered_batch;
+            uint64_t startup_min_packets = dashcdg_ms_to_packet_count(DASHCDG_V4_STARTUP_ANCHOR_MIN_MS);
 
             if (startup_end_index > g_tx_state.cdg_batch_count) {
                 startup_end_index = g_tx_state.cdg_batch_count;
             }
             covered_batch = &g_tx_state.cdg_batches[startup_end_index - 1U];
             anchor_packet_index = covered_batch->packet_start_index + (uint64_t) covered_batch->packet_count;
+            if (anchor_packet_index < startup_min_packets) {
+                anchor_packet_index = startup_min_packets;
+            }
+            if (anchor_packet_index > dashcdg_cdg_source_packet_count(&g_tx_state.cdg_source)) {
+                anchor_packet_index = dashcdg_cdg_source_packet_count(&g_tx_state.cdg_source);
+            }
         } else if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             anchor_packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
         } else {
