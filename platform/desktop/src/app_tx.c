@@ -2050,6 +2050,11 @@ static int dashcdg_tx_build_audio_frames_locked(const struct dashcdg_tx_track *t
     dashcdg_runtime_queue_clear(&g_tx_state.audio_ready_queue);
     g_tx_state.pending_audio_frame_valid = 0;
     g_tx_state.last_audio_chunk_send_local_ms = 0U;
+    g_tx_state.last_audio_sent_playback_ms = 0U;
+    g_tx_state.last_audio_sent_media_sequence = 0U;
+    g_tx_state.audio_sent_any_frame = 0;
+    memset(&g_tx_state.silence_audio_frame_template, 0, sizeof(g_tx_state.silence_audio_frame_template));
+    g_tx_state.silence_audio_frame_valid = 0;
     g_tx_state.audio_producer_finished = track == NULL || track->mp3_path == NULL;
     g_tx_state.audio_frames_generated = 0U;
     g_tx_state.audio_playback_end_ms = 0U;
@@ -4485,6 +4490,17 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 int16_t mono_pcm[DASHCDG_AUDIO_FRAME_SAMPLES];
                 size_t copy_frames = fifo_frames > DASHCDG_AUDIO_FRAME_SAMPLES ? DASHCDG_AUDIO_FRAME_SAMPLES : fifo_frames;
                 int encoded_length;
+
+                /*
+                 * After codec hot-switch + seek, the MP3 source can initially yield less than one
+                 * full 20 ms frame. Speech codecs and SBC expect a complete 960-sample block; if
+                 * we try to encode a short prefix here we keep retrying the same partial FIFO and
+                 * the producer looks permanently silent until restart. Wait for a full frame unless
+                 * this is the final EOF tail, which we zero-pad below.
+                 */
+                if (copy_frames < DASHCDG_AUDIO_FRAME_SAMPLES && !reached_eof) {
+                    break;
+                }
 
                 memset(&frame, 0, sizeof(frame));
                 memset(pcm, 0, sizeof(pcm));
