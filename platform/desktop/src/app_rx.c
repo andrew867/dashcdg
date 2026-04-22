@@ -107,6 +107,7 @@
 #define DASHCDG_RX_HOST_UNDERRUN_RECOVER_MIN_EVENTS 2U
 #define DASHCDG_RX_HOST_UNDERRUN_RECOVER_MIN_STALE_MS 80U
 #define DASHCDG_RX_HOST_UNDERRUN_RECOVER_MAX_BUFFER_MS 120U
+#define DASHCDG_RX_SOURCE_IDLE_PARK_MS 1000U
 #if defined(DASHCDG_RX_UI_GDI_ONLY)
 #define DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS 20U
 #else
@@ -2095,6 +2096,61 @@ static int dashcdg_rx_audio_recent_auto_recover_locked(
     return local_now_ms - state->audio_last_stall_recover_local_ms < DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS;
 }
 
+static int dashcdg_rx_source_idle_and_drained_locked(
+        const struct receiver_state *state,
+        uint64_t local_now_ms
+) {
+    uint64_t since_last_dg_ms;
+
+    if (state == NULL || !state->network_audio_enabled || state->playback_paused) {
+        return 0;
+    }
+    if (state->last_datagram_local_ms == 0U) {
+        return 0;
+    }
+
+    since_last_dg_ms = dashcdg_rx_elapsed_ms_safe(local_now_ms, state->last_datagram_local_ms);
+    if (since_last_dg_ms < DASHCDG_RX_SOURCE_IDLE_PARK_MS) {
+        return 0;
+    }
+    if (dashcdg_audio_jitter_occupied_count(&state->audio_jitter) != 0U) {
+        return 0;
+    }
+    if (dashcdg_rx_pending_cdg_count(state) != 0U) {
+        return 0;
+    }
+    if (g_audio != NULL && dashcdg_desktop_audio_buffered_ms(g_audio) != 0U) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int dashcdg_rx_park_idle_audio_output_locked(
+        struct receiver_state *state,
+        uint64_t local_now_ms
+) {
+    if (!dashcdg_rx_source_idle_and_drained_locked(state, local_now_ms)) {
+        return 0;
+    }
+    if (g_audio == NULL || !g_audio_stream_started) {
+        return 0;
+    }
+
+    dashcdg_desktop_audio_stop_stream(g_audio);
+    dashcdg_desktop_audio_flush_stream_ring(g_audio);
+    dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+    state->last_audio_queue_success_local_ms = 0U;
+    state->last_audio_timestamp_advance_local_ms = 0U;
+    state->last_audio_timestamp_ms = -1;
+    state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
+    state->last_observed_stream_underrun_events = g_audio->stream_underrun_events;
+    state->last_observed_stream_underrun_frames = g_audio->stream_underrun_frames;
+    g_audio_stream_started = 0;
+    g_audio_start_inflight = 0;
+    return 1;
+}
+
 static size_t dashcdg_rx_collect_fault_lines_locked(
         struct receiver_state *state,
         uint64_t local_now_ms,
@@ -2113,6 +2169,19 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     } while (0)
 
     if (state == NULL) {
+        return 0U;
+    }
+    if (dashcdg_rx_source_idle_and_drained_locked(state, local_now_ms)) {
+        state->last_logged_audio_queue_overflows = state->audio_queue_overflows;
+        state->last_logged_audio_missing_skips = state->audio_missing_skips;
+        state->last_logged_live_missing_skips = state->live_missing_skips;
+        state->last_logged_audio_reordered_packets = state->audio_jitter.reordered_packets;
+        state->last_logged_cdg_reordered_batches = state->cdg_batch_jitter.reordered_batches;
+        if (g_audio != NULL) {
+            state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
+        }
+        state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
+        state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
         return 0U;
     }
 
@@ -3563,6 +3632,10 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
     size_t combined_steps = 0U;
 
     if (state == NULL) {
+        return;
+    }
+
+    if (dashcdg_rx_source_idle_and_drained_locked(state, local_now_ms)) {
         return;
     }
 
@@ -5154,6 +5227,9 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
             g_receiver.audio_last_stall_recover_local_ms = now_ms;
             dashcdg_rx_reprime_audio_after_host_underrun_locked(&g_receiver);
             recovery_line = "[rx] audio: re-priming after host underrun burst";
+        }
+        if (recovery_line == NULL && dashcdg_rx_park_idle_audio_output_locked(&g_receiver, now_ms)) {
+            recovery_line = "[rx] audio: source idle, parking output until packets resume";
         }
         dashcdg_rx_drain_media_locked(&g_receiver, now_ms);
         if (dashcdg_rx_should_auto_recover_zero_buffer_locked(&g_receiver, now_ms)) {
