@@ -12,6 +12,23 @@
 #include <windows.h>
 #endif
 
+#if defined(_WIN32)
+static int dashcdg_async_logger_should_use_sync_fallback(void) {
+    OSVERSIONINFOA vi;
+
+    memset(&vi, 0, sizeof(vi));
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    if (!GetVersionExA(&vi)) {
+        return 0;
+    }
+    return vi.dwMajorVersion < 6U;
+}
+#else
+static int dashcdg_async_logger_should_use_sync_fallback(void) {
+    return 0;
+}
+#endif
+
 static void *dashcdg_async_logger_thread_main(void *userdata) {
     struct dashcdg_async_logger *logger = (struct dashcdg_async_logger *) userdata;
     uint64_t dropped_to_report = 0U;
@@ -110,10 +127,11 @@ int dashcdg_async_logger_init(struct dashcdg_async_logger *logger, const char *s
             setvbuf(logger->sidecar_file, NULL, _IOFBF, 64 * 1024);
         }
     }
-#if DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
+    logger->sync_fallback = dashcdg_async_logger_should_use_sync_fallback();
+    if (logger->sync_fallback) {
     logger->started = 1;
     return 1;
-#else
+    }
     pthread_mutex_init(&logger->mutex, NULL);
     pthread_cond_init(&logger->cond, NULL);
     if (pthread_create(&logger->thread, NULL, dashcdg_async_logger_thread_main, logger) != 0) {
@@ -127,34 +145,31 @@ int dashcdg_async_logger_init(struct dashcdg_async_logger *logger, const char *s
     }
     logger->started = 1;
     return 1;
-#endif
 }
 
 void dashcdg_async_logger_shutdown(struct dashcdg_async_logger *logger) {
     if (logger == NULL) {
         return;
     }
-#if !DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
-    if (logger->started) {
+    if (logger->started && !logger->sync_fallback) {
         pthread_mutex_lock(&logger->mutex);
         logger->shutdown = 1;
         pthread_cond_broadcast(&logger->cond);
         pthread_mutex_unlock(&logger->mutex);
         pthread_join(logger->thread, NULL);
         logger->started = 0;
-    }
-#else
+    } else {
     logger->started = 0;
-#endif
+    }
     if (logger->sidecar_file != NULL) {
         fflush(logger->sidecar_file);
         fclose(logger->sidecar_file);
         logger->sidecar_file = NULL;
     }
-#if !DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
-    pthread_cond_destroy(&logger->cond);
-    pthread_mutex_destroy(&logger->mutex);
-#endif
+    if (!logger->sync_fallback) {
+        pthread_cond_destroy(&logger->cond);
+        pthread_mutex_destroy(&logger->mutex);
+    }
 }
 
 void dashcdg_async_logger_log_line(
@@ -169,19 +184,19 @@ void dashcdg_async_logger_log_line(
         return;
     }
 
-#if DASHCDG_ASYNC_LOGGER_SYNC_FALLBACK
-    if (stream != DASHCDG_ASYNC_LOG_SIDECAR_ONLY) {
+    if (logger->sync_fallback) {
+        if (stream != DASHCDG_ASYNC_LOG_SIDECAR_ONLY) {
         FILE *out = stream == DASHCDG_ASYNC_LOG_STDERR ? stderr : stdout;
 
         fprintf(out, "%s\n", line);
         fflush(out);
+        }
+        if (logger->sidecar_file != NULL) {
+            fprintf(logger->sidecar_file, "%s\n", line);
+            fflush(logger->sidecar_file);
+        }
+        return;
     }
-    if (logger->sidecar_file != NULL) {
-        fprintf(logger->sidecar_file, "%s\n", line);
-        fflush(logger->sidecar_file);
-    }
-    return;
-#endif
 
     pthread_mutex_lock(&logger->mutex);
     if (logger->count >= DASHCDG_ASYNC_LOG_QUEUE_CAPACITY) {

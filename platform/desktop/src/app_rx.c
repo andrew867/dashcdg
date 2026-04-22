@@ -1612,8 +1612,7 @@ static void dashcdg_rx_apply_loading_screen_locked(
     if (state->cdg_snapshots_applied > 0 || state->cdg_batch_jitter.initialized) {
         return;
     }
-    if (state->v4_bridge_cdg_valid &&
-            (kind == DASHCDG_V4_LOADING_SCREEN_CONNECTING || kind == DASHCDG_V4_LOADING_SCREEN_LATE_JOIN)) {
+    if (state->v4_bridge_cdg_valid) {
         return;
     }
 
