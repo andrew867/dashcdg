@@ -120,7 +120,6 @@
 #define DASHCDG_V4_MAX_VIDEO_PER_PASS 2U
 #define DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT 1U
 #define DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS 2U
-#define DASHCDG_V4_STARTUP_VIDEO_DELTA_REDUNDANCY_BATCHES 4U
 #define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 
 static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
@@ -2168,7 +2167,6 @@ static void dashcdg_tx_apply_cdg_batch_to_state_locked(
 }
 
 static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
-    struct dashcdg_cdg_state state_copy;
     uint8_t raw_snapshot[DASHCDG_CDG_SNAPSHOT_STATE_BYTES];
     uint8_t *encoded = NULL;
     uint64_t anchor_packet_index = 0U;
@@ -2183,23 +2181,35 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
             (g_tx_state.v4_video_anchor_bytes == NULL || g_tx_state.v4_video_anchor_offset >= g_tx_state.v4_video_anchor_size) &&
             (g_tx_state.last_v4_video_anchor_ms == 0U ||
              now_ms - g_tx_state.last_v4_video_anchor_ms >= DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS)) {
-        state_copy = g_tx_state.paused ? g_tx_state.pause_state : g_tx_state.live_cdg_state;
         if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             anchor_packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
         } else {
             anchor_packet_index = dashcdg_cdg_source_packet_count(&g_tx_state.cdg_source);
         }
         pipeline_generation = g_tx_state.audio_pipeline_generation;
-        should_prepare = 1;
+        if (g_tx_state.paused) {
+            raw_length = dashcdg_tx_serialize_cdg_snapshot_state(&g_tx_state.pause_state, raw_snapshot, sizeof(raw_snapshot));
+            should_prepare = raw_length != 0U;
+        } else {
+            dashcdg_tick_t restore_ts = g_tx_state.reader.state.ts;
+
+            if (dashcdg_cdg_reader_seek(&g_tx_state.reader, (dashcdg_tick_t) anchor_packet_index) &&
+                    dashcdg_tx_serialize_cdg_snapshot_state(
+                            &g_tx_state.reader.state,
+                            raw_snapshot,
+                            sizeof(raw_snapshot)
+                    ) == sizeof(raw_snapshot)) {
+                raw_length = sizeof(raw_snapshot);
+                should_prepare = 1;
+            } else {
+                raw_length = 0U;
+            }
+            (void) dashcdg_cdg_reader_seek(&g_tx_state.reader, restore_ts);
+        }
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
     if (!should_prepare) {
-        return 0;
-    }
-
-    raw_length = dashcdg_tx_serialize_cdg_snapshot_state(&state_copy, raw_snapshot, sizeof(raw_snapshot));
-    if (raw_length == 0U) {
         return 0;
     }
 
@@ -3470,20 +3480,6 @@ static int dashcdg_tx_send_v4_video_delta_locked(
         return 0;
     }
     dashcdg_tx_apply_cdg_batch_to_state_locked(batch, &g_tx_state.live_cdg_state);
-    return 1;
-}
-
-static int dashcdg_tx_should_duplicate_startup_video_batch_locked(const struct dashcdg_tx_cdg_batch *batch) {
-    uint64_t startup_batch_limit;
-
-    if (batch == NULL) {
-        return 0;
-    }
-    if (g_tx_state.v4_video_delta_packets_sent != 0U) {
-        startup_batch_limit = (uint64_t) DASHCDG_V4_STARTUP_VIDEO_DELTA_REDUNDANCY_BATCHES *
-                (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS;
-        return batch->packet_start_index < startup_batch_limit;
-    }
     return 1;
 }
 
@@ -5419,15 +5415,11 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
                     send_deadline_ms &&
             video_sent < DASHCDG_V4_MAX_VIDEO_PER_PASS) {
         const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
-        int duplicate_startup_batch = dashcdg_tx_should_duplicate_startup_video_batch_locked(batch);
         int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
 
         if (!dashcdg_tx_send_v4_video_delta_locked(now_ms, batch, packet, packet_size)) {
             break;
-        }
-        if (duplicate_startup_batch) {
-            (void) dashcdg_tx_send_v4_video_delta_locked(now_ms, batch, packet, packet_size);
         }
         g_tx_state.cdg_batch_packets_sent++;
         g_tx_state.next_cdg_batch_index++;
