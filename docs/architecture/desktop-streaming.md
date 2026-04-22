@@ -94,7 +94,7 @@ Important current behavior:
   bounded per-pass pacing for anchors/audio/video/backfill). **`--v3`** selects
   the legacy v3-only sender loop. **`--badnet-v4`** sets v4 **resilience** and
   current desktop default codec **`amr-wb`**; **`--badnet-v4-sbc`** and
-  **`--badnet-v4-evrc`** pick explicit alternates. **`--v4-audio-codec=`**
+  **`--badnet-v4-qcelp8k`** pick explicit alternates. **`--v4-audio-codec=`**
   selects the session `audio_codec_id` without changing transport version.
 - Console output now prints a preparation line immediately, but some media
   preparation cost is still on the hot path.

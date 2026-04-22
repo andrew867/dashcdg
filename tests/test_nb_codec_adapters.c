@@ -136,6 +136,52 @@ static void test_bluetooth_sbc_roundtrip_produces_pcm(void) {
     dashcdg_bt_sbc_encoder_destroy(enc);
 }
 
+static void test_qcelp8k_roundtrip_produces_pcm(void) {
+    void *enc = NULL;
+    void *dec = NULL;
+    int16_t pcm_in[DASHCDG_TEST_PCM48_STEREO_SAMPLES];
+    int16_t pcm_out[DASHCDG_TEST_PCM48_STEREO_SAMPLES];
+    uint8_t packet[128];
+    int encoded;
+    int decoded;
+    int64_t energy = 0;
+    size_t i;
+
+    dashcdg_fill_test_stereo_program(pcm_in, DASHCDG_TEST_PCM48_FRAMES);
+
+    assert(dashcdg_qcelp8k_encoder_create(&enc) == 1);
+    assert(enc != NULL);
+    assert(dashcdg_qcelp8k_decoder_create(&dec) == 1);
+    assert(dec != NULL);
+
+    encoded = dashcdg_qcelp8k_encode_pcm48_stereo_frame(
+            enc,
+            pcm_in,
+            DASHCDG_TEST_PCM48_STEREO_SAMPLES,
+            packet,
+            sizeof(packet)
+    );
+    assert(encoded > 0);
+
+    decoded = dashcdg_qcelp8k_decode_to_pcm48_stereo(
+            dec,
+            packet,
+            (size_t) encoded,
+            pcm_out,
+            DASHCDG_TEST_PCM48_STEREO_SAMPLES
+    );
+    assert(decoded == (int) DASHCDG_TEST_PCM48_FRAMES);
+
+    for (i = 0U; i < DASHCDG_TEST_PCM48_STEREO_SAMPLES; ++i) {
+        int32_t s = pcm_out[i];
+        energy += (int64_t) s * (int64_t) s;
+    }
+    assert(energy > 1000000LL);
+
+    dashcdg_qcelp8k_decoder_destroy(dec);
+    dashcdg_qcelp8k_encoder_destroy(enc);
+}
+
 static void test_amr_wb_roundtrip_produces_pcm(void) {
     void *enc = NULL;
     void *dec = NULL;
@@ -346,6 +392,7 @@ int main(void) {
     test_amr_wb_roundtrip_produces_pcm();
     test_amr_nb_roundtrip_produces_pcm();
     test_evrc_roundtrip_produces_pcm();
+    test_qcelp8k_roundtrip_produces_pcm();
     test_bluetooth_sbc_roundtrip_produces_pcm();
     test_evrc_repeated_recreate_roundtrip_stays_stable();
     test_amr_nb_encoders_keep_independent_overlap_state();

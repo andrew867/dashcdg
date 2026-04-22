@@ -1692,9 +1692,9 @@ static int dashcdg_tx_apply_v4_audio_codec_name(const char *name, const char *ar
         g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_CELP13K;
         return 1;
     }
-    if (strcmp(name, "evrc") == 0) {
+    if (strcmp(name, "qcelp8k") == 0 || strcmp(name, "evrc") == 0) {
         g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
-        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+        g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_QCELP8K;
         return 1;
     }
     if (strcmp(name, "amr-nb") == 0) {
@@ -1714,7 +1714,7 @@ static int dashcdg_tx_apply_v4_audio_codec_name(const char *name, const char *ar
     }
     fprintf(
             stderr,
-            "%s: unknown v4 audio codec %s (try opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc)\n",
+            "%s: unknown v4 audio codec %s (try opus|sbc-like|celp13k|qcelp8k|amr-nb|amr-wb|bluetooth-sbc)\n",
             prog,
             name
     );
@@ -1737,8 +1737,8 @@ static const char *dashcdg_tx_v4_codec_cli_name(uint8_t codec_id) {
         return "sbc-like";
     case DASHCDG_V4_AUDIO_CODEC_CELP13K:
         return "celp13k";
-    case DASHCDG_V4_AUDIO_CODEC_EVRC:
-        return "evrc";
+    case DASHCDG_V4_AUDIO_CODEC_QCELP8K:
+        return "qcelp8k";
     case DASHCDG_V4_AUDIO_CODEC_AMR_NB:
         return "amr-nb";
     case DASHCDG_V4_AUDIO_CODEC_AMR_WB:
@@ -1775,7 +1775,7 @@ static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
     static const uint8_t cycle[] = {
             DASHCDG_V4_AUDIO_CODEC_AMR_WB,
             DASHCDG_V4_AUDIO_CODEC_AMR_NB,
-            DASHCDG_V4_AUDIO_CODEC_EVRC,
+            DASHCDG_V4_AUDIO_CODEC_QCELP8K,
             DASHCDG_V4_AUDIO_CODEC_CELP13K,
             DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC,
     };
@@ -1784,7 +1784,7 @@ static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
             DASHCDG_V4_AUDIO_CODEC_AMR_WB,
             DASHCDG_V4_AUDIO_CODEC_OPUS,
             DASHCDG_V4_AUDIO_CODEC_AMR_NB,
-            DASHCDG_V4_AUDIO_CODEC_EVRC,
+            DASHCDG_V4_AUDIO_CODEC_QCELP8K,
             DASHCDG_V4_AUDIO_CODEC_CELP13K,
             DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC,
     };
@@ -1862,11 +1862,11 @@ static void dashcdg_tx_print_usage(const char *argv0) {
     fprintf(stderr, "default TX library: %s (reshuffled each time the playlist wraps)\n", DASHCDG_DEFAULT_LIBRARY_DIR);
     fprintf(
             stderr,
-            "v4 audio: --v4-audio-codec=opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc\n"
+            "v4 audio: --v4-audio-codec=opus|sbc-like|celp13k|qcelp8k|amr-nb|amr-wb|bluetooth-sbc\n"
     );
     fprintf(
             stderr,
-            "          --badnet-v4 (resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-evrc\n"
+            "          --badnet-v4 (resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-qcelp8k\n"
     );
     fprintf(stderr, "use --help or -h for full options, defaults, and TTY hotkeys.\n");
 }
@@ -1916,9 +1916,9 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     );
     fprintf(
             stdout,
-            "v4 audio codec (override): --v4-audio-codec=opus|sbc-like|celp13k|evrc|amr-nb|amr-wb|bluetooth-sbc "
+            "v4 audio codec (override): --v4-audio-codec=opus|sbc-like|celp13k|qcelp8k|amr-nb|amr-wb|bluetooth-sbc "
             "or two-arg --v4-audio-codec <name>.\n"
-            "Shorthand: --badnet-v4 (same as resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-evrc.\n\n"
+            "Shorthand: --badnet-v4 (same as resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-qcelp8k.\n\n"
     );
     fprintf(
             stdout,
@@ -4048,8 +4048,8 @@ static int dashcdg_tx_init_audio_encoder_for_codec(
         dashcdg_amr_nb_encoder_create(amr_nb_encoder);
         return amr_nb_encoder != NULL && *amr_nb_encoder != NULL;
     }
-    if (codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
-        return dashcdg_evrc_encoder_create(evrc_encoder);
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K) {
+        return dashcdg_qcelp8k_encoder_create(evrc_encoder);
     }
     if (codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
         return dashcdg_qcelp13k_encoder_create(qcelp_encoder);
@@ -4118,9 +4118,9 @@ static void dashcdg_tx_destroy_audio_encoder_for_codec(
         }
         return;
     }
-    if (codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K) {
         if (evrc_encoder != NULL && *evrc_encoder != NULL) {
-            dashcdg_evrc_encoder_destroy(*evrc_encoder);
+            dashcdg_qcelp8k_encoder_destroy(*evrc_encoder);
             *evrc_encoder = NULL;
         }
         return;
@@ -4196,11 +4196,11 @@ static int dashcdg_tx_build_encoded_silence_for_codec(
                 encoded_bytes,
                 DASHCDG_MAX_AUDIO_FRAME_BYTES
         );
-    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
-        if (!dashcdg_evrc_encoder_create(&evrc_encoder)) {
+    } else if (codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K) {
+        if (!dashcdg_qcelp8k_encoder_create(&evrc_encoder)) {
             return 0;
         }
-        encoded = dashcdg_evrc_encode_pcm48_stereo_frame(
+        encoded = dashcdg_qcelp8k_encode_pcm48_stereo_frame(
                 evrc_encoder,
                 stereo_pcm,
                 DASHCDG_AUDIO_FRAME_SAMPLES * 2U,
@@ -4328,7 +4328,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                     amr_nb_encoder = NULL;
                 }
                 if (evrc_encoder != NULL) {
-                    dashcdg_evrc_encoder_destroy(evrc_encoder);
+                    dashcdg_qcelp8k_encoder_destroy(evrc_encoder);
                     evrc_encoder = NULL;
                 }
                 if (qcelp_encoder != NULL) {
@@ -4444,7 +4444,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         amr_nb_encoder = NULL;
                     }
                     if (evrc_encoder != NULL) {
-                        dashcdg_evrc_encoder_destroy(evrc_encoder);
+                        dashcdg_qcelp8k_encoder_destroy(evrc_encoder);
                         evrc_encoder = NULL;
                     }
                     if (qcelp_encoder != NULL) {
@@ -4573,7 +4573,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                     memcpy(mono_pcm, pcm, copy_frames * sizeof(int16_t));
                 }
 
-                if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
+                if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K ||
                         current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
                         current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
                     if (tx_nb_hp_tracking_codec != current_codec_id) {
@@ -4611,7 +4611,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                 }
 
                 if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
-                    if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
+                    if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K ||
                             current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
                         if (DASHCDG_AUDIO_CHANNELS >= 2U) {
                             dashcdg_pcm_interleaved_s16_gain_q15_inplace(
@@ -4687,7 +4687,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                             frame.encoded_bytes,
                             sizeof(frame.encoded_bytes)
                     );
-                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC) {
+                } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K) {
                     int16_t stereo_work[DASHCDG_AUDIO_FRAME_SAMPLES * 2U];
                     const int16_t *src = pcm;
                     size_t stereo_samples = copy_frames * 2U;
@@ -4699,7 +4699,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                             dashcdg_tx_expand_mono_to_stereo_interleaved(mono_pcm, stereo_work, copy_frames);
                             src = stereo_work;
                         }
-                        encoded_length = dashcdg_evrc_encode_pcm48_stereo_frame(
+                        encoded_length = dashcdg_qcelp8k_encode_pcm48_stereo_frame(
                                 evrc_encoder,
                                 src,
                                 stereo_samples,
@@ -4872,7 +4872,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
         amr_nb_encoder = NULL;
     }
     if (evrc_encoder != NULL) {
-        dashcdg_evrc_encoder_destroy(evrc_encoder);
+        dashcdg_qcelp8k_encoder_destroy(evrc_encoder);
         evrc_encoder = NULL;
     }
     if (qcelp_encoder != NULL) {
@@ -5370,7 +5370,7 @@ static void dashcdg_tx_print_controls_help(void) {
     fprintf(
             stdout,
             "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, "
-            "f=force-broadcast, c=cycle v4 audio codec, 1=opus, 2=amr-nb, 3=evrc, 4=celp13k, 5=bluetooth-sbc, 6=amr-wb, "
+            "f=force-broadcast, c=cycle v4 audio codec, 1=opus, 2=amr-nb, 3=qcelp8k, 4=celp13k, 5=bluetooth-sbc, 6=amr-wb, "
             "s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
     );
     fflush(stdout);
@@ -5467,7 +5467,7 @@ static int dashcdg_tx_handle_command(int command) {
             } else if (command == '2') {
                 codec_id = DASHCDG_V4_AUDIO_CODEC_AMR_NB;
             } else if (command == '3') {
-                codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+                codec_id = DASHCDG_V4_AUDIO_CODEC_QCELP8K;
             } else if (command == '4') {
                 codec_id = DASHCDG_V4_AUDIO_CODEC_CELP13K;
             } else if (command == '5') {
@@ -6696,10 +6696,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_SBC_LIKE;
             continue;
         }
-        if (strcmp(argv[i], "--badnet-v4-evrc") == 0) {
+        if (strcmp(argv[i], "--badnet-v4-qcelp8k") == 0 || strcmp(argv[i], "--badnet-v4-evrc") == 0) {
             g_tx_state.transport_v4_enabled = 1;
             g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_RESILIENCE;
-            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_EVRC;
+            g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_QCELP8K;
             continue;
         }
         if (strcmp(argv[i], "--tx-preview-delay-ms") == 0) {

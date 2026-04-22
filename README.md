@@ -11,7 +11,7 @@ Longer version of the same idea: [`docs/fork-manifesto.md`](docs/fork-manifesto.
 - deterministic CD+G decode, replay, and seek
 - a versioned UDP-friendly wire protocol (v4 on the wire by default; `--v3` for legacy)
 - desktop TX/RX apps for multicast and IPv4 broadcast
-- live on-wire audio (Opus, AMR-WB/NB, EVRC, QCELP-13k, NB-IMA, Bluetooth SBC) plus timed CD+G, snapshots, and bounded FEC
+- live on-wire audio (Opus, AMR-WB/NB, QCELP-13k, low-rate QCELP, NB-IMA, Bluetooth SBC) plus timed CD+G, snapshots, and bounded FEC
 
 The desktop TX path sends audio and CD+G in parallel; RX can cold-join, repair, and re-anchor from v4 snapshots/anchors without rebuilding a full `.cdg` asset on the wire. **Windows** builds include headless `desktop-tx`, GL-first `desktop-rx` with GDI fallback, dedicated **`desktop-gdi-rx.exe` / `desktop-gdi-tx.exe`**, and a **retro** Win32 bundle without OpenGL (still **Opus + PortAudio** with PIII-safe vendored DLLs on i686). Canonical matrix: [`docs/specs/desktop-platform-support.md`](docs/specs/desktop-platform-support.md).
 
@@ -145,7 +145,7 @@ build/bin/desktop-player [--shuffle] [<folder> | <file.cdg>|<file.mp3>|<file-ste
 Network modes via player:
 
 ```sh
-build/bin/desktop-player tx [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-evrc] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
+build/bin/desktop-player tx [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--v4-audio-codec=<name>] [--badnet-v4|--badnet-v4-sbc|--badnet-v4-qcelp8k] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]
 build/bin/desktop-player rx [--help] [--headless] [--gdi] [endpoint-address] [port]
 ```
 

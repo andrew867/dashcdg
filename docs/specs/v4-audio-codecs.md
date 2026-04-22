@@ -3,7 +3,7 @@
 This document is the **specification and integration map** for v4 `audio_codec_id` values and how DashCDG implements them. Goals:
 
 - **ESP32-class MCUs** and other targets without FPUs should be able to ship a **fixed-point** narrowband receive path using **first-party** code in `core/` for the **NB-IMA** baseline (`id 2`), without requiring optional vendor trees for that baseline wire format.
-- **Desktop** uses **libopus** for the quality path (`audio_codec_id = 1`) and native desktop adapters for AMR-WB/NB, EVRC, QCELP-13k, and Bluetooth SBC (`ids 3–7`) in the current tree.
+- **Desktop** uses **libopus** for the quality path (`audio_codec_id = 1`) and native desktop adapters for AMR-WB/NB, low-rate QCELP, QCELP-13k, and Bluetooth SBC (`ids 3–7`) in the current tree.
 
 **Module layout:** each codec has an **`audio_modules/<name>/`** tree. Populate upstream sources with **`scripts/fetch_audio_codec_vendors.sh`** (see `audio_modules/README.md`).
 
@@ -16,7 +16,7 @@ Canonical **NB-IMA** implementation: **`core/include/dashcdg/nb_ima_codec.h`** +
 | 1 | `opus` | Opus (`48 kHz` mono in session info) — **libopus** |
 | 2 | `sbc-like` | NB-IMA (`dashcdg_nb_ima_*`) — `core/src/nb_ima_codec.c` |
 | 3 | `celp13k` | QCELP-13 packed frame (18 LE 16-bit words) — `audio_modules/qcelp` + `nb_qcelp_codec.c` |
-| 4 | `evrc` | EVRC 8 kbit/s packet octets — `audio_modules/evr` + `nb_evrc_codec.c` |
+| 4 | `qcelp8k` | lower-rate QCELP packed frame using the desktop QCELP adapter at a reduced target rate — `audio_modules/qcelp` + `nb_qcelp_codec.c` |
 | 5 | `amr-nb` | AMR-NB IF2 octets — `audio_modules/amr` + `amr_nb_codec.c` |
 | 6 | `amr-wb` | AMR-WB IF2 octets (encoder mode 8 → ~23.85 kb/s class) — `audio_modules/amr` + `amr_wb_codec.c` |
 | 7 | `bluetooth-sbc` | SBC multi-frame blob (`dashcdg_bt_sbc_*`) — `audio_modules/bt_sbc` + `nb_sbc_codec.c` |
@@ -26,7 +26,8 @@ Canonical **NB-IMA** implementation: **`core/include/dashcdg/nb_ima_codec.h`** +
 - **`dashcdg_v4_audio_codec_is_narrowband()`** — ids **2–7** (everything except Opus at 48 kHz).
 - **`dashcdg_v4_audio_codec_is_nb_ima_payload()`** — **id 2 only** (NB-IMA wire layout).
 - **`dashcdg_v4_audio_codec_is_amr()`** — ids **5–6**.
-- **`dashcdg_v4_audio_codec_is_evrc()` / `is_qcelp13k()` / `is_bluetooth_sbc()`** — ids **4 / 3 / 7**.
+- **`dashcdg_v4_audio_codec_is_qcelp8k()` / `is_qcelp13k()` / `is_bluetooth_sbc()`** — ids **4 / 3 / 7**.
+- **`dashcdg_v4_audio_codec_is_evrc()`** remains as a compatibility alias for legacy callers that still treat wire id **4** as the old EVRC slot.
 
 ## Fixed-point / MCU notes
 
@@ -43,10 +44,10 @@ The following affect **PCM before/after encode** on Windows desktop only; they d
 
 ## Command-line selector (TX)
 
-- **`--v4-audio-codec=<name>`** / **`--v4-audio-codec <name>`** — `opus`, `sbc-like`, `celp13k`, `evrc`, `amr-nb`, `amr-wb`, `bluetooth-sbc`.
+- **`--v4-audio-codec=<name>`** / **`--v4-audio-codec <name>`** — `opus`, `sbc-like`, `celp13k`, `qcelp8k`, `amr-nb`, `amr-wb`, `bluetooth-sbc`. Legacy `evrc` is accepted as an alias for `qcelp8k`.
 - **`--badnet-v4`** — v4 on, resilience profile, codec **amr-wb** (same as current non-retro desktop default).
 - **`--badnet-v4-sbc`** — resilience + wire id **2** (NB-IMA).
-- **`--badnet-v4-evrc`** — resilience + wire id **4** (EVRC).
+- **`--badnet-v4-qcelp8k`** — resilience + wire id **4** (low-rate QCELP). Legacy `--badnet-v4-evrc` is still accepted as an alias.
 - **`--audio-profile=quality`** — quality profile + **Opus** (non-retro builds).
 - **`--audio-profile=resilience`** — sets the **resilience/FEC profile** only; it does **not** change `audio_codec_id` (default remains **amr-wb** unless you also pass **`--v4-audio-codec`**).
 - **`--help` / `-h`** — full synopsis and defaults.
@@ -56,7 +57,7 @@ The following affect **PCM before/after encode** on Windows desktop only; they d
 ## RX behaviour
 
 - Copy **`song_id`** and timing fields from `v4_session_info` into receiver state.
-- **Decode:** branch on `audio_codec_id` (and per-frame `codec_id` on audio chunks) — Opus vs AMR vs NB-IMA vs EVRC / QCELP / SBC blobs per the table above.
+- **Decode:** branch on `audio_codec_id` (and per-frame `codec_id` on audio chunks) — Opus vs AMR vs NB-IMA vs low-rate QCELP / QCELP-13k / SBC blobs per the table above.
 - When **`audio_codec_id` changes** between session_info packets, the receiver resets the asset receiver where required, **reconfigures PortAudio and decoders**, and continues (same session clock where applicable).
 - **Playout buffer:** the device-side PCM ring in `app_rx.c` is capped the same for narrowband and Opus (see `dashcdg_rx_network_stream_ring_ms`); jitter handling stays in the core audio jitter buffer.
 

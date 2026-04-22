@@ -12,7 +12,7 @@ Baseline today is:
 
 - **`core/src/nb_ima_codec.c`** for the fixed-point **NB-IMA** path on wire id **2**
 - **desktop `opus_codec`** for wire id **1**
-- desktop native adapters for **AMR-NB**, **AMR-WB**, **EVRC**, **QCELP-13k**, and **Bluetooth SBC** on wire ids **3–7**
+- desktop native adapters for **AMR-NB**, **AMR-WB**, **QCELP-13k**, **low-rate QCELP**, and **Bluetooth SBC** on wire ids **3–7**
 
 This document now serves as an inventory and boundary note, not a “future placeholder codec” plan.
 
@@ -23,8 +23,8 @@ This document now serves as an inventory and boundary note, not a “future plac
 | `audio_modules/nb_ima/` | v4 id **2** baseline; canonical CLI name `sbc-like` | **First-party** — `core/include/dashcdg/nb_ima_codec.h`, `core/src/nb_ima_codec.c` | Shipped |
 | `audio_modules/opus/` | v4 id **1** | **libopus** via `platform/desktop/src/opus_codec.c` + system `-lopus` (optional **`vendor/opus`** build — see [`vendored-opus-portaudio-windows.md`](vendored-opus-portaudio-windows.md)) | Shipped (desktop) |
 | `audio_modules/amr_pschatzmann/` | v4 ids **5** (NB), **6** (WB) | [pschatzmann/codec-amr](https://github.com/pschatzmann/codec-amr) — wraps 3GPP reference; [API docs](https://pschatzmann.github.io/codec-amr/html/index.html) | Shipped on desktop through `amr_nb_codec.c` / `amr_wb_codec.c` |
-| `audio_modules/evrc_arulk77/` | v4 id **4** | [arulk77/gpu.evrc](https://github.com/arulk77/gpu.evrc) | Shipped on desktop through `nb_evrc_codec.c` |
-| `audio_modules/evrc_maolin/` | alternate / second opinion for id **4** | [maolin-cdzl/evrcc](https://github.com/maolin-cdzl/evrcc) | **Vendor copy** + adapter; pick **one** primary tree for product, keep other as research |
+| `audio_modules/evrc_arulk77/` | former v4 id **4** research path | [arulk77/gpu.evrc](https://github.com/arulk77/gpu.evrc) | No longer in the default desktop runtime path; retained as a research/vendor reference only |
+| `audio_modules/evrc_maolin/` | alternate / second opinion for former id **4** | [maolin-cdzl/evrcc](https://github.com/maolin-cdzl/evrcc) | **Vendor copy** kept for research and compatibility experiments, not the operator-facing default |
 | `audio_modules/qcelp_rupw/` | v4 id **3** | [RupW/celp13k](https://github.com/RupW/celp13k) — [RFC 3625](https://datatracker.ietf.org/doc/html/rfc3625) QCP | Shipped on desktop through `nb_qcelp_codec.c` |
 | `audio_modules/bluetooth_sbc_kernel/` | v4 id **7** | [kernel.org `sbc.git`](https://git.kernel.org/pub/scm/bluetooth/sbc.git) — **LGPL-2.1+** | Shipped on desktop through `nb_sbc_codec.c`; MCU/static-link policy still requires review |
 

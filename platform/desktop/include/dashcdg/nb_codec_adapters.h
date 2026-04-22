@@ -46,6 +46,26 @@ int dashcdg_qcelp13k_decode_to_pcm48_stereo(
         size_t pcm_samples_max
 );
 
+int dashcdg_qcelp8k_encoder_create(void **out_ctx);
+void dashcdg_qcelp8k_encoder_destroy(void *ctx);
+int dashcdg_qcelp8k_encode_pcm48_stereo_frame(
+        void *ctx,
+        const int16_t *pcm48_interleaved,
+        size_t pcm_samples,
+        uint8_t *out,
+        size_t out_max
+);
+
+int dashcdg_qcelp8k_decoder_create(void **out_ctx);
+void dashcdg_qcelp8k_decoder_destroy(void *ctx);
+int dashcdg_qcelp8k_decode_to_pcm48_stereo(
+        void *ctx,
+        const uint8_t *in,
+        size_t in_len,
+        int16_t *pcm48_interleaved,
+        size_t pcm_samples_max
+);
+
 int dashcdg_bt_sbc_encoder_create(void **out_ctx);
 void dashcdg_bt_sbc_encoder_destroy(void *ctx);
 int dashcdg_bt_sbc_encode_pcm48_stereo_frame(

@@ -77,8 +77,12 @@ int dashcdg_v4_audio_codec_is_amr(uint8_t codec_id) {
     return codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB || codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_WB;
 }
 
+int dashcdg_v4_audio_codec_is_qcelp8k(uint8_t codec_id) {
+    return codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K ? 1 : 0;
+}
+
 int dashcdg_v4_audio_codec_is_evrc(uint8_t codec_id) {
-    return codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ? 1 : 0;
+    return codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K ? 1 : 0;
 }
 
 int dashcdg_v4_audio_codec_is_qcelp13k(uint8_t codec_id) {

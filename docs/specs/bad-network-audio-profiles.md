@@ -60,7 +60,7 @@ Target behavior:
 Current desktop lock:
 
 - codec family: **AMR-WB** by default for resilience on non-retro desktop TX
-- operator overrides: `--badnet-v4-sbc` (NB-IMA / id 2) and `--badnet-v4-evrc` remain available as explicit alternates
+- operator overrides: `--badnet-v4-sbc` (NB-IMA / id 2) and `--badnet-v4-qcelp8k` remain available as explicit alternates; `--badnet-v4-evrc` is retained only as a compatibility alias for the same id-4 low-rate QCELP path
 - target purpose:
   - lower steady-state bitrate than `quality`
   - faster and more robust startup than the quality/Opus path on impaired links
@@ -84,7 +84,7 @@ instantiate either decoder immediately:
 
 - `audio_profile_id = quality | resilience`
 - `audio_codec_id` — see [v4-audio-codecs.md](v4-audio-codecs.md): **`1` = Opus**,
-  **`2` = NB-IMA**, **`3` = QCELP-13k**, **`4` = EVRC**, **`5` = AMR-NB**, **`6` = AMR-WB**, **`7` = Bluetooth SBC**
+  **`2` = NB-IMA**, **`3` = QCELP-13k**, **`4` = QCELP8K**, **`5` = AMR-NB**, **`6` = AMR-WB**, **`7` = Bluetooth SBC**
 - `sample_rate`
 - `channels`
 - `frame_ms`

@@ -32,6 +32,36 @@ struct dashcdg_qcelp13k_codec {
     int16_t work_out[1600];
 };
 
+static int dashcdg_qcelp_codec_init(
+        struct dashcdg_qcelp13k_codec *c,
+        float avg_rate,
+        int decoder_only
+) {
+    if (c == NULL) {
+        return 0;
+    }
+    memset(&c->enc_mem, 0, sizeof(c->enc_mem));
+    memset(&c->dec_mem, 0, sizeof(c->dec_mem));
+    memset(&c->packet, 0, sizeof(c->packet));
+    memset(&c->control, 0, sizeof(c->control));
+    c->control.min_rate = EIGHTH;
+    c->control.max_rate = decoder_only ? FULLRATE_VOICED : HALFRATE_VOICED;
+    c->control.avg_rate = avg_rate;
+    c->control.target_snr_thr = 10.0f;
+    c->control.num_frames = UNLIMITED;
+    c->control.pf_flag = YES;
+    c->control.pitch_post = YES;
+    c->control.celp_file_format = FORMAT_PACKET;
+    trans_fname = NULL;
+    tty_option = 0;
+    memset(c->in_workspace, 0, sizeof(c->in_workspace));
+    memset(c->out_speech, 0, sizeof(c->out_speech));
+    initialize_encoder_and_decoder(&c->enc_mem, &c->dec_mem, &c->control);
+    c->encoder_ready = decoder_only ? 0 : 1;
+    c->decoder_ready = 1;
+    return 1;
+}
+
 static void dashcdg_float_mono_8k_to_pcm48_stereo(
         struct dashcdg_qcelp13k_codec *c,
         const float *mono_float,
@@ -79,24 +109,10 @@ int dashcdg_qcelp13k_encoder_create(void **out_ctx) {
     if (c == NULL) {
         return 0;
     }
-    memset(&c->enc_mem, 0, sizeof(c->enc_mem));
-    memset(&c->dec_mem, 0, sizeof(c->dec_mem));
-    memset(&c->packet, 0, sizeof(c->packet));
-    memset(&c->control, 0, sizeof(c->control));
-    c->control.min_rate = EIGHTH;
-    c->control.max_rate = FULLRATE_VOICED;
-    c->control.avg_rate = 14.4f;
-    c->control.target_snr_thr = 10.0f;
-    c->control.num_frames = UNLIMITED;
-    c->control.pf_flag = YES;
-    c->control.pitch_post = YES;
-    c->control.celp_file_format = FORMAT_PACKET;
-    trans_fname = NULL;
-    tty_option = 0;
-    memset(c->in_workspace, 0, sizeof(c->in_workspace));
-    memset(c->out_speech, 0, sizeof(c->out_speech));
-    initialize_encoder_and_decoder(&c->enc_mem, &c->dec_mem, &c->control);
-    c->encoder_ready = 1;
+    if (!dashcdg_qcelp_codec_init(c, 14.4f, 0)) {
+        free(c);
+        return 0;
+    }
     *out_ctx = c;
     return 1;
 }
@@ -177,21 +193,10 @@ int dashcdg_qcelp13k_decoder_create(void **out_ctx) {
     if (c == NULL) {
         return 0;
     }
-    memset(&c->enc_mem, 0, sizeof(c->enc_mem));
-    memset(&c->dec_mem, 0, sizeof(c->dec_mem));
-    memset(&c->packet, 0, sizeof(c->packet));
-    memset(&c->control, 0, sizeof(c->control));
-    c->control.min_rate = EIGHTH;
-    c->control.max_rate = FULLRATE_VOICED;
-    c->control.avg_rate = 14.4f;
-    c->control.target_snr_thr = 10.0f;
-    c->control.num_frames = UNLIMITED;
-    c->control.pf_flag = YES;
-    c->control.pitch_post = YES;
-    trans_fname = NULL;
-    tty_option = 0;
-    initialize_encoder_and_decoder(&c->enc_mem, &c->dec_mem, &c->control);
-    c->decoder_ready = 1;
+    if (!dashcdg_qcelp_codec_init(c, 14.4f, 1)) {
+        free(c);
+        return 0;
+    }
     *out_ctx = c;
     return 1;
 }
@@ -224,6 +229,70 @@ int dashcdg_qcelp13k_decode_to_pcm48_stereo(
     decoder(c->out_speech, &c->packet, &c->control, &c->dec_mem);
     dashcdg_float_mono_8k_to_pcm48_stereo(c, c->out_speech, pcm48_interleaved, 960U * 2U);
     return 960;
+}
+
+int dashcdg_qcelp8k_encoder_create(void **out_ctx) {
+    struct dashcdg_qcelp13k_codec *c;
+
+    if (out_ctx == NULL) {
+        return 0;
+    }
+    c = (struct dashcdg_qcelp13k_codec *) calloc(1, sizeof(*c));
+    if (c == NULL) {
+        return 0;
+    }
+    if (!dashcdg_qcelp_codec_init(c, 9.0f, 0)) {
+        free(c);
+        return 0;
+    }
+    *out_ctx = c;
+    return 1;
+}
+
+void dashcdg_qcelp8k_encoder_destroy(void *ctx) {
+    dashcdg_qcelp13k_encoder_destroy(ctx);
+}
+
+int dashcdg_qcelp8k_encode_pcm48_stereo_frame(
+        void *ctx,
+        const int16_t *pcm48_interleaved,
+        size_t pcm_samples,
+        uint8_t *out,
+        size_t out_max
+) {
+    return dashcdg_qcelp13k_encode_pcm48_stereo_frame(ctx, pcm48_interleaved, pcm_samples, out, out_max);
+}
+
+int dashcdg_qcelp8k_decoder_create(void **out_ctx) {
+    struct dashcdg_qcelp13k_codec *c;
+
+    if (out_ctx == NULL) {
+        return 0;
+    }
+    c = (struct dashcdg_qcelp13k_codec *) calloc(1, sizeof(*c));
+    if (c == NULL) {
+        return 0;
+    }
+    if (!dashcdg_qcelp_codec_init(c, 9.0f, 1)) {
+        free(c);
+        return 0;
+    }
+    *out_ctx = c;
+    return 1;
+}
+
+void dashcdg_qcelp8k_decoder_destroy(void *ctx) {
+    dashcdg_qcelp13k_encoder_destroy(ctx);
+}
+
+int dashcdg_qcelp8k_decode_to_pcm48_stereo(
+        void *ctx,
+        const uint8_t *in,
+        size_t in_len,
+        int16_t *pcm48_interleaved,
+        size_t pcm_samples_max
+) {
+    return dashcdg_qcelp13k_decode_to_pcm48_stereo(ctx, in, in_len, pcm48_interleaved, pcm_samples_max);
 }
 
 /*

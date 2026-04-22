@@ -34,6 +34,7 @@ Scope:
 - XP/P3 crash and recovery paths
 - host-underrun / sender-idle / auto-recover behavior
 - resilient-profile startup defaults and runway behavior
+- codec-switch closeout, including retirement of unstable EVRC operator paths in favor of the lower-rate QCELP id-4 path
 
 Exit criteria:
 

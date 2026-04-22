@@ -17,7 +17,7 @@ Built from `platform/desktop/src/` with shared core/proto libs.
 | --- | --- | --- |
 | `desktop-tx.exe` | **Headless** transmitter (Windows build) | No OpenGL/FreeGLUT in this link: server-style TX only. **Protocol v4 by default** (`--v3` for legacy v3 loop). **Default audio:** resilience profile + **AMR-WB** (`--v4-audio-codec=amr-wb`); use `--audio-profile=quality` for Opus or `--v4-audio-codec=…` for other ids. **`--audio-profile=resilience`** does not override the codec. **`--help`** lists flags; TTY **`c`** cycles codecs. See [v4-audio-codecs.md](v4-audio-codecs.md). On Linux/macOS, `desktop-tx` is still the GL-capable object: default **no** window unless `--display` (use `desktop-player tx` for preview-on-by-default). |
 | `desktop-gdi-tx.exe` | Transmitter + **Win32 GDI** preview (Windows) | No GL. Preview window **on** by default; `--headless` to hide. Same v4 codec defaults as `desktop-tx`. No local speaker monitor path (network send only, same as before). |
-| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Decodes Opus, AMR-WB/NB, NB-IMA, EVRC, QCELP-13k, or SBC per **`v4_session_info`** / chunk `codec_id`; **`--help`** documents behaviour. |
+| `desktop-rx.exe` | Receiver, **OpenGL default** (Windows) | Tries GL first; **auto Win32 GDI** if `gl_renderer` init fails. `--gdi` or `--win-gdi` forces GDI. Decodes Opus, AMR-WB/NB, NB-IMA, low-rate QCELP, QCELP-13k, or SBC per **`v4_session_info`** / chunk `codec_id`; **`--help`** documents behaviour. |
 | `desktop-gdi-rx.exe` | GDI-only receiver link | No GL imports. Opus + PortAudio. |
 | `desktop-retro-tx.exe` | Retro transmitter | `WINDOWS_RETRO_BUNDLE=1`: GDI-era PE, no GL; links **Opus + PortAudio** (PIII-safe DLLs); default v4 codec **Opus** (change with `c` / flags). |
 | `desktop-retro-rx.exe` | Retro GDI receiver | GDI + **PortAudio** output; **Opus** decode + other v4 codecs per session. |
@@ -132,9 +132,9 @@ Not allowed without new proof:
 Documented in detail in [`v4-audio-codecs.md`](v4-audio-codecs.md):
 
 - **`--help` / `-h`** — full synopsis, defaults (**AMR-WB** on non-retro builds), and TTY hotkeys (**`c`** cycles codecs).
-- `--v4-audio-codec=<name>` / `--v4-audio-codec <name>` — select v4 `audio_codec_id` (`opus`, `sbc-like`, `celp13k`, `evrc`, `amr-nb`, `amr-wb`, `bluetooth-sbc`).
+- `--v4-audio-codec=<name>` / `--v4-audio-codec <name>` — select v4 `audio_codec_id` (`opus`, `sbc-like`, `celp13k`, `qcelp8k`, `amr-nb`, `amr-wb`, `bluetooth-sbc`; legacy `evrc` alias still accepted for id 4).
 - `--badnet-v4` — v4 + resilience + **amr-wb** (shorthand for the same default as a fresh TX).
-- `--badnet-v4-sbc`, `--badnet-v4-evrc` — resilience + wire id **2** or **4**.
+- `--badnet-v4-sbc`, `--badnet-v4-qcelp8k` — resilience + wire id **2** or **4** (`--badnet-v4-evrc` remains a compatibility alias for id 4).
 - `--audio-profile=resilience` — sets the resilience **profile** only; does **not** change the selected `audio_codec_id`.
 
 ## Further reading
