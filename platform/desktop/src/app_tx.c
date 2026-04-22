@@ -2186,15 +2186,19 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
             (g_tx_state.v4_video_anchor_bytes == NULL || g_tx_state.v4_video_anchor_offset >= g_tx_state.v4_video_anchor_size) &&
             (g_tx_state.last_v4_video_anchor_ms == 0U ||
              now_ms - g_tx_state.last_v4_video_anchor_ms >= DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS)) {
-        if (!g_tx_state.v4_anchor_first_full_delivery_done && g_tx_state.v4_video_anchor_id == 0U) {
+        if (!g_tx_state.v4_anchor_first_full_delivery_done &&
+                g_tx_state.v4_video_anchor_id == 0U &&
+                g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             /*
-             * The first startup anchor must represent the exact track-start canvas.
-             * If we derive it from next_cdg_batch_index after any startup live deltas
-             * have already advanced, receivers can briefly show the true first block,
-             * then the first anchor/snapshot replaces the canvas from a later packet
-             * boundary and wipes that left-edge content back to background colour.
+             * Seek(0) is the empty pre-track canvas, not the first visible CDG state.
+             * The startup anchor must therefore cover at least the first emitted batch,
+             * otherwise RX applies an empty anchor after the first live paint and wipes
+             * the left edge back to background colour.
              */
-            anchor_packet_index = 0U;
+            const struct dashcdg_tx_cdg_batch *first_batch =
+                    &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
+
+            anchor_packet_index = first_batch->packet_start_index + (uint64_t) first_batch->packet_count;
         } else if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             anchor_packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
         } else {
@@ -3453,6 +3457,20 @@ static int dashcdg_tx_send_v4_video_anchor_chunk_locked(uint64_t now_ms, uint8_t
     g_tx_state.v4_video_anchor_offset += chunk_bytes;
     if (g_tx_state.v4_video_anchor_offset >= g_tx_state.v4_video_anchor_size) {
         g_tx_state.v4_anchor_first_full_delivery_done = 1;
+        if (g_tx_state.v4_video_anchor_id == 1U) {
+            while (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
+                const struct dashcdg_tx_cdg_batch *covered_batch =
+                        &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
+                uint64_t covered_end =
+                        covered_batch->packet_start_index + (uint64_t) covered_batch->packet_count;
+
+                if (covered_end > g_tx_state.v4_video_anchor_packet_index) {
+                    break;
+                }
+                dashcdg_tx_apply_cdg_batch_to_state_locked(covered_batch, &g_tx_state.live_cdg_state);
+                g_tx_state.next_cdg_batch_index++;
+            }
+        }
     }
     if (g_tx_state.v4_first_anchor_local_ms == 0U) {
         g_tx_state.v4_first_anchor_local_ms = now_ms;
@@ -5465,8 +5483,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
          * later steady-state anchor refreshes remain repair-only and do not block live deltas.
          */
         if (!g_tx_state.v4_anchor_first_full_delivery_done &&
-                g_tx_state.v4_video_anchor_id == 1U &&
-                g_tx_state.v4_video_anchor_packet_index == 0U) {
+                g_tx_state.v4_video_anchor_id == 1U) {
             startup_anchor_bootstrap_pending = 1;
         }
 
