@@ -120,6 +120,7 @@
 #define DASHCDG_V4_MAX_VIDEO_PER_PASS 2U
 #define DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT 1U
 #define DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS 2U
+#define DASHCDG_V4_STARTUP_VIDEO_DELTA_REDUNDANCY_BATCHES 4U
 #define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 
 static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
@@ -3472,6 +3473,20 @@ static int dashcdg_tx_send_v4_video_delta_locked(
     return 1;
 }
 
+static int dashcdg_tx_should_duplicate_startup_video_batch_locked(const struct dashcdg_tx_cdg_batch *batch) {
+    uint64_t startup_batch_limit;
+
+    if (batch == NULL) {
+        return 0;
+    }
+    if (g_tx_state.v4_video_delta_packets_sent != 0U) {
+        startup_batch_limit = (uint64_t) DASHCDG_V4_STARTUP_VIDEO_DELTA_REDUNDANCY_BATCHES *
+                (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS;
+        return batch->packet_start_index < startup_batch_limit;
+    }
+    return 1;
+}
+
 static int dashcdg_tx_send_fec_parity_locked(
         uint64_t now_ms,
         uint8_t stream_type,
@@ -5404,11 +5419,15 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
                     send_deadline_ms &&
             video_sent < DASHCDG_V4_MAX_VIDEO_PER_PASS) {
         const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
+        int duplicate_startup_batch = dashcdg_tx_should_duplicate_startup_video_batch_locked(batch);
         int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
 
         if (!dashcdg_tx_send_v4_video_delta_locked(now_ms, batch, packet, packet_size)) {
             break;
+        }
+        if (duplicate_startup_batch) {
+            (void) dashcdg_tx_send_v4_video_delta_locked(now_ms, batch, packet, packet_size);
         }
         g_tx_state.cdg_batch_packets_sent++;
         g_tx_state.next_cdg_batch_index++;
