@@ -5420,6 +5420,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
      */
     uint64_t send_deadline_ms = dashcdg_tx_media_send_deadline_ms_locked(now_ms);
     unsigned int video_sent = 0U;
+    int startup_anchor_bootstrap_pending = 0;
 
     if (g_tx_state.last_v4_session_info_ms == 0U ||
             now_ms - g_tx_state.last_v4_session_info_ms >= DASHCDG_V4_SESSION_INFO_INTERVAL_MS) {
@@ -5456,6 +5457,19 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
                 ? (uint64_t) DASHCDG_V4_VIDEO_ANCHOR_CHUNK_INTERVAL_STEADY_MS
                 : (uint64_t) DASHCDG_V4_VIDEO_ANCHOR_CHUNK_INTERVAL_FIRST_MS;
 
+        /*
+         * Do not let the very first live CDG batches outrun the initial startup anchor.
+         * RX is allowed to reject a first anchor if live deltas have already advanced the
+         * jitter cursor past that anchor boundary, which leaves cold joins stuck on
+         * CONNECTING while audio starts. This gate applies only to the first-track bootstrap;
+         * later steady-state anchor refreshes remain repair-only and do not block live deltas.
+         */
+        if (!g_tx_state.v4_anchor_first_full_delivery_done &&
+                g_tx_state.v4_video_anchor_id == 1U &&
+                g_tx_state.v4_video_anchor_packet_index == 0U) {
+            startup_anchor_bootstrap_pending = 1;
+        }
+
         if (g_tx_state.last_v4_video_anchor_chunk_ms == 0U ||
                 now_ms - g_tx_state.last_v4_video_anchor_chunk_ms >= anchor_interval_ms) {
             if (dashcdg_tx_send_v4_video_anchor_chunk_locked(now_ms, packet, packet_size)) {
@@ -5465,6 +5479,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
 
     while (!g_tx_state.paused &&
+            !startup_anchor_bootstrap_pending &&
             send_deadline_ms >= g_tx_state.session_start_ms &&
             g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
             g_tx_state.session_start_ms + g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
