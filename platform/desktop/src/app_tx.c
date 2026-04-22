@@ -163,6 +163,7 @@ static int dashcdg_tx_send_v4_audio_chunk_locked(
         size_t packet_size
 );
 static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t group_id);
+static const struct dashcdg_tx_track *dashcdg_tx_current_track(void);
 static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms);
 static int dashcdg_tx_build_encoded_silence_for_codec(
         uint8_t codec_id,
