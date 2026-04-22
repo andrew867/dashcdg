@@ -43,7 +43,7 @@ static void dashcdg_float_mono_8k_to_pcm48_stereo(
     size_t i;
 
     for (i = 0U; i < FSIZE; ++i) {
-        float s = mono_float[i] * 4.0f;
+        float s = mono_float[i] * 2.0f;
 
         mono8k[i] = dashcdg_pcm_float_soft_limit_to_i16(s);
     }
@@ -150,7 +150,7 @@ int dashcdg_qcelp13k_encode_pcm48_stereo_frame(
     );
     c->enc_stream48_samples += 960U;
     for (i = 0; i < FSIZE; ++i) {
-        c->in_workspace[(LPCSIZE - FSIZE + LPCOFFSET) + i] = (float) mono8k[i] / 4.0f;
+        c->in_workspace[(LPCSIZE - FSIZE + LPCOFFSET) + i] = (float) mono8k[i] / 2.0f;
     }
     encoder(c->in_workspace, &c->packet, &c->control, &c->enc_mem, c->out_speech);
     {

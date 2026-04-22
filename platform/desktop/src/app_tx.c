@@ -4131,8 +4131,14 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
 
                 if (dashcdg_v4_audio_codec_is_narrowband((uint8_t) current_codec_id)) {
                     if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_EVRC ||
-                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K ||
-                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+                            current_codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+                        dashcdg_pcm_interleaved_s16_gain_q15_inplace(
+                                pcm,
+                                copy_frames,
+                                2U,
+                                DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15
+                        );
+                    } else if (current_codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
                         dashcdg_pcm_interleaved_s16_gain_q15_inplace(
                                 pcm,
                                 copy_frames,
@@ -4144,7 +4150,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                                 mono_pcm,
                                 copy_frames,
                                 1U,
-                                DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+                                DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15
                         );
                     }
                 }

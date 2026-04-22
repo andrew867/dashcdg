@@ -43,6 +43,11 @@ void dashcdg_pcm_interleaved_s16_soft_limit_inplace(int16_t *pcm, size_t frame_c
  * DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15 is ~-3 dB (0.707) for speech-codec headroom on hot music.
  */
 #define DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15 23170
+/*
+ * Speech codecs (AMR/EVRC/QCELP) overload more easily than SBC on hot music. Give them a fuller
+ * -6 dB pad before encode so loud sections do not turn into gritty/rattly modulation.
+ */
+#define DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15 16384
 
 void dashcdg_pcm_interleaved_s16_gain_q15_inplace(
         int16_t *pcm,
