@@ -2169,6 +2169,7 @@ static void dashcdg_tx_apply_cdg_batch_to_state_locked(
 static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
     uint8_t raw_snapshot[DASHCDG_CDG_SNAPSHOT_STATE_BYTES];
     uint8_t *encoded = NULL;
+    uint8_t *temp_reader_bytes = NULL;
     uint64_t anchor_packet_index = 0U;
     uint64_t pipeline_generation = 0U;
     size_t raw_length;
@@ -2191,11 +2192,33 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
             raw_length = dashcdg_tx_serialize_cdg_snapshot_state(&g_tx_state.pause_state, raw_snapshot, sizeof(raw_snapshot));
             should_prepare = raw_length != 0U;
         } else {
-            dashcdg_tick_t restore_ts = g_tx_state.reader.state.ts;
+            const uint8_t *memory_view = dashcdg_cdg_source_memory_view(
+                    &g_tx_state.cdg_source,
+                    0U,
+                    g_tx_state.asset_size
+            );
+            struct dashcdg_cdg_reader temp_reader;
+            const uint8_t *reader_bytes = memory_view;
 
-            if (dashcdg_cdg_reader_seek(&g_tx_state.reader, (dashcdg_tick_t) anchor_packet_index) &&
+            dashcdg_cdg_reader_init(&temp_reader);
+            if (reader_bytes == NULL) {
+                temp_reader_bytes = (uint8_t *) malloc(g_tx_state.asset_size);
+                if (temp_reader_bytes != NULL &&
+                        dashcdg_cdg_source_read_bytes(
+                                &g_tx_state.cdg_source,
+                                0U,
+                                temp_reader_bytes,
+                                g_tx_state.asset_size
+                        )) {
+                    reader_bytes = temp_reader_bytes;
+                }
+            }
+            if (reader_bytes != NULL &&
+                    dashcdg_cdg_reader_load_memory(&temp_reader, reader_bytes, g_tx_state.asset_size) &&
+                    dashcdg_cdg_reader_build_keyframes(&temp_reader) &&
+                    dashcdg_cdg_reader_seek(&temp_reader, (dashcdg_tick_t) anchor_packet_index) &&
                     dashcdg_tx_serialize_cdg_snapshot_state(
-                            &g_tx_state.reader.state,
+                            &temp_reader.state,
                             raw_snapshot,
                             sizeof(raw_snapshot)
                     ) == sizeof(raw_snapshot)) {
@@ -2204,18 +2227,20 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
             } else {
                 raw_length = 0U;
             }
-            (void) dashcdg_cdg_reader_seek(&g_tx_state.reader, restore_ts);
+            dashcdg_cdg_reader_free(&temp_reader);
         }
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
     if (!should_prepare) {
+        free(temp_reader_bytes);
         return 0;
     }
 
     max_encoded = 4U + (raw_length * 2U);
     encoded = (uint8_t *) malloc(max_encoded);
     if (encoded == NULL) {
+        free(temp_reader_bytes);
         return 0;
     }
 
@@ -2241,6 +2266,7 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
             !(g_tx_state.v4_video_anchor_bytes == NULL || g_tx_state.v4_video_anchor_offset >= g_tx_state.v4_video_anchor_size)) {
         pthread_mutex_unlock(&g_tx_state.mutex);
         free(encoded);
+        free(temp_reader_bytes);
         return 0;
     }
     free(g_tx_state.v4_video_anchor_bytes);
@@ -2252,6 +2278,7 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
     g_tx_state.v4_video_anchor_packet_index = anchor_packet_index;
     g_tx_state.last_v4_video_anchor_ms = now_ms;
     pthread_mutex_unlock(&g_tx_state.mutex);
+    free(temp_reader_bytes);
     return 1;
 }
 
