@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| **Status** | **Implemented on desktop (2026)** — FIR decimation + Lanczos upsample paths, overlap SRC **`skip_out`** clamp, TX **~80 Hz HPF** + **~3 dB headroom** before NB encode, **Opus** same input gain for parity, soft limiting on hot PCM, codec-handoff startup skip-hold tuning, **idle / unpause** **`playback_base_*`** hygiene; jitter **PLC** and **TX mic linear resample** anti-alias remain optional follow-ups. |
+| **Status** | **Implemented on desktop (2026)** — FIR decimation + Lanczos upsample paths, overlap SRC **`skip_out`** clamp, TX **~80 Hz HPF** + **~3 dB headroom** before speech-codec encode, **Opus bypass** of that speech headroom path, soft limiting on hot PCM, codec-handoff startup skip-hold tuning, **idle / unpause** **`playback_base_*`** hygiene; jitter **PLC** and **TX mic linear resample** anti-alias remain optional follow-ups. |
 | **Scope** | Desktop TX/RX for **v4 narrowband family** (wire ids 2–7) and, where relevant, **Opus at very low bitrates**; “choppy / not continuous / shrill or harsh” reports. |
 | **Related** | [v4-audio-codecs.md](v4-audio-codecs.md), [bad-network-audio-profiles.md](bad-network-audio-profiles.md), [audio-jitter-playout-boundary.md](audio-jitter-playout-boundary.md) |
 
@@ -156,7 +156,7 @@
 Operational fixes landed in **`platform/desktop`** and **`pcm_rate_convert.c`**:
 
 - **Alias / peaks:** Exact-ratio **FIR decimation** for **48 → 8 / 16 kHz** before vocoder encode; Lanczos-style upsampling with **soft saturation** toward **int16** on hot peaks; mono/stereo **overlap SRC** alignment clamp to avoid whole-frame silence at chunk boundaries.
-- **Levels:** **Q15 ~−3 dB** encode headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) on narrowband **and Opus** TX paths; **80 Hz HPF** on TX before NB encode (not applied to Opus); RX no longer stacks a second HPF on NB (avoid cascaded tilt).
+- **Levels:** **Q15 ~−3 dB** encode headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) on speech-codec TX paths; **Opus** now bypasses that pad. **80 Hz HPF** remains TX-before-narrowband only; RX no longer stacks a second HPF on NB (avoid cascaded tilt).
 - **Transport feel:** **Warm** startup skip-hold when codec swaps mid-stream; **cold** idle→TX and **resume** clear **`playback_base_*`** so **`claim_audio_start`** and jitter see a consistent timeline.
 - **Unpause video:** **`dashcdg_rx_reset_live_media_after_resume_locked`** re-seeks **offline CDG reader** into **`live_state`** because **`cdg_snapshots_applied`** blocks the normal first-wire seed path.
 

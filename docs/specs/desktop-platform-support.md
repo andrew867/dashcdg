@@ -63,6 +63,13 @@ Layout:
 
 Standard folders ship **`desktop-tx.exe`**, **`desktop-gdi-tx.exe`**, **`desktop-rx.exe`**, a **`desktop-gl-rx.exe`** alias (copy of `desktop-rx.exe`), **`desktop-gdi-rx.exe`**, and **`desktop-player.exe`** (+ legacy `desktop-*-player.exe` copies); see `README.txt` in that tree.
 
+Each startup now prints a git-derived build identifier such as **`dev-master-g0b67b5a`** to stdout and to the sidecar soak log:
+
+- `[tx] build: dev-master-g0b67b5a`
+- `[rx] build: dev-master-g0b67b5a`
+
+The sneakernet script pins one version string for the whole packaging run so every EXE in that bundle reports the same revision.
+
 Optional zip: `build/dist/dashcdg-windows-sneakernet.zip` — PowerShell `Compress-Archive` by default, or **`zip -1`** when **`DASHCDG_SNEAKENET_ZIP_FAST=1`** and `zip` is on `PATH`.
 
 ## Makefile targets (Windows-focused)

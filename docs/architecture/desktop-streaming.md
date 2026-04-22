@@ -93,8 +93,8 @@ Important current behavior:
 - TX emits **protocol v4** by default (session info, loading screens, anchors,
   bounded per-pass pacing for anchors/audio/video/backfill). **`--v3`** selects
   the legacy v3-only sender loop. **`--badnet-v4`** sets v4 **resilience** and
-  default narrowband id **`celp13k`** (same **NB-IMA** payload as `sbc-like`; see
-  [`docs/specs/v4-audio-codecs.md`](../specs/v4-audio-codecs.md)). **`--v4-audio-codec=`**
+  current desktop default codec **`amr-wb`**; **`--badnet-v4-sbc`** and
+  **`--badnet-v4-evrc`** pick explicit alternates. **`--v4-audio-codec=`**
   selects the session `audio_codec_id` without changing transport version.
 - Console output now prints a preparation line immediately, but some media
   preparation cost is still on the hot path.

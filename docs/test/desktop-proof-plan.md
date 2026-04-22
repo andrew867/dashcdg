@@ -4,19 +4,18 @@
 
 This tranche proves the architecture on computer hardware before MCU work:
 
-- `apps/desktop-tx/main.c`: multicast/broadcast transmitter for bootstrap assets, live Opus frames, timed CD+G batches, snapshots, FEC parity, pause-screen state, and software-timestamped PTP-style sync traffic
-- `apps/desktop-rx/main.c`: multicast/broadcast receiver with live network audio decode, bootstrap asset reconstruction, snapshot apply, bounded jitter/FEC handling, and OpenGL rendering
+- `platform/desktop/src/app_tx.c`: multicast/broadcast transmitter for live codec frames, timed CD+G batches, snapshots/anchors, FEC parity, pause-screen state, and software-timestamped PTP-style sync traffic
+- `platform/desktop/src/app_rx.c`: multicast/broadcast receiver with live network audio decode, snapshot/anchor bootstrap, bounded jitter/FEC handling, and OpenGL or Win32 GDI rendering
 - `apps/desktop-player/main.c`: local non-network player for baseline regression checks
 
 ## Success criteria
 
 - receiver can discover a session from `ANNOUNCE`
-- receiver reconstructs the full CD+G asset from repeated `ASSET_CHUNK` packets
-- receiver renders the rebuilt asset with deterministic seeking after late join
+- receiver acquires late-join video from the active v4 startup path (session info + snapshots/anchors + live deltas) without wedging on a black screen
 - receiver can also advance a live CD+G state from `CDG_BATCH`
 - receiver can apply `CDG_SNAPSHOT` to start or recover live video before asset rebuild finishes
 - receiver starts network Opus audio near the announced playout boundary
-- receiver follows announce plus PTP clock traffic before the bootstrap asset is fully complete
+- receiver follows announce plus PTP clock traffic before the startup video path has fully settled
 - receiver tolerates bounded reordering on live audio and CD+G before declaring packets late
 - receiver can attempt single-loss XOR repair within protected FEC groups
 - pause/resume keeps the network session healthy and displays a TX-generated pause screen

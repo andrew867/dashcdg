@@ -296,6 +296,11 @@ you get the same **six** test names:
 **Zip:** `build/dist/dashcdg-windows-sneakernet.zip` — archive of the **single**
 `dashcdg-windows-sneakernet` folder (unzip → one directory to copy).
 
+Recent desktop builds also print a git-derived version banner at startup (for
+example **`dev-master-g0b67b5a`**) and include the same line in the per-exe
+sidecar soak logs. That makes XP/P3 field logs attributable even when binaries
+are copied around outside git.
+
 **Other scripts:** `scripts/build_release.sh [x64|x86|all]` runs `make clean package`
 per arch and copies **`dashcdg-windows-{x64,x86}-portable.zip`** into `build/dist/`
 (raw MSYS2 prefix layout inside each zip, not the sneakernet folder names).

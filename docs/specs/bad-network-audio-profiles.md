@@ -57,15 +57,14 @@ Target behavior:
 - better tolerance of startup packet loss through redundancy or shorter decoder
   dependency chains
 
-First-tranche lock:
+Current desktop lock:
 
-- codec family: **NB-IMA** narrowband framed low-bitrate mode (`dashcdg_nb_ima_*` in `core/`; integer-only)
-- target purpose: weak-link survival and deterministic debugging profile
-- expected properties:
-  - materially lower steady-state bitrate than `quality`
-  - short independent frames with shallow dependency chains
-  - simple enough decode path that a future MCU receiver is plausible
-  - explicit join redundancy for the first audio groups
+- codec family: **AMR-WB** by default for resilience on non-retro desktop TX
+- operator overrides: `--badnet-v4-sbc` (NB-IMA / id 2) and `--badnet-v4-evrc` remain available as explicit alternates
+- target purpose:
+  - lower steady-state bitrate than `quality`
+  - faster and more robust startup than the quality/Opus path on impaired links
+  - keep a plausible fixed-point MCU baseline available separately through **NB-IMA** (`id 2`)
 
 ## Wire Signaling
 
@@ -85,7 +84,7 @@ instantiate either decoder immediately:
 
 - `audio_profile_id = quality | resilience`
 - `audio_codec_id` — see [v4-audio-codecs.md](v4-audio-codecs.md): **`1` = Opus**,
-  **`2`–`7` = narrowband family** (same NB-IMA payload today; ids 3–7 are reserved labels for tooling and future codecs)
+  **`2` = NB-IMA**, **`3` = QCELP-13k**, **`4` = EVRC**, **`5` = AMR-NB**, **`6` = AMR-WB**, **`7` = Bluetooth SBC**
 - `sample_rate`
 - `channels`
 - `frame_ms`
@@ -116,10 +115,9 @@ First-tranche startup policy:
   - preserve the current desktop feel on healthy links
   - prefer Opus continuity over aggressive startup duplication
 - `resilience`
-  - duplicate or otherwise redundantly send the first few audio groups
-  - use a smaller, simpler frame format to reduce dependency on one perfect
-    initial burst
-  - expose a lower startup preroll target than `quality` if testing supports it
+  - keep startup runway conservative and repair-friendly
+  - prefer codecs that survive startup loss and jitter better than quality/Opus on weak links
+  - preserve explicit operator override paths for lower-bitrate debugging codecs
 
 ## Profile Selection Policy
 
@@ -134,7 +132,7 @@ added later, but the wire format should not prevent it.
 
 First-tranche operator policy:
 
-- default to `quality`
+- default desktop TX to the currently shipped non-retro profile/codec pairing: `resilience` + `amr-wb`
 - allow an explicit forced `resilience` mode in TX
 - make the active mode visible in both TX and RX status output
 

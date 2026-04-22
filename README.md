@@ -11,9 +11,9 @@ Longer version of the same idea: [`docs/fork-manifesto.md`](docs/fork-manifesto.
 - deterministic CD+G decode, replay, and seek
 - a versioned UDP-friendly wire protocol (v4 on the wire by default; `--v3` for legacy)
 - desktop TX/RX apps for multicast and IPv4 broadcast
-- live on-wire audio (Opus and other v4 codecs) plus timed CD+G, snapshots, and bounded FEC
+- live on-wire audio (Opus, AMR-WB/NB, EVRC, QCELP-13k, NB-IMA, Bluetooth SBC) plus timed CD+G, snapshots, and bounded FEC
 
-The desktop TX path sends audio and CD+G in parallel; RX can cold-join, repair, and re-anchor from snapshots. **Windows** builds include headless `desktop-tx`, GL-first `desktop-rx` with GDI fallback, dedicated **`desktop-gdi-rx.exe` / `desktop-gdi-tx.exe`**, and a **retro** Win32 bundle without OpenGL (still **Opus + PortAudio** with PIII-safe vendored DLLs on i686). Canonical matrix: [`docs/specs/desktop-platform-support.md`](docs/specs/desktop-platform-support.md).
+The desktop TX path sends audio and CD+G in parallel; RX can cold-join, repair, and re-anchor from v4 snapshots/anchors without rebuilding a full `.cdg` asset on the wire. **Windows** builds include headless `desktop-tx`, GL-first `desktop-rx` with GDI fallback, dedicated **`desktop-gdi-rx.exe` / `desktop-gdi-tx.exe`**, and a **retro** Win32 bundle without OpenGL (still **Opus + PortAudio** with PIII-safe vendored DLLs on i686). Canonical matrix: [`docs/specs/desktop-platform-support.md`](docs/specs/desktop-platform-support.md).
 
 ## What exists today
 
@@ -28,7 +28,7 @@ Hybrid transport (high level):
 
 Receiver behavior (summary):
 
-- asset replay and live wire paths coexist; snapshots accelerate late join and recovery
+- v4 session info, clock sync, timed CD+G deltas, and periodic anchors cooperate for late join and recovery
 - explicit HUD / headless observability for playout, clock, and repair state
 - jitter and session logic tuned for cold join and handoff (see [`docs/architecture/desktop-streaming.md`](docs/architecture/desktop-streaming.md))
 
@@ -102,6 +102,13 @@ Outputs:
 
 The script builds vendored PIII **libopus-0.dll** + **libportaudio.dll**, both **libsoxr** static libs, then four `make debug` variants (incremental by default; set `DASHCDG_SNEAKENET_CLEAN=1` for CI-style clean builds). See the script header in `scripts/build_windows_sneakernet_dist.sh` for env toggles (`RUN_P3_DISASM`, `SKIP_*`, etc.).
 
+Each sneakernet packaging run now pins a git-derived build string such as **`dev-master-g0b67b5a`** and the desktop apps print it at startup:
+
+- `[tx] build: dev-master-g0b67b5a`
+- `[rx] build: dev-master-g0b67b5a`
+
+That line is emitted to the console and to the sidecar soak logs, so field tests can be tied back to the exact source revision.
+
 ## Releases and CI
 
 - **Workflow:** [`.github/workflows/release-sneakernet.yml`](.github/workflows/release-sneakernet.yml)  
@@ -149,7 +156,7 @@ build/bin/desktop-tx [--help] [--v3] ...
 build/bin/desktop-rx [--help] [--headless] [--gdi|--win-gdi] ...
 ```
 
-**V4 audio:** defaults and codec IDs are documented in [`docs/specs/v4-audio-codecs.md`](docs/specs/v4-audio-codecs.md). Use **`--help`** on `tx` / `rx` for the full flag list; with a TTY, **`c`** cycles codecs on TX.
+**V4 audio:** defaults and codec IDs are documented in [`docs/specs/v4-audio-codecs.md`](docs/specs/v4-audio-codecs.md). Current non-retro TX default is **resilience profile + AMR-WB**; `--audio-profile=quality` switches to Opus. Use **`--help`** on `tx` / `rx` for the full flag list; with a TTY, **`c`** cycles codecs on TX.
 
 Network defaults:
 
@@ -209,7 +216,7 @@ See [`docs/test/desktop-impairment-validation.md`](docs/test/desktop-impairment-
 
 ## Current status (honest)
 
-**Implemented and exercised in-tree:** v3/v4 packet families, threaded TX/RX, live audio + CDG + snapshots + FEC, pause screen, multicast and broadcast, GDI and GL paths, Windows packaging including sneakernet, PIII-safe i686 codec DLL build path, libsoxr-backed resampling on MinGW.
+**Implemented and exercised in-tree:** v3/v4 packet families, threaded TX/RX, live audio + CDG + snapshots + FEC, pause screen, multicast and broadcast, GDI and GL paths, Windows packaging including sneakernet, PIII-safe i686 codec DLL build path, git-stamped build IDs in soak logs, and libsoxr-backed desktop resampling on MinGW.
 
 **Still research / proof grade:** clocking is software-timestamped, not venue PTP hardware; long impaired soaks and numeric caps are still being expanded; FEC repairs one loss per group; some edge cases around startup and handoff may still need tuning—see [`docs/specs/remaining-tranches-roadmap.md`](docs/specs/remaining-tranches-roadmap.md).
 

@@ -14,7 +14,7 @@ Encoder **ctl** tuning lives in [`platform/desktop/src/opus_codec.c`](../../plat
 - **`OPUS_SET_VBR_CONSTRAINT(0)`** — **unconstrained VBR** at all bitrates (reduces constrained-VBR pumping vs narrowband chains).
 - Decoder remains **transparent** (`opus_decoder_create`); optional future tuning for PLC is out of scope.
 
-**Encoder input level (loudness parity with narrowband):** Immediately before **`dashcdg_opus_encode_frame`** in [`platform/desktop/src/app_tx.c`](../../platform/desktop/src/app_tx.c), stereo PCM is scaled by **`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`** (~**−3 dB**, defined in [`pcm_rate_convert.h`](../../platform/desktop/include/dashcdg/pcm_rate_convert.h)) so perceived level matches the narrowband path, which applies the same headroom before speech codecs after HPF.
+**Encoder input level:** the current desktop TX path feeds Opus **without** the narrowband speech-codec headroom pad. The ~80 Hz HPF and **`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`** remain narrowband/speech-codec conditioning only.
 
 ## Bitrate-dependent policy
 

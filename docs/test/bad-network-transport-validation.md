@@ -137,7 +137,7 @@ Every validation run should summarize:
 
 For the first v4 rollout, the report should also include:
 
-- active v4 `audio_codec_id` (`opus` = 1, narrowband family = 2–7; payload is **NB-IMA** for all narrowband ids today — see `docs/specs/v4-audio-codecs.md`)
+- active v4 `audio_codec_id` (`opus` = 1, `sbc-like`/NB-IMA = 2, `celp13k` = 3, `evrc` = 4, `amr-nb` = 5, `amr-wb` = 6, `bluetooth-sbc` = 7 — see `docs/specs/v4-audio-codecs.md`)
 - startup redundancy mode
 - startup preroll target
 - whether recovery used redundancy, parity, retry, or deadline skip

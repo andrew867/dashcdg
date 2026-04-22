@@ -21,13 +21,13 @@ Manual and automated checks for v4 audio codec selection and session metadata.
    Expect: `audio_codec_id=2`, receiver plays; `song_id` visible on RX (`[rx] asset ready for <name>`).
 
 3. **`--badnet-v4`**  
-   Expect: v4 enabled, resilience, **`celp13k` id (3)** on wire; RX decodes with narrowband shim.
+   Expect: v4 enabled, resilience, **`amr-wb` id (6)** on wire; RX decodes with the AMR-WB desktop path.
 
 4. **`--badnet-v4-sbc` / `--badnet-v4-evrc`**  
    Expect ids **2** and **4** respectively.
 
-5. **Reserved-label narrowband ids (3–7)**  
-   `--v4-audio-codec=amr-nb`, `amr-wb`, `bluetooth-sbc`, etc. — expect **identical NB-IMA audio** to `sbc-like` today (first-party `dashcdg_nb_ima_*` only; no external AMR/SBC libs in-tree). Use for **session / routing / tooling** checks; changing payload bytes for these ids is a spec bump.
+5. **Native narrowband ids (3–7)**  
+   `--v4-audio-codec=amr-nb`, `amr-wb`, `bluetooth-sbc`, `evrc`, `celp13k` — expect distinct native codec payloads and successful RX decode / reconfigure without reverting to the NB-IMA path.
 
 ## Manual — RX
 

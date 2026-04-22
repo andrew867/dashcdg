@@ -3,7 +3,7 @@
 This document is the **specification and integration map** for v4 `audio_codec_id` values and how DashCDG implements them. Goals:
 
 - **ESP32-class MCUs** and other targets without FPUs should be able to ship a **fixed-point** narrowband receive path using **first-party** code in `core/` for the **NB-IMA** baseline (`id 2`), without requiring optional vendor trees for that baseline wire format.
-- **Desktop** uses **libopus** for the quality path (`audio_codec_id = 1`) and **vendored** stacks for AMR-WB/NB, EVRC, QCELP-13k, and Bluetooth SBC where linked (see `Makefile` and `audio_modules/`).
+- **Desktop** uses **libopus** for the quality path (`audio_codec_id = 1`) and native desktop adapters for AMR-WB/NB, EVRC, QCELP-13k, and Bluetooth SBC (`ids 3–7`) in the current tree.
 
 **Module layout:** each codec has an **`audio_modules/<name>/`** tree. Populate upstream sources with **`scripts/fetch_audio_codec_vendors.sh`** (see `audio_modules/README.md`).
 
@@ -38,13 +38,13 @@ Canonical **NB-IMA** implementation: **`core/include/dashcdg/nb_ima_codec.h`** +
 
 The following affect **PCM before/after encode** on Windows desktop only; they do not change `audio_codec_id` or packet layout:
 
-- **TX:** ~**80 Hz** high-pass on narrowband paths only; **~−3 dB** fixed digital headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) before NB **and Opus** encode for consistent loudness; soft limiting / band-limited resampling in **`platform/desktop/src/pcm_rate_convert.c`** (see [`narrowband-low-bitrate-audio-quality.md`](narrowband-low-bitrate-audio-quality.md), [`opus-desktop-encoding-policy.md`](opus-desktop-encoding-policy.md)).
-- **RX:** post-decode SRC / queue **soft limit** on narrowband; **`playback_base_*`** clearing on cold reopen and resume (see **`AGENTS.md`**).
+- **TX:** ~**80 Hz** high-pass on the speech-codec paths only; **~−3 dB** fixed digital headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) before speech-codec encode; **Opus bypasses that headroom pad** and is fed full-scale session PCM. Soft limiting / band-limited resampling live in **`platform/desktop/src/pcm_rate_convert.c`** (see [`narrowband-low-bitrate-audio-quality.md`](narrowband-low-bitrate-audio-quality.md), [`opus-desktop-encoding-policy.md`](opus-desktop-encoding-policy.md)).
+- **RX:** post-decode SRC / queue **soft limit** applies where needed on resampled live output; **`playback_base_*`** hygiene and lighter-weight re-prime logic are part of the current desktop recovery path.
 
 ## Command-line selector (TX)
 
 - **`--v4-audio-codec=<name>`** / **`--v4-audio-codec <name>`** — `opus`, `sbc-like`, `celp13k`, `evrc`, `amr-nb`, `amr-wb`, `bluetooth-sbc`.
-- **`--badnet-v4`** — v4 on, resilience profile, codec **amr-wb** (same as desktop default).
+- **`--badnet-v4`** — v4 on, resilience profile, codec **amr-wb** (same as current non-retro desktop default).
 - **`--badnet-v4-sbc`** — resilience + wire id **2** (NB-IMA).
 - **`--badnet-v4-evrc`** — resilience + wire id **4** (EVRC).
 - **`--audio-profile=quality`** — quality profile + **Opus** (non-retro builds).
@@ -62,6 +62,8 @@ The following affect **PCM before/after encode** on Windows desktop only; they d
 
 ## Tests
 
-- **`tests/test_core.c`** — `test_protocol_v4_roundtrip()` plus **`test_v4_audio_codec_predicate_helpers()`**; `test_nb_ima_codec_roundtrip()` for NB-IMA.
+- **`tests/test_core.c`** — protocol round-trips and codec predicate coverage.
+- **`tests/test_nb_codec_adapters.c`** — adapter round-trip and instance-isolation coverage for the desktop codec paths, especially AMR.
+- **`tests/test_opus_roundtrip.c`** — real Opus encode/decode regression coverage when libopus is present.
 
 See also [v4-audio-codec-validation.md](../test/v4-audio-codec-validation.md), [embedded-rx-audio-profile.md](embedded-rx-audio-profile.md), and [audio-codec-modules.md](audio-codec-modules.md).

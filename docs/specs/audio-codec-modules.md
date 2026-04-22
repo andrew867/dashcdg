@@ -8,22 +8,25 @@ we care about gets a **named module directory** under `audio_modules/`, with
 clear rules for **vendored upstream C** vs **first-party rewrite**, license
 tracking, and optional **Makefile / CMake** object selection.
 
-Baseline today remains **`core/src/nb_ima_codec.c`** (fixed-point NB-IMA) plus
-**desktop `opus_codec`** for Opus. **Wire ids 3–7** still carry NB-IMA bytes
-until a module is enabled and the protocol version is bumped for that id’s
-payload (see [v4-audio-codecs.md](v4-audio-codecs.md)).
+Baseline today is:
+
+- **`core/src/nb_ima_codec.c`** for the fixed-point **NB-IMA** path on wire id **2**
+- **desktop `opus_codec`** for wire id **1**
+- desktop native adapters for **AMR-NB**, **AMR-WB**, **EVRC**, **QCELP-13k**, and **Bluetooth SBC** on wire ids **3–7**
+
+This document now serves as an inventory and boundary note, not a “future placeholder codec” plan.
 
 ## Module index (every linked upstream)
 
 | Module directory | Wire id / role (target) | Upstream (clone / reference) | Default strategy |
 | ---------------- | ------------------------ | ---------------------------- | ---------------- |
-| `audio_modules/nb_ima/` | v4 ids **2–7** baseline; id **2** canonical name `sbc-like` | **First-party** — `core/include/dashcdg/nb_ima_codec.h`, `core/src/nb_ima_codec.c` | Shipped |
+| `audio_modules/nb_ima/` | v4 id **2** baseline; canonical CLI name `sbc-like` | **First-party** — `core/include/dashcdg/nb_ima_codec.h`, `core/src/nb_ima_codec.c` | Shipped |
 | `audio_modules/opus/` | v4 id **1** | **libopus** via `platform/desktop/src/opus_codec.c` + system `-lopus` (optional **`vendor/opus`** build — see [`vendored-opus-portaudio-windows.md`](vendored-opus-portaudio-windows.md)) | Shipped (desktop) |
-| `audio_modules/amr_pschatzmann/` | v4 ids **5** (NB), **6** (WB) when native | [pschatzmann/codec-amr](https://github.com/pschatzmann/codec-amr) — wraps 3GPP reference; [API docs](https://pschatzmann.github.io/codec-amr/html/index.html) | **Vendor copy** under `vendor/` + thin `dashcdg_amr_*.c` adapter; resolve [3GPP license ambiguity](https://github.com/pschatzmann/codec-amr) before product |
-| `audio_modules/evrc_arulk77/` | v4 id **4** when native | [arulk77/gpu.evrc](https://github.com/arulk77/gpu.evrc) | **Vendor copy** + adapter; compare with `evrc_maolin` for code quality |
+| `audio_modules/amr_pschatzmann/` | v4 ids **5** (NB), **6** (WB) | [pschatzmann/codec-amr](https://github.com/pschatzmann/codec-amr) — wraps 3GPP reference; [API docs](https://pschatzmann.github.io/codec-amr/html/index.html) | Shipped on desktop through `amr_nb_codec.c` / `amr_wb_codec.c` |
+| `audio_modules/evrc_arulk77/` | v4 id **4** | [arulk77/gpu.evrc](https://github.com/arulk77/gpu.evrc) | Shipped on desktop through `nb_evrc_codec.c` |
 | `audio_modules/evrc_maolin/` | alternate / second opinion for id **4** | [maolin-cdzl/evrcc](https://github.com/maolin-cdzl/evrcc) | **Vendor copy** + adapter; pick **one** primary tree for product, keep other as research |
-| `audio_modules/qcelp_rupw/` | v4 id **3** when native | [RupW/celp13k](https://github.com/RupW/celp13k) — [RFC 3625](https://datatracker.ietf.org/doc/html/rfc3625) QCP | **Vendor copy** + adapter; honor upstream `LICENSE` / reference-use terms |
-| `audio_modules/bluetooth_sbc_kernel/` | v4 id **7** when native (or **new id** if we keep NB-IMA on 7) | [kernel.org `sbc.git`](https://git.kernel.org/pub/scm/bluetooth/sbc.git) — **LGPL-2.1+** | **Vendor copy** + adapter **or** first-party fixed-point rewrite in `core/` to avoid LGPL in static MCU images |
+| `audio_modules/qcelp_rupw/` | v4 id **3** | [RupW/celp13k](https://github.com/RupW/celp13k) — [RFC 3625](https://datatracker.ietf.org/doc/html/rfc3625) QCP | Shipped on desktop through `nb_qcelp_codec.c` |
+| `audio_modules/bluetooth_sbc_kernel/` | v4 id **7** | [kernel.org `sbc.git`](https://git.kernel.org/pub/scm/bluetooth/sbc.git) — **LGPL-2.1+** | Shipped on desktop through `nb_sbc_codec.c`; MCU/static-link policy still requires review |
 
 ## Directory layout (contract)
 
@@ -64,10 +67,9 @@ the fetch script from a pinned commit/tag, or the implementation lives in
 
 ## Build selection (GL/GDI analogy)
 
-- **Desktop default:** link **`libdashcdg_core`** (NB-IMA) + **opus** objects as today; **do not** link `audio_modules/*/vendor` until `AUDIO_MODULES_VENDOR=1` (or per-module flags) is set in `Makefile`.
-- **MCU / ESP-IDF:** link **NB-IMA** only; add **`DASHCDG_AUDIO_MODULE_AMR`** etc. only after adapter + vendor tree compile clean on target.
-- **Retro Windows:** same as today — NB-IMA, Opus stub; optional vendor objects
-  stay out of retro link line to keep DLL set small.
+- **Desktop default:** current Windows/Linux desktop builds already link the active codec adapters used by `app_tx.c` / `app_rx.c`.
+- **MCU / ESP-IDF:** the conservative first-party baseline remains **NB-IMA only** until additional decoder ports are proven on target.
+- **Retro Windows:** current retro builds still link the real desktop codec stack where supported by that variant; the limiting factor is CPU/runtime validation, not a separate placeholder codec map.
 
 Concrete flags (to be wired in Makefile when first adapter lands):
 
@@ -78,10 +80,7 @@ Concrete flags (to be wired in Makefile when first adapter lands):
 
 ## Adapter interface (next code step)
 
-TX/RX should eventually call through a **small table** (like optional GL vs
-GDI): `encode(v4_codec_id, pcm, …)` / `decode(v4_codec_id, pkt, …)` dispatching
-to **nb_ima**, **opus**, or **vendor adapter** when built. Until then, dispatch
-remains inline in `app_tx.c` / `app_rx.c` as today.
+TX/RX still dispatch inline in `app_tx.c` / `app_rx.c` today. A future cleanup can centralize this behind a codec table, but the current codebase already ships the concrete adapters listed above.
 
 ## Related documents
 
