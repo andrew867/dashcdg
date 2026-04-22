@@ -2191,14 +2191,21 @@ static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms) {
                 g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             /*
              * Seek(0) is the empty pre-track canvas, not the first visible CDG state.
-             * The startup anchor must therefore cover at least the first emitted batch,
-             * otherwise RX applies an empty anchor after the first live paint and wipes
-             * the left edge back to background colour.
+             * A single six-packet batch (~20 ms) is also too shallow for many title
+             * cards: RX bootstraps from that partial canvas, then later live batches
+             * fill in the rest of the screen and the first frame appears sliced or
+             * out of order. Seed the startup anchor from the whole initial FEC group
+             * so the first visible canvas is materially complete before live deltas
+             * resume.
              */
-            const struct dashcdg_tx_cdg_batch *first_batch =
-                    &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
+            size_t startup_end_index = g_tx_state.next_cdg_batch_index + DASHCDG_CDG_GROUP_SIZE;
+            const struct dashcdg_tx_cdg_batch *covered_batch;
 
-            anchor_packet_index = first_batch->packet_start_index + (uint64_t) first_batch->packet_count;
+            if (startup_end_index > g_tx_state.cdg_batch_count) {
+                startup_end_index = g_tx_state.cdg_batch_count;
+            }
+            covered_batch = &g_tx_state.cdg_batches[startup_end_index - 1U];
+            anchor_packet_index = covered_batch->packet_start_index + (uint64_t) covered_batch->packet_count;
         } else if (g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count) {
             anchor_packet_index = g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].packet_start_index;
         } else {
