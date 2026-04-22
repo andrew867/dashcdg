@@ -53,6 +53,10 @@
 #include "dashcdg/transport_udp.h"
 #include "dashcdg/win32_timing_boost.h"
 
+#ifndef DASHCDG_BUILD_VERSION
+#define DASHCDG_BUILD_VERSION "dev-unknown-gunknown"
+#endif
+
 /*
  * MinGW32 builds use -D__USE_MINGW_ANSI_STDIO=0 (see Makefile), so printf-style
  * functions resolve to Windows XP msvcrt.dll. That CRT does not support C99
@@ -5828,6 +5832,8 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     }
 
     dashcdg_rx_maybe_enable_sidecar_log(argv[0]);
+    fprintf(stdout, "[rx] build: %s\n", DASHCDG_BUILD_VERSION);
+    fflush(stdout);
     dashcdg_rx_init_receiver_instance_id();
 
     g_endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;

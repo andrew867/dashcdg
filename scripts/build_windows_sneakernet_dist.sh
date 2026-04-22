@@ -50,6 +50,12 @@ fi
 
 cd "${REPO_ROOT}"
 
+dashcdg_git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
+dashcdg_git_branch="$(printf '%s' "${dashcdg_git_branch}" | sed 's/[^A-Za-z0-9._-]/-/g')"
+dashcdg_git_hash="$(git rev-parse --short=8 HEAD 2>/dev/null || printf 'unknown')"
+export DASHCDG_BUILD_VERSION="${DASHCDG_BUILD_VERSION:-dev-${dashcdg_git_branch}-g${dashcdg_git_hash}}"
+echo "[sneakernet-dist] build version: ${DASHCDG_BUILD_VERSION}"
+
 # MSYS2 root: prefer canonical installs before inferring from PATH. A standalone MinGW-w64
 # tree (e.g. under /c/ProgramData/mingw64) often appears first as x86_64-w64-mingw32-gcc but
 # does not ship MSYS2-style dev packages (GL/glew.h, etc.), which breaks mingw64 GL builds.

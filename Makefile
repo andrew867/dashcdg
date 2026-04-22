@@ -6,7 +6,11 @@ BUILD_DIR := build
 COMMON_CFLAGS := -Wall -Wextra -Wno-cpp -std=c99 -pedantic -D_FORTIFY_SOURCE=2
 INCLUDES := -Icore/include -Iproto/include -Iplatform/desktop/include -Iinc
 EXTRA_LDFLAGS :=
+DASHCDG_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/[^A-Za-z0-9._-]/-/g' || printf 'unknown')
+DASHCDG_GIT_HASH ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || printf 'unknown')
+DASHCDG_BUILD_VERSION ?= dev-$(DASHCDG_GIT_BRANCH)-g$(DASHCDG_GIT_HASH)
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
+CFLAGS += -DDASHCDG_BUILD_VERSION=\"$(DASHCDG_BUILD_VERSION)\"
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 # Opus / PortAudio link flags (expanded after MINGW_ARCH is known on Windows). Linux: set DASHCDG_OPUS_VENDOR=1 and prefixes if needed.

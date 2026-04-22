@@ -68,6 +68,10 @@
 #include "dashcdg/stream_runtime.h"
 #include "dashcdg/win32_timing_boost.h"
 
+#ifndef DASHCDG_BUILD_VERSION
+#define DASHCDG_BUILD_VERSION "dev-unknown-gunknown"
+#endif
+
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS) && !defined(_WIN32)
 #error "DASHCDG_DESKTOP_RETRO_WINDOWS is only supported on Windows desktop builds"
 #endif
@@ -6411,6 +6415,8 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     dashcdg_tx_maybe_enable_sidecar_log(argv[0]);
+    fprintf(stdout, "[tx] build: %s\n", DASHCDG_BUILD_VERSION);
+    fflush(stdout);
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
