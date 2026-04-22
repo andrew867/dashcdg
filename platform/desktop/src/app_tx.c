@@ -101,7 +101,8 @@
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 40U
 #define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 8U
-#define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 16U
+#define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 32U
+#define DASHCDG_TX_SOCKET_SNDBUF_BYTES (1024 * 1024)
 /*
  * Anchor chunks used to ship one ~1 KiB fragment every TX tick (~100–1000 Hz) → multi‑Mbit/s bursts.
  * Cap payload per datagram and enforce a minimum spacing between chunks. First full anchor uses a
@@ -6359,6 +6360,17 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         perror("socket");
         dashcdg_tx_cleanup();
         return 1;
+    }
+    {
+        int send_buffer_bytes = DASHCDG_TX_SOCKET_SNDBUF_BYTES;
+
+        setsockopt(
+                g_tx_state.sockfd,
+                SOL_SOCKET,
+                SO_SNDBUF,
+                (const char *) &send_buffer_bytes,
+                sizeof(send_buffer_bytes)
+        );
     }
 
     if (is_multicast) {

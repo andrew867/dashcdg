@@ -13,6 +13,8 @@
 #include <sys/socket.h>
 #endif
 
+#define DASHCDG_UDP_RX_SOCKET_RCVBUF_BYTES (4 * 1024 * 1024)
+
 int dashcdg_transport_udp_socket_init_rx(const struct dashcdg_udp_rx_config *cfg, dashcdg_socket_t *out_sock) {
     dashcdg_socket_t s;
     struct sockaddr_in addr;
@@ -29,6 +31,11 @@ int dashcdg_transport_udp_socket_init_rx(const struct dashcdg_udp_rx_config *cfg
     }
 
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+    {
+        int receive_buffer_bytes = DASHCDG_UDP_RX_SOCKET_RCVBUF_BYTES;
+
+        setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *) &receive_buffer_bytes, sizeof(receive_buffer_bytes));
+    }
     if (cfg->is_broadcast_endpoint) {
         int enable_broadcast = 1;
 
