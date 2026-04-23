@@ -138,7 +138,7 @@ static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_
 
     now_ms = dashcdg_clock_now_ms();
     if (*next_deadline_ms == 0U) {
-        *next_deadline_ms = now_ms;
+        *next_deadline_ms = now_ms + (uint64_t) frame_interval_ms;
         return;
     }
     if (now_ms < *next_deadline_ms) {

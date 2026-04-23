@@ -169,7 +169,7 @@ static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_
 
     now_ms = dashcdg_clock_now_ms();
     if (*next_deadline_ms == 0U) {
-        *next_deadline_ms = now_ms;
+        *next_deadline_ms = now_ms + (uint64_t) frame_interval_ms;
         return;
     }
     if (now_ms < *next_deadline_ms) {
@@ -489,6 +489,17 @@ static int g_rx_pcm_dump_init_attempted;
 static uint32_t g_rx_receiver_instance_id = 0U;
 static struct dashcdg_async_logger g_rx_logger;
 static int g_rx_logger_enabled;
+
+static uint32_t dashcdg_rx_render_snapshot_interval_ms(void) {
+#if defined(DASHCDG_RX_UI_GDI_ONLY)
+    return DASHCDG_RENDER_FRAME_INTERVAL_MS;
+#elif defined(_WIN32) && DASHCDG_RX_HAVE_GLUT
+    if (g_rx_use_win_gdi) {
+        return DASHCDG_RENDER_FRAME_INTERVAL_MS;
+    }
+#endif
+    return DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS;
+}
 
 static void dashcdg_rx_async_stdout_line(const char *line) {
     if (g_rx_logger_enabled && line != NULL) {
@@ -5432,7 +5443,7 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
         );
         should_start_audio = dashcdg_rx_claim_audio_start_locked(now_ms);
         if (g_rx_last_render_snapshot_local_ms == 0U ||
-                now_ms - g_rx_last_render_snapshot_local_ms >= DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS) {
+                now_ms - g_rx_last_render_snapshot_local_ms >= dashcdg_rx_render_snapshot_interval_ms()) {
             dashcdg_rx_publish_render_snapshot_locked(now_ms);
             g_rx_last_render_snapshot_local_ms = now_ms;
         }

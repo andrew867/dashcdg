@@ -65,6 +65,12 @@ static LRESULT CALLBACK dashcdg_win32_gdi_wnd_proc(HWND hwnd, UINT msg, WPARAM w
                 view->on_key(view->key_user, (unsigned) wparam, 1);
             }
             return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_ERASEBKGND:
             return 1;
         default:
@@ -243,6 +249,7 @@ int dashcdg_win32_gdi_view_present_rgba(
         return 1;
     }
     view->last_present_ms = now_ms;
+    ValidateRect(view->hwnd, NULL);
 
     dashcdg_win32_rgba_to_bgra(
             rgba,
