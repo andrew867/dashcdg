@@ -204,6 +204,21 @@ int dashcdg_socket_close(dashcdg_socket_t sockfd) {
 #endif
 }
 
+int dashcdg_net_set_dscp(dashcdg_socket_t sockfd, unsigned int dscp) {
+    int tos;
+
+    if (sockfd == DASHCDG_INVALID_SOCKET || dscp > 63U) {
+        return 0;
+    }
+
+    /*
+     * IPv4 TOS stores DSCP in the upper six bits and ECN in the lower two.
+     * Leave ECN clear; QoS-capable switches/APs classify the resulting byte.
+     */
+    tos = (int) ((dscp & 0x3FU) << 2);
+    return setsockopt(sockfd, IPPROTO_IP, IP_TOS, (const char *) &tos, sizeof(tos)) == 0;
+}
+
 int dashcdg_inet_pton(int af, const char *src, void *dst) {
     struct in_addr *out;
 

@@ -6942,6 +6942,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
                 sizeof(send_buffer_bytes)
         );
     }
+    if (!dashcdg_net_set_dscp(g_tx_state.sockfd, DASHCDG_NET_DSCP_DASHCDG_DEFAULT)) {
+        perror("[tx] IP_TOS");
+    }
 
     if (is_multicast) {
         if (multicast_interface_count > 0U &&
@@ -6987,6 +6990,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         struct sockaddr_in local_addr;
 
         setsockopt(g_tx_state.ptp_sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+        if (!dashcdg_net_set_dscp(g_tx_state.ptp_sockfd, DASHCDG_NET_DSCP_DASHCDG_DEFAULT)) {
+            perror("[tx] ptp IP_TOS");
+        }
         if (is_broadcast) {
             int enable_broadcast = 1;
 

@@ -20,6 +20,8 @@ typedef int dashcdg_socket_t;
 #define DASHCDG_NET_IFACE_NAME_MAX 128U
 #define DASHCDG_MAX_MULTICAST_INTERFACES 16U
 #define DASHCDG_INET_ADDRSTRLEN 16U
+#define DASHCDG_NET_DSCP_EF 46U
+#define DASHCDG_NET_DSCP_DASHCDG_DEFAULT DASHCDG_NET_DSCP_EF
 
 int dashcdg_inet_pton(int af, const char *src, void *dst);
 const char *dashcdg_inet_ntop(int af, const void *src, char *dst, size_t dst_size);
@@ -37,6 +39,7 @@ int dashcdg_net_init(void);
 void dashcdg_net_cleanup(void);
 void dashcdg_sleep_ms(unsigned int ms);
 int dashcdg_socket_close(dashcdg_socket_t sockfd);
+int dashcdg_net_set_dscp(dashcdg_socket_t sockfd, unsigned int dscp);
 size_t dashcdg_net_list_multicast_interfaces(
         struct dashcdg_multicast_interface *out_interfaces,
         size_t max_interfaces

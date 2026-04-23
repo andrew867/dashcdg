@@ -36,6 +36,9 @@ int dashcdg_transport_udp_socket_init_rx(const struct dashcdg_udp_rx_config *cfg
 
         setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *) &receive_buffer_bytes, sizeof(receive_buffer_bytes));
     }
+    if (!dashcdg_net_set_dscp(s, DASHCDG_NET_DSCP_DASHCDG_DEFAULT)) {
+        perror("IP_TOS");
+    }
     if (cfg->is_broadcast_endpoint) {
         int enable_broadcast = 1;
 

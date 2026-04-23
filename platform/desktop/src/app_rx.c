@@ -4980,6 +4980,9 @@ static void dashcdg_rx_init_stats_sender(int port) {
         perror("[rx] stats socket");
         return;
     }
+    if (!dashcdg_net_set_dscp(g_rx_stats_sockfd, DASHCDG_NET_DSCP_DASHCDG_DEFAULT)) {
+        perror("[rx] stats IP_TOS");
+    }
     if (g_endpoint_is_multicast) {
         multicast_interface_count = dashcdg_net_list_multicast_interfaces(
                 multicast_interfaces,
