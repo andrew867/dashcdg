@@ -47,6 +47,7 @@ jobs:
           echo "release_name=${name}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up MSYS2 toolchain
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -75,12 +76,12 @@ jobs:
       - name: Resolve MSYS2 root
         shell: msys2 {0}
         run: |
-          gcc64="$(command -v x86_64-w64-mingw32-gcc)"
-          if [[ -z "${gcc64}" ]]; then
-            echo "x86_64-w64-mingw32-gcc not found on PATH" >&2
+          msys_root_win='${{ steps.msys2.outputs.msys2-location }}'
+          if [[ -z "${msys_root_win}" ]]; then
+            echo "msys2-location output is empty" >&2
             exit 1
           fi
-          msys_root="$(cd "$(dirname "${gcc64}")/../.." && pwd)"
+          msys_root="$(cygpath -u "${msys_root_win}")"
           if [[ ! -d "${msys_root}/mingw64/bin" ]] || [[ ! -d "${msys_root}/mingw32/bin" ]]; then
             echo "Resolved MSYS2 root is incomplete: ${msys_root}" >&2
             exit 1
