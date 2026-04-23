@@ -841,6 +841,28 @@ size_t dashcdg_protocol_serialize_v4_rx_stats(
     buffer[offset++] = payload->reserved2[0];
     buffer[offset++] = payload->reserved2[1];
     buffer[offset++] = payload->reserved2[2];
+    dashcdg_write_u32(buffer + offset, payload->presented_audio_timestamp_ms);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->audio_buffer_target_ms);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->host_output_latency_ms);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->target_total_latency_ms);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->startup_stage);
+    offset += 2U;
+    dashcdg_write_u32(buffer + offset, (uint32_t) payload->drift_trim_ppm);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->recovery_host_underrun_count);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->recovery_zero_buffer_count);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->recovery_silent_stall_count);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->source_idle_park_count);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->startup_flags);
+    offset += 4U;
     return offset;
 }
 
@@ -1250,7 +1272,8 @@ int dashcdg_protocol_parse_packet(
         case DASHCDG_PACKET_V4_RX_STATS:
             if (view->header.version != DASHCDG_PROTOCOL_VERSION_V4 ||
                     (payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE &&
-                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE)) {
+                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE &&
+                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE)) {
                 return 0;
             }
             view->v4_rx_stats.report_seq = dashcdg_read_u32(buffer + offset);
@@ -1281,7 +1304,7 @@ int dashcdg_protocol_parse_packet(
             view->v4_rx_stats.reserved1[2] = buffer[offset++];
             view->v4_rx_stats.opus_bitrate_bps = dashcdg_read_u32(buffer + offset);
             offset += 4U;
-            if (payload_length == DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE) {
+            if (payload_length >= DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE) {
                 view->v4_rx_stats.fec_decode_attempts = dashcdg_read_u32(buffer + offset);
                 offset += 4U;
                 view->v4_rx_stats.fec_recovery_failed = dashcdg_read_u32(buffer + offset);
@@ -1304,6 +1327,30 @@ int dashcdg_protocol_parse_packet(
                 view->v4_rx_stats.reserved2[0] = buffer[offset++];
                 view->v4_rx_stats.reserved2[1] = buffer[offset++];
                 view->v4_rx_stats.reserved2[2] = buffer[offset++];
+            }
+            if (payload_length >= DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE) {
+                view->v4_rx_stats.presented_audio_timestamp_ms = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.audio_buffer_target_ms = dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.host_output_latency_ms = dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.target_total_latency_ms = dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.startup_stage = dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.drift_trim_ppm = dashcdg_read_s32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.recovery_host_underrun_count = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.recovery_zero_buffer_count = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.recovery_silent_stall_count = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.source_idle_park_count = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.startup_flags = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
             }
             return 1;
 

@@ -303,13 +303,43 @@ struct dashcdg_v4_clock_sync_payload {
  * Receiver → network observability (low rate). Big-endian fields on the wire.
  * TX listens on the same UDP port as media (PTP socket) and counts/log these.
  *
- * v1 body = 52 bytes; v2 adds 36 bytes (FEC/error + jitter tails + identity).
- * Parsers accept v1 or v2; emitters use v2 (DASHCDG_V4_RX_STATS_PAYLOAD_SIZE).
+ * v1 body = 52 bytes; v2 adds 36 bytes (FEC/error + jitter tails + identity);
+ * v3 adds presentation / latency / recovery / bootstrap state for tranche-A
+ * controller measurement mode.
+ *
+ * Parsers accept v1/v2/v3; emitters use v3 (DASHCDG_V4_RX_STATS_PAYLOAD_SIZE).
  */
 #define DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE 52U
 #define DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE 88U
-#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE
+#define DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE 124U
+#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE
 
+enum dashcdg_v4_rx_startup_stage {
+    DASHCDG_V4_RX_STARTUP_UNKNOWN = 0,
+    DASHCDG_V4_RX_STARTUP_WAIT_ANNOUNCE = 1,
+    DASHCDG_V4_RX_STARTUP_V4_METADATA = 2,
+    DASHCDG_V4_RX_STARTUP_ASSET_READY = 3,
+    DASHCDG_V4_RX_STARTUP_ANCHOR_READY = 4,
+    DASHCDG_V4_RX_STARTUP_LOADING_SCREEN = 5,
+    DASHCDG_V4_RX_STARTUP_WAIT_PREROLL = 6,
+    DASHCDG_V4_RX_STARTUP_READY_TO_START = 7,
+    DASHCDG_V4_RX_STARTUP_RUNNING = 8,
+    DASHCDG_V4_RX_STARTUP_PAUSED = 9,
+    DASHCDG_V4_RX_STARTUP_SOURCE_IDLE = 10,
+    DASHCDG_V4_RX_STARTUP_RECOVERING = 11
+};
+
+#define DASHCDG_V4_RX_STARTUP_FLAG_HAVE_CLOCK 0x00000001U
+#define DASHCDG_V4_RX_STARTUP_FLAG_NETWORK_AUDIO_ENABLED 0x00000002U
+#define DASHCDG_V4_RX_STARTUP_FLAG_AUDIO_STREAM_STARTED 0x00000004U
+#define DASHCDG_V4_RX_STARTUP_FLAG_MUTED 0x00000008U
+#define DASHCDG_V4_RX_STARTUP_FLAG_LOADING_SCREEN_ACTIVE 0x00000010U
+#define DASHCDG_V4_RX_STARTUP_FLAG_BRIDGE_READY 0x00000020U
+#define DASHCDG_V4_RX_STARTUP_FLAG_LIVE_ACTIVE 0x00000040U
+#define DASHCDG_V4_RX_STARTUP_FLAG_RECOVERY_COOLDOWN 0x00000080U
+#define DASHCDG_V4_RX_STARTUP_FLAG_SOURCE_IDLE 0x00000100U
+#define DASHCDG_V4_RX_STARTUP_FLAG_QUEUE_PRESSURE 0x00000200U
+#define DASHCDG_V4_RX_STARTUP_FLAG_AUDIO_PREROLL_READY 0x00000400U
 #pragma pack(push, 1)
 struct dashcdg_v4_rx_stats_payload {
     uint32_t report_seq;
@@ -337,7 +367,17 @@ struct dashcdg_v4_rx_stats_payload {
     uint32_t receiver_instance_id;
     uint8_t fec_group_size_observed;
     uint8_t reserved2[3];
-};
+    uint32_t presented_audio_timestamp_ms;
+    uint16_t audio_buffer_target_ms;
+    uint16_t host_output_latency_ms;
+    uint16_t target_total_latency_ms;
+    uint16_t startup_stage;
+    int32_t drift_trim_ppm;
+    uint32_t recovery_host_underrun_count;
+    uint32_t recovery_zero_buffer_count;
+    uint32_t recovery_silent_stall_count;
+    uint32_t source_idle_park_count;
+    uint32_t startup_flags;};
 #pragma pack(pop)
 
 struct dashcdg_packet_view {

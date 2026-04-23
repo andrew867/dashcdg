@@ -21,6 +21,7 @@
 #endif
 
 void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio);
+static void dashcdg_desktop_audio_repair_stream_ring_locked(struct dashcdg_desktop_audio *audio);
 
 #define DASHCDG_ATOMIC_GET(value) (__atomic_load_n(&(value), __ATOMIC_RELAXED))
 #define DASHCDG_ATOMIC_SET(value, next) __atomic_store_n(&(value), (next), __ATOMIC_RELAXED)
@@ -146,6 +147,7 @@ static size_t dashcdg_stream_buffer_consume(
     memset(out, 0, total_samples * sizeof(int16_t));
 
     pthread_mutex_lock(&audio->stream_mutex);
+    dashcdg_desktop_audio_repair_stream_ring_locked(audio);
     while (consumed < (size_t) frame_count && audio->stream_queued_frames > 0) {
         size_t copy_frames = audio->stream_queued_frames;
 
@@ -213,6 +215,27 @@ static void dashcdg_desktop_audio_flush_stream_ring_locked(struct dashcdg_deskto
     audio->stream_played_frames = 0;
     audio->stream_underrun_events = 0U;
     audio->stream_underrun_frames = 0U;
+}
+
+static void dashcdg_desktop_audio_repair_stream_ring_locked(struct dashcdg_desktop_audio *audio) {
+    if (audio == NULL) {
+        return;
+    }
+    if (audio->stream_capacity_frames == 0U) {
+        audio->stream_read_frame = 0U;
+        audio->stream_write_frame = 0U;
+        audio->stream_queued_frames = 0U;
+        return;
+    }
+    if (audio->stream_read_frame >= audio->stream_capacity_frames) {
+        audio->stream_read_frame %= audio->stream_capacity_frames;
+    }
+    if (audio->stream_write_frame >= audio->stream_capacity_frames) {
+        audio->stream_write_frame %= audio->stream_capacity_frames;
+    }
+    if (audio->stream_queued_frames > audio->stream_capacity_frames) {
+        audio->stream_queued_frames = audio->stream_capacity_frames;
+    }
 }
 
 void dashcdg_desktop_audio_flush_stream_ring(struct dashcdg_desktop_audio *audio) {
@@ -1368,6 +1391,7 @@ size_t dashcdg_desktop_audio_queue_frames(
     }
 
     pthread_mutex_lock(&audio->stream_mutex);
+    dashcdg_desktop_audio_repair_stream_ring_locked(audio);
     if (frame_count > audio->stream_capacity_frames - audio->stream_queued_frames) {
         pthread_mutex_unlock(&audio->stream_mutex);
         return 0;
@@ -1412,6 +1436,7 @@ uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *a
     }
 
     pthread_mutex_lock((pthread_mutex_t *) &audio->stream_mutex);
+    dashcdg_desktop_audio_repair_stream_ring_locked((struct dashcdg_desktop_audio *) audio);
     queued_frames = audio->stream_queued_frames;
     pthread_mutex_unlock((pthread_mutex_t *) &audio->stream_mutex);
 
@@ -1420,8 +1445,7 @@ uint32_t dashcdg_desktop_audio_buffered_ms(const struct dashcdg_desktop_audio *a
      * rate only for sizing/opening Pa_OpenStream — do not interpret queued frame counts in that Hz.
      */
     if (audio->mode == DASHCDG_AUDIO_MODE_STREAM &&
-            !dashcdg_desktop_audio_output_device_ready(audio) &&
-            audio->stream_sample_rate == audio->session_sample_rate) {
+            !dashcdg_desktop_audio_output_device_ready(audio)) {
         rate_for_ms = audio->session_sample_rate;
     } else {
         rate_for_ms = audio->stream_sample_rate;
