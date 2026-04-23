@@ -55,30 +55,59 @@ jobs:
             git
             make
             zip
+            autoconf
+            automake
+            libtool
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-glew
+            mingw-w64-x86_64-freeglut
             mingw-w64-i686-gcc
             mingw-w64-i686-make
             mingw-w64-i686-cmake
             mingw-w64-i686-ninja
             mingw-w64-i686-binutils
+            mingw-w64-i686-glew
+            mingw-w64-i686-freeglut
+
+      - name: Resolve MSYS2 root
+        shell: msys2 {0}
+        run: |
+          gcc64="$(command -v x86_64-w64-mingw32-gcc)"
+          if [[ -z "${gcc64}" ]]; then
+            echo "x86_64-w64-mingw32-gcc not found on PATH" >&2
+            exit 1
+          fi
+          msys_root="$(cd "$(dirname "${gcc64}")/../.." && pwd)"
+          if [[ ! -d "${msys_root}/mingw64/bin" ]] || [[ ! -d "${msys_root}/mingw32/bin" ]]; then
+            echo "Resolved MSYS2 root is incomplete: ${msys_root}" >&2
+            exit 1
+          fi
+          echo "Resolved MSYS2 root: ${msys_root}"
+          {
+            echo "MSYS2_ROOT=${msys_root}"
+            echo "DASHCDG_MSYS2_ROOT=${msys_root}"
+          } >> "${GITHUB_ENV}"
 
       - name: Fetch vendor sources
         shell: msys2 {0}
         run: |
+          export MSYS2_ROOT="${MSYS2_ROOT:-${DASHCDG_MSYS2_ROOT:-}}"
           bash scripts/fetch_opus_portaudio_vendors.sh
 
       - name: Build sneakernet dist bundle
         shell: msys2 {0}
         run: |
+          export MSYS2_ROOT="${MSYS2_ROOT:-${DASHCDG_MSYS2_ROOT:-}}"
           DASHCDG_SNEAKENET_CLEAN=1 RUN_P3_DISASM=1 bash scripts/build_windows_sneakernet_dist.sh
           test -f "${ZIP_PATH}"
 
       - name: Package sample MP3+G library (cdg/)
         shell: msys2 {0}
         run: |
+          export MSYS2_ROOT="${MSYS2_ROOT:-${DASHCDG_MSYS2_ROOT:-}}"
           if [[ ! -d cdg ]] || [[ -z "$(ls -A cdg 2>/dev/null)" ]]; then
             echo "cdg/ missing or empty — cannot build sample zip" >&2
             exit 1
