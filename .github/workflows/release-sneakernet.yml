@@ -81,7 +81,8 @@ jobs:
             echo "msys2-location output is empty" >&2
             exit 1
           fi
-          msys_root="$(cygpath -u "${msys_root_win}")"
+          msys_root_win="${msys_root_win//\\//}"
+          msys_root="$(cygpath -u -a "${msys_root_win}")"
           if [[ ! -d "${msys_root}/mingw64/bin" ]] || [[ ! -d "${msys_root}/mingw32/bin" ]]; then
             echo "Resolved MSYS2 root is incomplete: ${msys_root}" >&2
             exit 1
