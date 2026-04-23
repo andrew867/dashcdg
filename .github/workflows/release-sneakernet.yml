@@ -106,6 +106,7 @@ jobs:
         shell: msys2 {0}
         run: |
           export MSYS2_ROOT="${MSYS2_ROOT:-${DASHCDG_MSYS2_ROOT:-}}"
+          rm -rf build/soxr-vendor build/soxr-vendor-mingw64 build/soxr-vendor-mingw32
           DASHCDG_SNEAKENET_CLEAN=1 RUN_P3_DISASM=1 bash scripts/build_windows_sneakernet_dist.sh
           test -f "${ZIP_PATH}"
 
