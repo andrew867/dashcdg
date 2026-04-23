@@ -31,15 +31,10 @@ static int64_t dashcdg_clamp_delta(int64_t delta, int64_t max_step_ms) {
 uint64_t dashcdg_clock_now_ms(void) {
 #ifdef _WIN32
     LARGE_INTEGER counter;
-    static LARGE_INTEGER frequency;
+    LARGE_INTEGER frequency;
 
-    if (frequency.QuadPart == 0) {
-        QueryPerformanceFrequency(&frequency);
-        if (frequency.QuadPart == 0) {
-            return (uint64_t) GetTickCount();
-        }
-    }
     QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
 
     return (uint64_t) ((counter.QuadPart * 1000ULL) / (uint64_t) frequency.QuadPart);
 #else
