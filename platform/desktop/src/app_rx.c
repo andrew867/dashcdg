@@ -156,7 +156,7 @@ static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
 #define DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES (4U + (DASHCDG_CDG_SNAPSHOT_STATE_BYTES * 2U))
 #define DASHCDG_V4_ANCHOR_CHUNK_COUNT ((DASHCDG_V4_ANCHOR_ENCODED_MAX_BYTES + DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE - 1U) / \
         DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE)
-#define DASHCDG_RX_AUDIO_ARRIVAL_GAP_THRESHOLD_MS 40U
+#define DASHCDG_RX_AUDIO_ARRIVAL_GAP_THRESHOLD_MS 80U
 #define DASHCDG_RX_AUDIO_ARRIVAL_BURST_THRESHOLD_MS 3U
 
 static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
@@ -2303,6 +2303,7 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
                 local_now_ms
         );
         state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
+        state->audio_arrival_gap_max_ms = 0U;
     }
     if (state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) {
         delta = state->audio_arrival_burst_events - state->last_logged_audio_arrival_burst_events;

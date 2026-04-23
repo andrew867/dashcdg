@@ -105,7 +105,8 @@
 #define DASHCDG_V4_RESILIENT_STARTUP_PREROLL_MS 500U
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
-#define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 40U
+#define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 80U
+#define DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS 4U
 #define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 8U
 #define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 32U
 #define DASHCDG_TX_AUDIO_LATE_FILL_THRESHOLD_MS (DASHCDG_AUDIO_FRAME_MS * 2U)
@@ -2582,6 +2583,37 @@ static int64_t dashcdg_tx_next_audio_lead_ms_locked(uint64_t playback_ms) {
     return (int64_t) g_tx_state.pending_audio_frame.playback_ms - (int64_t) playback_ms;
 }
 
+static int dashcdg_tx_audio_release_due_soon_locked(uint64_t now_ms, uint64_t margin_ms) {
+    uint64_t send_deadline_ms;
+    uint64_t next_playback_ms;
+    uint64_t next_due_ms;
+
+    if (!g_tx_state.transport_v4_enabled ||
+            g_tx_state.paused ||
+            g_tx_state.session_start_ms == 0U) {
+        return 0;
+    }
+
+    send_deadline_ms = now_ms + dashcdg_tx_audio_send_lead_ms_locked() + margin_ms;
+    if (send_deadline_ms < g_tx_state.session_start_ms) {
+        return 0;
+    }
+
+    if (g_tx_state.pending_audio_frame_valid) {
+        next_playback_ms = g_tx_state.pending_audio_frame.playback_ms;
+    } else if (g_tx_state.audio_sent_any_frame) {
+        next_playback_ms = g_tx_state.last_audio_sent_playback_ms + (uint64_t) DASHCDG_AUDIO_FRAME_MS;
+    } else if (g_tx_state.audio_playback_end_ms > 0U ||
+            dashcdg_runtime_queue_depth(&g_tx_state.audio_ready_queue) > 0U) {
+        next_playback_ms = 0U;
+    } else {
+        return 0;
+    }
+
+    next_due_ms = g_tx_state.session_start_ms + next_playback_ms;
+    return next_due_ms <= send_deadline_ms ? 1 : 0;
+}
+
 static int64_t dashcdg_tx_next_cdg_lead_ms_locked(uint64_t playback_ms) {
     if (g_tx_state.next_cdg_batch_index >= g_tx_state.cdg_batch_count) {
         return -1;
@@ -2697,6 +2729,7 @@ static size_t dashcdg_tx_collect_audio_fault_lines_locked(
                 (unsigned long long) now_ms
         );
         g_tx_state.last_logged_audio_send_gap_events = g_tx_state.audio_send_gap_events;
+        g_tx_state.audio_send_gap_max_ms = 0U;
     }
     if (g_tx_state.audio_send_burst_events > g_tx_state.last_logged_audio_send_burst_events) {
         delta = g_tx_state.audio_send_burst_events - g_tx_state.last_logged_audio_send_burst_events;
@@ -5598,6 +5631,11 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         dashcdg_tx_send_v4_loading_screen_locked(now_ms, packet, packet_size);
     }
 
+    if (g_tx_state.v4_anchor_first_full_delivery_done &&
+            dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
+        return;
+    }
+
     if (g_tx_state.v4_video_anchor_bytes != NULL &&
             g_tx_state.v4_video_anchor_offset < g_tx_state.v4_video_anchor_size) {
         uint64_t anchor_interval_ms = g_tx_state.v4_anchor_first_full_delivery_done
@@ -5622,6 +5660,10 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
                 g_tx_state.last_v4_video_anchor_chunk_ms = now_ms;
             }
         }
+    }
+
+    if (dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
+        return;
     }
 
     while (!g_tx_state.paused &&
