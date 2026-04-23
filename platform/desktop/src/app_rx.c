@@ -163,6 +163,11 @@ static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
         DASHCDG_V4_ANCHOR_RX_CHUNK_STRIDE)
 #define DASHCDG_RX_AUDIO_ARRIVAL_GAP_THRESHOLD_MS 80U
 #define DASHCDG_RX_AUDIO_ARRIVAL_BURST_THRESHOLD_MS 3U
+#if defined(DASHCDG_RX_UI_GDI_ONLY)
+#define DASHCDG_RX_AUDIO_ARRIVAL_FAULT_LOG_MIN_MS 2000U
+#else
+#define DASHCDG_RX_AUDIO_ARRIVAL_FAULT_LOG_MIN_MS 500U
+#endif
 
 static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
     uint64_t now_ms;
@@ -299,6 +304,7 @@ struct receiver_state {
     uint32_t audio_burst_run_count;
     uint64_t last_logged_audio_arrival_gap_events;
     uint64_t last_logged_audio_arrival_burst_events;
+    uint64_t last_logged_audio_arrival_fault_local_ms;
     uint16_t announced_audio_sample_rate;
     uint8_t announced_audio_channels;
     uint16_t announced_playout_delay_ms;
@@ -1151,6 +1157,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_burst_run_count = 0;
     state->last_logged_audio_arrival_gap_events = 0;
     state->last_logged_audio_arrival_burst_events = 0;
+    state->last_logged_audio_arrival_fault_local_ms = 0;
     state->announced_audio_sample_rate = 0;
     state->announced_audio_channels = 0;
     state->announced_playout_delay_ms = 0;
@@ -2335,6 +2342,7 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
         }
         state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
         state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
+        state->last_logged_audio_arrival_fault_local_ms = local_now_ms;
         return 0U;
     }
 
@@ -2413,6 +2421,13 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
         );
         state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
     }
+    if ((state->audio_arrival_gap_events > state->last_logged_audio_arrival_gap_events ||
+            state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) &&
+            state->last_logged_audio_arrival_fault_local_ms != 0U &&
+            local_now_ms > state->last_logged_audio_arrival_fault_local_ms &&
+            local_now_ms - state->last_logged_audio_arrival_fault_local_ms < DASHCDG_RX_AUDIO_ARRIVAL_FAULT_LOG_MIN_MS) {
+        return line_count;
+    }
     if (state->audio_arrival_gap_events > state->last_logged_audio_arrival_gap_events) {
         delta = state->audio_arrival_gap_events - state->last_logged_audio_arrival_gap_events;
         DASHCDG_RX_APPEND_FAULT_LINE(
@@ -2425,6 +2440,7 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
         );
         state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
         state->audio_arrival_gap_max_ms = 0U;
+        state->last_logged_audio_arrival_fault_local_ms = local_now_ms;
     }
     if (state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) {
         delta = state->audio_arrival_burst_events - state->last_logged_audio_arrival_burst_events;
@@ -2437,6 +2453,8 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
                 local_now_ms
         );
         state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
+        state->audio_arrival_burst_max_run = 0U;
+        state->last_logged_audio_arrival_fault_local_ms = local_now_ms;
     }
 
 #undef DASHCDG_RX_APPEND_FAULT_LINE
