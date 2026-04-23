@@ -477,6 +477,7 @@ static int g_audio_start_inflight = 0;
 static uint64_t g_rx_audio_start_fail_log_ms = 0U;
 static int g_hud_visible = 0;
 static int g_audio_muted = 0;
+static int g_audio_decode_disabled = 0;
 static volatile int g_rx_shutdown_requested = 0;
 static pthread_mutex_t g_render_mutex;
 static struct dashcdg_rx_render_snapshot g_render_snapshot;
@@ -990,7 +991,7 @@ static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
     fprintf(
             stderr,
-            "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
+            "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
             "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
             argv0
     );
@@ -999,7 +1000,7 @@ static void dashcdg_rx_print_usage(const char *argv0) {
 #else
     fprintf(
             stderr,
-            "usage: %s [--help] [--headless] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
+            "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
             "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [endpoint-address] [port]\n",
             argv0
     );
@@ -1020,14 +1021,14 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
     fprintf(
             stdout,
-            "Synopsis: %s [--help] [--headless] [--rx-av-sync-log-ms <ms>] [--rx-graphics-clock dac|sender] "
+            "Synopsis: %s [--help] [--headless] [--rx-drop-audio] [--rx-av-sync-log-ms <ms>] [--rx-graphics-clock dac|sender] "
             "[--win-gdi|--gdi] [endpoint-address] [port]\n\n",
             prog
     );
     fprintf(
             stdout,
             "Listens for UDP multicast/broadcast on the given endpoint. Windowed mode shows CD+G; "
-            "HUD is hidden by default (press I). M toggles mute; S prints a stats line.\n\n"
+            "HUD is hidden by default (press I). M toggles mute; D toggles audio decode/drop; S prints a stats line.\n\n"
     );
 #else
     fprintf(stdout, "Synopsis: %s [--help] [--headless] [endpoint-address] [port]\n\n", prog);
@@ -1056,6 +1057,7 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
             "--rx-graphics-clock dac|sender: dac = align raster to locally heard audio; "
             "sender = network lyrics timeline (default).\n"
             "--rx-graphics-trim-ms <n>: add n ms to raster playback before seek (fine sync).\n"
+            "--rx-drop-audio / --no-audio-decode: ignore audio packets and keep video/sync only.\n"
     );
 }
 
@@ -1831,6 +1833,8 @@ static void dashcdg_rx_format_audio_gate_locked(
     buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
     if (!state->network_audio_enabled) {
         snprintf(buffer, buffer_size, "net-audio-off");
+    } else if (g_audio_decode_disabled) {
+        snprintf(buffer, buffer_size, "audio-drop");
     } else if (state->announced_transport_version == DASHCDG_PROTOCOL_VERSION_V4 && !state->audio_jitter.initialized) {
         snprintf(buffer, buffer_size, "wait-first-audio");
     } else if (!state->have_clock) {
@@ -2145,7 +2149,7 @@ static int dashcdg_rx_source_idle_and_drained_locked(
 ) {
     uint64_t since_last_dg_ms;
 
-    if (state == NULL || !state->network_audio_enabled || state->playback_paused) {
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled || state->playback_paused) {
         return 0;
     }
     if (state->last_datagram_local_ms == 0U) {
@@ -2192,6 +2196,97 @@ static int dashcdg_rx_park_idle_audio_output_locked(
     g_audio_stream_started = 0;
     g_audio_start_inflight = 0;
     return 1;
+}
+
+static void dashcdg_rx_configure_audio_locked(
+        struct receiver_state *state,
+        uint64_t local_now_ms,
+        uint16_t sample_rate,
+        uint8_t channels,
+        uint8_t frame_ms,
+        uint16_t playout_delay_ms,
+        uint8_t audio_profile_id,
+        uint8_t codec_id
+);
+
+static void dashcdg_rx_reset_audio_decode_path_locked(struct receiver_state *state) {
+    if (state == NULL) {
+        return;
+    }
+
+    dashcdg_audio_jitter_clear(&state->audio_jitter);
+    memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
+    state->jitter_audio_decode_primed = 0;
+    state->pcm_src_overlap_valid = 0U;
+    state->pcm_src_stream_in_samples = 0U;
+    state->pcm_src_stream_out_samples = 0U;
+#if defined(DASHCDG_HAVE_LIBSOXR)
+    dashcdg_pcm_soxr_stream_reset();
+#endif
+    state->last_audio_jitter_apply_local_ms = 0U;
+    state->last_audio_queue_success_local_ms = 0U;
+    state->last_audio_timestamp_advance_local_ms = 0U;
+    state->last_audio_timestamp_ms = -1;
+    state->audio_resample_trim_ppm = 0;
+    state->audio_last_queue_pressure_local_ms = 0U;
+    state->audio_servo_enable_after_local_ms = 0U;
+    state->rx_audio_applied_valid = 0;
+
+    dashcdg_opus_decoder_free(&g_opus_decoder);
+    dashcdg_rx_amr_decoders_release();
+}
+
+static void dashcdg_rx_set_audio_decode_disabled_locked(int disabled) {
+    disabled = disabled ? 1 : 0;
+    if (g_audio_decode_disabled == disabled) {
+        return;
+    }
+
+    g_audio_decode_disabled = disabled;
+    if (g_audio != NULL) {
+        dashcdg_desktop_audio_stop_stream(g_audio);
+        dashcdg_desktop_audio_flush_stream_ring(g_audio);
+        dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
+        g_receiver.last_observed_stream_underrun_events = g_audio->stream_underrun_events;
+        g_receiver.last_observed_stream_underrun_frames = g_audio->stream_underrun_frames;
+    }
+    g_audio_stream_started = 0;
+    g_audio_start_inflight = 0;
+    dashcdg_rx_reset_audio_decode_path_locked(&g_receiver);
+    if (!disabled && g_receiver.network_audio_enabled &&
+            g_receiver.announced_audio_sample_rate > 0U &&
+            g_receiver.announced_audio_channels > 0U &&
+            g_receiver.announced_audio_frame_ms > 0U) {
+        dashcdg_rx_configure_audio_locked(
+                &g_receiver,
+                dashcdg_clock_now_ms(),
+                g_receiver.announced_audio_sample_rate,
+                g_receiver.announced_audio_channels,
+                g_receiver.announced_audio_frame_ms,
+                g_receiver.announced_playout_delay_ms,
+                g_receiver.announced_audio_profile_id,
+                g_receiver.announced_audio_codec_id
+        );
+    }
+}
+
+static void dashcdg_rx_toggle_audio_decode_drop(void) {
+    int disabled;
+    char line[128];
+
+    pthread_mutex_lock(&g_receiver.mutex);
+    dashcdg_rx_set_audio_decode_disabled_locked(!g_audio_decode_disabled);
+    disabled = g_audio_decode_disabled;
+    pthread_mutex_unlock(&g_receiver.mutex);
+
+    snprintf(
+            line,
+            sizeof(line),
+            "[rx] audio decode %s%s",
+            disabled ? "disabled" : "enabled",
+            disabled ? " (dropping incoming audio packets)" : ""
+    );
+    dashcdg_rx_async_stdout_line(line);
 }
 
 static size_t dashcdg_rx_collect_fault_lines_locked(
@@ -2409,7 +2504,7 @@ static void dashcdg_rx_note_audio_timestamp_progress_locked(
 static void dashcdg_rx_reprime_audio_after_host_underrun_locked(struct receiver_state *state) {
     uint64_t now_ms;
 
-    if (state == NULL || !state->network_audio_enabled) {
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled) {
         return;
     }
     now_ms = dashcdg_clock_now_ms();
@@ -2457,7 +2552,7 @@ static int dashcdg_rx_should_auto_recover_host_underrun_locked(
     uint64_t since_last_ts_advance_ms;
     uint32_t buffered_ms;
 
-    if (state == NULL || !state->network_audio_enabled || state->playback_paused ||
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled || state->playback_paused ||
             g_audio == NULL || !g_audio_stream_started || g_audio_start_inflight) {
         return 0;
     }
@@ -2503,7 +2598,7 @@ static int dashcdg_rx_should_auto_recover_zero_buffer_locked(
     uint64_t since_last_audio_queue_success_ms;
     uint64_t since_last_dg_ms;
 
-    if (state == NULL || !state->network_audio_enabled || state->playback_paused ||
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled || state->playback_paused ||
             g_audio == NULL || g_audio_start_inflight) {
         return 0;
     }
@@ -2547,7 +2642,7 @@ static int dashcdg_rx_should_auto_recover_buffered_silent_locked(
     uint64_t since_last_ts_advance_ms;
     uint64_t since_last_dg_ms;
 
-    if (state == NULL || !state->network_audio_enabled || state->playback_paused ||
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled || state->playback_paused ||
             g_audio == NULL || !g_audio_stream_started || g_audio_start_inflight) {
         return 0;
     }
@@ -3179,6 +3274,10 @@ static void dashcdg_rx_observe_fec_parity_locked(struct receiver_state *state, c
         return;
     }
 
+    if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO && g_audio_decode_disabled) {
+        return;
+    }
+
     if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_AUDIO) {
         group = dashcdg_rx_get_fec_group_locked(state->audio_fec_groups, view->fec_parity.group_id);
     } else if (view->fec_parity.stream_type == DASHCDG_STREAM_TYPE_CDG) {
@@ -3314,7 +3413,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
     int have_trim_ppm_for_frame = 0;
     uint64_t local_now_ms;
 
-    if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio == NULL) {
+    if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio_decode_disabled || g_audio == NULL) {
         return 0;
     }
     host_output_channels = dashcdg_rx_portaudio_output_channels(state->announced_audio_channels);
@@ -3715,7 +3814,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
         uint64_t cdg_miss = 0U;
         int progressed = 0;
 
-        if (state->audio_jitter.initialized) {
+        if (!g_audio_decode_disabled && state->audio_jitter.initialized) {
             int audio_skip_hold_active = 0;
             int audio_backpressure_hold_active = 0;
 
@@ -4012,7 +4111,7 @@ static void handle_live_cdg_batch(struct receiver_state *state, const struct das
 }
 
 static void handle_audio_frame(struct receiver_state *state, const struct dashcdg_packet_view *view) {
-    if (state == NULL || view == NULL || !state->network_audio_enabled) {
+    if (state == NULL || view == NULL || !state->network_audio_enabled || g_audio_decode_disabled) {
         return;
     }
 
@@ -4134,7 +4233,7 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
         dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
     }
 
-    if ((song_changed || session_changed || asset_changed) && has_network_audio) {
+    if ((song_changed || session_changed || asset_changed) && has_network_audio && !g_audio_decode_disabled) {
         if (g_audio == NULL) {
             g_audio = dashcdg_desktop_audio_new();
         }
@@ -4210,7 +4309,7 @@ static void dashcdg_rx_configure_audio_locked(
     uint32_t buffer_ms;
     uint16_t host_ch;
 
-    if (state == NULL || !state->network_audio_enabled) {
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled) {
         return;
     }
 
@@ -4337,7 +4436,8 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
         uint8_t wire_profile_id,
         uint8_t wire_frame_ms
 ) {
-    if (state == NULL || !state->network_audio_enabled || state->announced_audio_sample_rate == 0U) {
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled ||
+            state->announced_audio_sample_rate == 0U) {
         return;
     }
     if (wire_codec_id == state->announced_audio_codec_id && wire_profile_id == state->announced_audio_profile_id &&
@@ -4413,7 +4513,7 @@ static void dashcdg_rx_rearm_live_video_after_unpause_locked(struct receiver_sta
 static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_state *state, int preserve_playback_anchor) {
     uint64_t now_ms;
 
-    if (state == NULL || !state->network_audio_enabled) {
+    if (state == NULL || !state->network_audio_enabled || g_audio_decode_disabled) {
         return;
     }
     now_ms = dashcdg_clock_now_ms();
@@ -4590,7 +4690,7 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         dashcdg_rx_note_clock_update_locked(state, local_now_ms, 0);
     }
 
-    if (has_network_audio && need_audio_device_reconfigure) {
+    if (has_network_audio && !g_audio_decode_disabled && need_audio_device_reconfigure) {
         dashcdg_rx_configure_audio_locked(
                 state,
                 local_now_ms,
@@ -4649,7 +4749,7 @@ static int dashcdg_rx_store_v4_audio_frame_locked(struct receiver_state *state, 
 }
 
 static void handle_v4_audio_chunk(struct receiver_state *state, const struct dashcdg_packet_view *view) {
-    if (state == NULL || view == NULL || !state->network_audio_enabled) {
+    if (state == NULL || view == NULL || !state->network_audio_enabled || g_audio_decode_disabled) {
         return;
     }
     if (dashcdg_rx_is_stale_prior_session_media_locked(state, view)) {
@@ -4713,6 +4813,10 @@ static void handle_v4_repair_window(struct receiver_state *state, const struct d
             view->v4_repair_window.group_size > DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE ||
             view->v4_repair_window.payload_length == 0U ||
             view->v4_repair_window.payload_length > DASHCDG_MAX_FEC_PAYLOAD_BYTES) {
+        return;
+    }
+
+    if (view->v4_repair_window.stream_type == DASHCDG_STREAM_TYPE_AUDIO && g_audio_decode_disabled) {
         return;
     }
 
@@ -5465,7 +5569,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
         snprintf(
                 hud_line_b,
                 hud_line_b_size,
-                "c%u p%u buf:%u/%u+%u=%u trim:%dppm pend:%u/%u hot:%u/%u mute:%s | %.18s | %.18s"
+                "c%u p%u buf:%u/%u+%u=%u trim:%dppm pend:%u/%u hot:%u/%u audio:%s | %.18s | %.18s"
                 " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%ums dg:%ums st:%ums pre:%u/%u sk:%s",
                 (unsigned int) g_receiver.announced_audio_codec_id,
                 (unsigned int) g_receiver.announced_audio_profile_id,
@@ -5478,7 +5582,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 (unsigned int) pending_cdg,
                 (unsigned int) audio_repairable,
                 (unsigned int) cdg_repairable,
-                muted ? "on" : "off",
+                g_audio_decode_disabled ? "drop" : (muted ? "mute" : "on"),
                 audio_gate,
                 render_gate,
                 (long long) g_receiver.sender_offset_ms,
@@ -5509,7 +5613,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
         snprintf(
                 hud_line_b,
                 hud_line_b_size,
-                "pre:%u/%u buf:%u/%u+%u=%u trim:%dppm pend:%u/%u hot:%u/%u mute:%s | %.20s | %.20s"
+                "pre:%u/%u buf:%u/%u+%u=%u trim:%dppm pend:%u/%u hot:%u/%u audio:%s | %.20s | %.20s"
                 " | off:%" DASHCDG_RX_PRIi64 " path:%" DASHCDG_RX_PRIi64 " clk:%ums dg:%ums st:%ums",
                 (unsigned int) hud_prefix_bytes,
                 (unsigned int) g_receiver.asset_size,
@@ -5522,7 +5626,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
                 (unsigned int) pending_cdg,
                 (unsigned int) audio_repairable,
                 (unsigned int) cdg_repairable,
-                muted ? "on" : "off",
+                g_audio_decode_disabled ? "drop" : (muted ? "mute" : "on"),
                 audio_gate,
                 render_gate,
                 (long long) g_receiver.sender_offset_ms,
@@ -5542,7 +5646,7 @@ static void dashcdg_rx_fill_hud_lines_locked(
 static int dashcdg_rx_claim_audio_start_locked(uint64_t local_now_ms) {
     uint32_t buffered_ms;
 
-    if (!g_receiver.network_audio_enabled || g_audio_stream_started || g_audio_start_inflight ||
+    if (!g_receiver.network_audio_enabled || g_audio_decode_disabled || g_audio_stream_started || g_audio_start_inflight ||
             g_audio == NULL || !g_receiver.have_clock) {
         return 0;
     }
@@ -5662,6 +5766,8 @@ static void rx_keyboard(unsigned char key, int x, int y) {
         fprintf(stdout, "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
         fflush(stdout);
         pthread_mutex_unlock(&g_receiver.mutex);
+    } else if (key == 'd' || key == 'D') {
+        dashcdg_rx_toggle_audio_decode_drop();
     } else if (key == 's' || key == 'S') {
         dashcdg_rx_emit_status_summary();
     }
@@ -5702,6 +5808,8 @@ static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
         fprintf(stdout, "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
         fflush(stdout);
         pthread_mutex_unlock(&g_receiver.mutex);
+    } else if (vk == 'D' || vk == 'd' || vk == 0x44) {
+        dashcdg_rx_toggle_audio_decode_drop();
     } else if (vk == 'S' || vk == 's' || vk == 0x53) {
         dashcdg_rx_emit_status_summary();
     }
@@ -5927,6 +6035,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_rx_graphics_trim_ms = (int32_t) strtol(argv[i], NULL, 10);
             continue;
         }
+        if (strcmp(argv[i], "--rx-drop-audio") == 0 || strcmp(argv[i], "--no-audio-decode") == 0) {
+            g_audio_decode_disabled = 1;
+            continue;
+        }
         if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
             continue;
@@ -5995,13 +6107,17 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_headless ? " (headless stdout stats mode)" :
 #if DASHCDG_RX_HAVE_GLUT
                     (g_rx_use_win_gdi ?
-                            " (GDI window; HUD hidden by default, press I/M/S as in GL mode)" :
-                            " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, S for stats line to stdout)")
+                            " (GDI window; HUD hidden by default, press I/M/D/S as in GL mode)" :
+                            " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, D to drop audio decode, S for stats line to stdout)")
 #else
-                    " (GDI window; HUD hidden by default, press I/M/S as in GL mode)"
+                    " (GDI window; HUD hidden by default, press I/M/D/S as in GL mode)"
 #endif
     );
     fflush(stdout);
+    if (g_audio_decode_disabled) {
+        fprintf(stdout, "[rx] audio decode disabled at startup (dropping incoming audio packets)\n");
+        fflush(stdout);
+    }
 
     if (!dashcdg_net_init()) {
         fprintf(stderr, "failed to initialize network stack\n");
