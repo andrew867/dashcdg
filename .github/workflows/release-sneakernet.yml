@@ -83,6 +83,9 @@ jobs:
           fi
           msys_root_win="${msys_root_win//\\//}"
           msys_root="$(cygpath -u -a "${msys_root_win}")"
+          if [[ "${msys_root}" == "/" ]]; then
+            msys_root="/."
+          fi
           if [[ ! -d "${msys_root}/mingw64/bin" ]] || [[ ! -d "${msys_root}/mingw32/bin" ]]; then
             echo "Resolved MSYS2 root is incomplete: ${msys_root}" >&2
             exit 1
