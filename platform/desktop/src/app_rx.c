@@ -103,6 +103,7 @@
 #define DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS 6
 #define DASHCDG_RX_QUEUE_SERVO_GAIN_PPM_PER_MS 2
 #define DASHCDG_RX_QUEUE_SERVO_MAX_PPM 200
+#define DASHCDG_RX_QUEUE_SERVO_HOLD_UPDATE_MS 250U
 #define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 3000U
 #define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 1500U
 #define DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS 750U
@@ -370,6 +371,7 @@ struct receiver_state {
     uint32_t audio_host_output_latency_ms;
     int32_t audio_resample_trim_ppm;
     uint64_t audio_servo_enable_after_local_ms;
+    uint64_t audio_last_servo_update_local_ms;
     uint64_t audio_last_queue_pressure_local_ms;
     uint64_t audio_last_stall_recover_local_ms;
 };
@@ -1198,6 +1200,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_host_output_latency_ms = 0U;
     state->audio_resample_trim_ppm = 0;
     state->audio_servo_enable_after_local_ms = 0U;
+    state->audio_last_servo_update_local_ms = 0U;
     state->audio_last_queue_pressure_local_ms = 0U;
     state->audio_last_stall_recover_local_ms = 0U;
     state->last_observed_stream_underrun_events = g_audio != NULL ? g_audio->stream_underrun_events : 0U;
@@ -2073,6 +2076,7 @@ static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *
         return state->audio_resample_trim_ppm;
     }
     now_ms = dashcdg_clock_now_ms();
+    state->audio_last_servo_update_local_ms = now_ms;
     if ((state->audio_servo_enable_after_local_ms != 0U && now_ms < state->audio_servo_enable_after_local_ms) ||
             (state->audio_last_queue_pressure_local_ms != 0U &&
                     now_ms - state->audio_last_queue_pressure_local_ms < DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS)) {
@@ -3308,6 +3312,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
     size_t expected_queued_fc;
     int32_t trim_ppm_for_frame = 0;
     int have_trim_ppm_for_frame = 0;
+    uint64_t local_now_ms;
 
     if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio == NULL) {
         return 0;
@@ -3320,6 +3325,7 @@ static int dashcdg_rx_apply_audio_frame_locked(
      * and audible break-up even though the device was already at the intended latency.
      */
     if (g_audio_stream_started && dashcdg_desktop_audio_output_device_ready(g_audio)) {
+        local_now_ms = dashcdg_clock_now_ms();
         uint32_t buffered_ms = dashcdg_desktop_audio_buffered_ms(g_audio);
         uint32_t target_ms = dashcdg_rx_audio_target_buffer_ms_locked(state);
         uint32_t high_water_ms = target_ms;
@@ -3328,8 +3334,12 @@ static int dashcdg_rx_apply_audio_frame_locked(
         if (frame_ms > 0U) {
             high_water_ms += (uint32_t) frame_ms;
         }
-        trim_ppm_for_frame = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
-        have_trim_ppm_for_frame = 1;
+        if (state->audio_last_servo_update_local_ms == 0U ||
+                local_now_ms - state->audio_last_servo_update_local_ms >= DASHCDG_RX_QUEUE_SERVO_HOLD_UPDATE_MS ||
+                buffered_ms < high_water_ms) {
+            trim_ppm_for_frame = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
+            have_trim_ppm_for_frame = 1;
+        }
         if (target_ms > 0U && buffered_ms >= high_water_ms) {
             return 0;
         }
