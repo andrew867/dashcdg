@@ -6426,7 +6426,7 @@ static void dashcdg_tx_win32_gdi_on_key(void *user, unsigned vk, int down) {
 }
 
 static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
-    static uint8_t rgba_frame[DASHCDG_CDG_RGBA_BYTES];
+    static uint8_t bgra_frame[DASHCDG_CDG_RGBA_BYTES];
     struct dashcdg_win32_gdi_view *view = NULL;
     const char *title = "dashcdg transmitter (GDI preview)";
     uint64_t next_frame_deadline_ms = 0U;
@@ -6542,12 +6542,12 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
         pthread_mutex_unlock(&g_tx_state.mutex);
 
         if (preview_on) {
-            dashcdg_cdg_state_to_rgba8(&draw_state, rgba_frame);
+            dashcdg_cdg_state_to_bgra8(&draw_state, bgra_frame);
         } else {
-            memset(rgba_frame, 0, sizeof(rgba_frame));
+            memset(bgra_frame, 0, sizeof(bgra_frame));
         }
 
-        dashcdg_win32_gdi_view_present_rgba(view, rgba_frame, sizeof(rgba_frame), show_hud, hud_line_a, hud_line_b);
+        dashcdg_win32_gdi_view_present_bgra(view, bgra_frame, sizeof(bgra_frame), show_hud, hud_line_a, hud_line_b);
     }
 
     dashcdg_win32_gdi_view_destroy(view);

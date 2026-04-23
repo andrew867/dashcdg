@@ -91,7 +91,11 @@
 #define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
 /* No UDP for this long → show reconnecting overlay (between typical 15–20 s loss UX targets). */
 #define DASHCDG_STREAM_LOSS_RECONNECT_MS 18000U
+#if defined(DASHCDG_RX_UI_GDI_ONLY)
+#define DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS 0U
+#else
 #define DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS 2000U
+#endif
 #define DASHCDG_RX_DEFAULT_TOTAL_LATENCY_MS 480U
 #define DASHCDG_RX_OUTPUT_LATENCY_FALLBACK_MS 120U
 #define DASHCDG_RX_APP_RING_SAFETY_MS 40U
@@ -5149,7 +5153,7 @@ static void *network_thread(void *user_data) {
                 g_receiver.datagrams_received++;
                 g_receiver.bytes_received += (uint64_t) received;
                 g_receiver.last_datagram_local_ms = local_now_ms;
-                if (prev_dg > 0U && local_now_ms > prev_dg) {
+                if (g_rx_stats_interval_ms != 0U && prev_dg > 0U && local_now_ms > prev_dg) {
                     uint64_t gap = local_now_ms - prev_dg;
                     uint64_t err = gap > 25U ? gap - 25U : 25U - gap;
 
@@ -5166,11 +5170,13 @@ static void *network_thread(void *user_data) {
             {
                 int64_t skew = (int64_t) view.header.sender_time_ms - (int64_t) local_now_ms;
 
-                if (!g_receiver.rx_sender_skew_ema_inited) {
-                    g_receiver.rx_sender_skew_ema_ms = skew;
-                    g_receiver.rx_sender_skew_ema_inited = 1;
-                } else {
-                    g_receiver.rx_sender_skew_ema_ms = (g_receiver.rx_sender_skew_ema_ms * 7 + skew) / 8;
+                if (g_rx_stats_interval_ms != 0U || g_hud_visible) {
+                    if (!g_receiver.rx_sender_skew_ema_inited) {
+                        g_receiver.rx_sender_skew_ema_ms = skew;
+                        g_receiver.rx_sender_skew_ema_inited = 1;
+                    } else {
+                        g_receiver.rx_sender_skew_ema_ms = (g_receiver.rx_sender_skew_ema_ms * 7 + skew) / 8;
+                    }
                 }
             }
 
@@ -5827,7 +5833,7 @@ static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
 }
 
 static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
-    static uint8_t rgba_frame[DASHCDG_CDG_RGBA_BYTES];
+    static uint8_t bgra_frame[DASHCDG_CDG_RGBA_BYTES];
     struct dashcdg_win32_gdi_view *view = NULL;
     const char *title = "dashcdg desktop receiver (GDI)";
     uint64_t next_frame_deadline_ms = 0U;
@@ -5885,14 +5891,14 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
 
         if (show_connecting) {
             dashcdg_rx_render_connecting_state(&connecting_state, local_now_ms, reconnecting);
-            dashcdg_cdg_state_to_rgba8(&connecting_state, rgba_frame);
+            dashcdg_cdg_state_to_bgra8(&connecting_state, bgra_frame);
         } else if (have_render_snapshot) {
-            dashcdg_cdg_state_to_rgba8(&render_snapshot.state, rgba_frame);
+            dashcdg_cdg_state_to_bgra8(&render_snapshot.state, bgra_frame);
         } else {
-            memset(rgba_frame, 0, sizeof(rgba_frame));
+            memset(bgra_frame, 0, sizeof(bgra_frame));
         }
 
-        dashcdg_win32_gdi_view_present_rgba(view, rgba_frame, sizeof(rgba_frame), show_hud, hud_line_a, hud_line_b);
+        dashcdg_win32_gdi_view_present_bgra(view, bgra_frame, sizeof(bgra_frame), show_hud, hud_line_a, hud_line_b);
     }
 
     dashcdg_win32_gdi_view_destroy(view);

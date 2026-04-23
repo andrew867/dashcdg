@@ -7,5 +7,6 @@
 #define DASHCDG_CDG_RGBA_BYTES ((size_t) DASHCDG_VISIBLE_WIDTH * (size_t) DASHCDG_VISIBLE_HEIGHT * 4U)
 
 void dashcdg_cdg_state_to_rgba8(const struct dashcdg_cdg_state *state, uint8_t *rgba_out);
+void dashcdg_cdg_state_to_bgra8(const struct dashcdg_cdg_state *state, uint8_t *bgra_out);
 
 #endif

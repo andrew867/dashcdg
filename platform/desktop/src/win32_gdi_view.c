@@ -226,10 +226,10 @@ int dashcdg_win32_gdi_view_poll(struct dashcdg_win32_gdi_view *view) {
     return view->quit ? 0 : 1;
 }
 
-int dashcdg_win32_gdi_view_present_rgba(
+static int dashcdg_win32_gdi_view_present_bgra_internal(
         struct dashcdg_win32_gdi_view *view,
-        const uint8_t *rgba,
-        size_t rgba_bytes,
+        const uint8_t *bgra,
+        size_t bgra_bytes,
         int show_hud,
         const char *hud_line_a,
         const char *hud_line_b
@@ -240,7 +240,7 @@ int dashcdg_win32_gdi_view_present_rgba(
     int ch;
     uint64_t now_ms;
 
-    if (view == NULL || rgba == NULL || rgba_bytes != DASHCDG_CDG_RGBA_BYTES || view->hwnd == NULL) {
+    if (view == NULL || bgra == NULL || bgra_bytes != DASHCDG_CDG_RGBA_BYTES || view->hwnd == NULL) {
         return 0;
     }
     now_ms = dashcdg_clock_now_ms();
@@ -250,12 +250,6 @@ int dashcdg_win32_gdi_view_present_rgba(
     }
     view->last_present_ms = now_ms;
     ValidateRect(view->hwnd, NULL);
-
-    dashcdg_win32_rgba_to_bgra(
-            rgba,
-            view->bgra_scratch,
-            (size_t) DASHCDG_VISIBLE_WIDTH * (size_t) DASHCDG_VISIBLE_HEIGHT
-    );
 
     hdc = GetDC(view->hwnd);
     if (hdc == NULL) {
@@ -282,7 +276,7 @@ int dashcdg_win32_gdi_view_present_rgba(
             0,
             DASHCDG_VISIBLE_WIDTH,
             DASHCDG_VISIBLE_HEIGHT,
-            view->bgra_scratch,
+            bgra,
             &view->bmi,
             DIB_RGB_COLORS,
             SRCCOPY
@@ -317,6 +311,62 @@ int dashcdg_win32_gdi_view_present_rgba(
 
     ReleaseDC(view->hwnd, hdc);
     return 1;
+}
+
+int dashcdg_win32_gdi_view_present_rgba(
+        struct dashcdg_win32_gdi_view *view,
+        const uint8_t *rgba,
+        size_t rgba_bytes,
+        int show_hud,
+        const char *hud_line_a,
+        const char *hud_line_b
+) {
+    if (view == NULL || rgba == NULL || rgba_bytes != DASHCDG_CDG_RGBA_BYTES) {
+        return 0;
+    }
+    if (view->hwnd == NULL) {
+        return 0;
+    }
+    {
+        uint64_t now_ms = dashcdg_clock_now_ms();
+
+        if (view->last_present_ms != 0U &&
+                now_ms - view->last_present_ms < (uint64_t) DASHCDG_WIN32_GDI_FRAME_INTERVAL_MS) {
+            return 1;
+        }
+    }
+
+    dashcdg_win32_rgba_to_bgra(
+            rgba,
+            view->bgra_scratch,
+            (size_t) DASHCDG_VISIBLE_WIDTH * (size_t) DASHCDG_VISIBLE_HEIGHT
+    );
+    return dashcdg_win32_gdi_view_present_bgra_internal(
+            view,
+            view->bgra_scratch,
+            DASHCDG_CDG_RGBA_BYTES,
+            show_hud,
+            hud_line_a,
+            hud_line_b
+    );
+}
+
+int dashcdg_win32_gdi_view_present_bgra(
+        struct dashcdg_win32_gdi_view *view,
+        const uint8_t *bgra,
+        size_t bgra_bytes,
+        int show_hud,
+        const char *hud_line_a,
+        const char *hud_line_b
+) {
+    return dashcdg_win32_gdi_view_present_bgra_internal(
+            view,
+            bgra,
+            bgra_bytes,
+            show_hud,
+            hud_line_a,
+            hud_line_b
+    );
 }
 
 #else
@@ -364,6 +414,23 @@ int dashcdg_win32_gdi_view_present_rgba(
     (void) view;
     (void) rgba;
     (void) rgba_bytes;
+    (void) show_hud;
+    (void) hud_line_a;
+    (void) hud_line_b;
+    return 0;
+}
+
+int dashcdg_win32_gdi_view_present_bgra(
+        struct dashcdg_win32_gdi_view *view,
+        const uint8_t *bgra,
+        size_t bgra_bytes,
+        int show_hud,
+        const char *hud_line_a,
+        const char *hud_line_b
+) {
+    (void) view;
+    (void) bgra;
+    (void) bgra_bytes;
     (void) show_hud;
     (void) hud_line_a;
     (void) hud_line_b;

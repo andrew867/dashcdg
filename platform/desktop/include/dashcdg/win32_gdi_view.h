@@ -38,4 +38,13 @@ int dashcdg_win32_gdi_view_present_rgba(
         const char *hud_line_b
 );
 
+int dashcdg_win32_gdi_view_present_bgra(
+        struct dashcdg_win32_gdi_view *view,
+        const uint8_t *bgra,
+        size_t bgra_bytes,
+        int show_hud,
+        const char *hud_line_a,
+        const char *hud_line_b
+);
+
 #endif
