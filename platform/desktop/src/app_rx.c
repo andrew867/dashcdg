@@ -100,7 +100,7 @@
 #define DASHCDG_RX_APP_RING_HEADROOM_MS 180U
 #define DASHCDG_RX_MIN_RING_CAPACITY_MS 180U
 #define DASHCDG_RX_MAX_RING_CAPACITY_MS 900U
-#define DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS 20
+#define DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS 6
 #define DASHCDG_RX_QUEUE_SERVO_GAIN_PPM_PER_MS 2
 #define DASHCDG_RX_QUEUE_SERVO_MAX_PPM 200
 #define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 3000U
@@ -2061,6 +2061,8 @@ static void dashcdg_rx_refresh_audio_latency_budget_locked(
 static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *state, uint32_t buffered_ms) {
     int32_t error_ms;
     int32_t desired_ppm;
+    int32_t delta_ppm;
+    int32_t step_ppm;
     uint64_t now_ms;
 
     if (state == NULL) {
@@ -2090,7 +2092,12 @@ static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *
         }
     }
 
-    state->audio_resample_trim_ppm += (desired_ppm - state->audio_resample_trim_ppm) / 4;
+    delta_ppm = desired_ppm - state->audio_resample_trim_ppm;
+    step_ppm = delta_ppm / 4;
+    if (step_ppm == 0 && delta_ppm != 0) {
+        step_ppm = delta_ppm > 0 ? 1 : -1;
+    }
+    state->audio_resample_trim_ppm += step_ppm;
     return state->audio_resample_trim_ppm;
 }
 
@@ -3299,6 +3306,8 @@ static int dashcdg_rx_apply_audio_frame_locked(
     int decoded_frames;
     size_t queued_frames;
     size_t expected_queued_fc;
+    int32_t trim_ppm_for_frame = 0;
+    int have_trim_ppm_for_frame = 0;
 
     if (state == NULL || frame == NULL || !state->network_audio_enabled || g_audio == NULL) {
         return 0;
@@ -3319,6 +3328,8 @@ static int dashcdg_rx_apply_audio_frame_locked(
         if (frame_ms > 0U) {
             high_water_ms += (uint32_t) frame_ms;
         }
+        trim_ppm_for_frame = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
+        have_trim_ppm_for_frame = 1;
         if (target_ms > 0U && buffered_ms >= high_water_ms) {
             return 0;
         }
@@ -3470,7 +3481,9 @@ static int dashcdg_rx_apply_audio_frame_locked(
         uint32_t queue_limit_ms = target_buffer_ms;
         int resampled_output = 0;
         uint32_t buffered_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
-        int32_t trim_ppm = dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
+        int32_t trim_ppm = have_trim_ppm_for_frame
+                ? trim_ppm_for_frame
+                : dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
         unsigned int host_ch = (unsigned int) host_output_channels;
         const int16_t *qptr = pcm;
         size_t qfc = (size_t) decoded_frames;
