@@ -295,6 +295,7 @@ struct receiver_state {
     uint64_t last_logged_stream_underrun_events;
     uint64_t last_observed_stream_underrun_events;
     uint64_t last_observed_stream_underrun_frames;
+    uint64_t last_logged_host_underrun_fault_local_ms;
     uint64_t audio_arrival_gap_events;
     uint64_t audio_arrival_gap_max_ms;
     uint64_t audio_arrival_burst_events;
@@ -1148,6 +1149,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->last_logged_stream_underrun_events = g_audio != NULL ? g_audio->stream_underrun_events : 0;
     state->last_observed_stream_underrun_events = g_audio != NULL ? g_audio->stream_underrun_events : 0;
     state->last_observed_stream_underrun_frames = g_audio != NULL ? g_audio->stream_underrun_frames : 0;
+    state->last_logged_host_underrun_fault_local_ms = 0;
     state->audio_arrival_gap_events = 0;
     state->audio_arrival_gap_max_ms = 0;
     state->audio_arrival_burst_events = 0;
@@ -2340,6 +2342,7 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
         if (g_audio != NULL) {
             state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
         }
+        state->last_logged_host_underrun_fault_local_ms = local_now_ms;
         state->last_logged_audio_arrival_gap_events = state->audio_arrival_gap_events;
         state->last_logged_audio_arrival_burst_events = state->audio_arrival_burst_events;
         state->last_logged_audio_arrival_fault_local_ms = local_now_ms;
@@ -2410,16 +2413,22 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
 
     if (g_audio != NULL && g_audio->stream_underrun_events > state->last_logged_stream_underrun_events) {
         delta = g_audio->stream_underrun_events - state->last_logged_stream_underrun_events;
-        DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: host_underrun +%" DASHCDG_RX_PRIu64 " frames=%" DASHCDG_RX_PRIu64 " buf=%u tgt=%u ts=%d now=%" DASHCDG_RX_PRIu64,
-                delta,
-                g_audio->stream_underrun_frames,
-                (unsigned int) dashcdg_desktop_audio_buffered_ms(g_audio),
-                (unsigned int) dashcdg_rx_audio_target_buffer_ms_locked(state),
-                (int) DASHCDG_ATOMIC_GET(g_audio->timestamp_ms),
-                local_now_ms
-        );
-        state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
+        if (state->last_logged_host_underrun_fault_local_ms == 0U ||
+                local_now_ms <= state->last_logged_host_underrun_fault_local_ms ||
+                local_now_ms - state->last_logged_host_underrun_fault_local_ms >=
+                        DASHCDG_RX_AUDIO_ARRIVAL_FAULT_LOG_MIN_MS) {
+            DASHCDG_RX_APPEND_FAULT_LINE(
+                    "[rx] fault: host_underrun +%" DASHCDG_RX_PRIu64 " frames=%" DASHCDG_RX_PRIu64 " buf=%u tgt=%u ts=%d now=%" DASHCDG_RX_PRIu64,
+                    delta,
+                    g_audio->stream_underrun_frames,
+                    (unsigned int) dashcdg_desktop_audio_buffered_ms(g_audio),
+                    (unsigned int) dashcdg_rx_audio_target_buffer_ms_locked(state),
+                    (int) DASHCDG_ATOMIC_GET(g_audio->timestamp_ms),
+                    local_now_ms
+            );
+            state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
+            state->last_logged_host_underrun_fault_local_ms = local_now_ms;
+        }
     }
     if ((state->audio_arrival_gap_events > state->last_logged_audio_arrival_gap_events ||
             state->audio_arrival_burst_events > state->last_logged_audio_arrival_burst_events) &&
@@ -2560,10 +2569,13 @@ static void dashcdg_rx_reprime_audio_after_host_underrun_locked(struct receiver_
     state->audio_last_queue_pressure_local_ms = now_ms;
 
     if (g_audio != NULL) {
+        dashcdg_desktop_audio_stop_stream(g_audio);
         dashcdg_desktop_audio_flush_stream_ring(g_audio);
         dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
         state->last_observed_stream_underrun_events = g_audio->stream_underrun_events;
         state->last_observed_stream_underrun_frames = g_audio->stream_underrun_frames;
+        state->last_logged_stream_underrun_events = g_audio->stream_underrun_events;
+        state->last_logged_host_underrun_fault_local_ms = now_ms;
     } else {
         state->last_observed_stream_underrun_events = 0U;
         state->last_observed_stream_underrun_frames = 0U;
