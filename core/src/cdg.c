@@ -561,9 +561,11 @@ int dashcdg_cdg_reader_seek(struct dashcdg_cdg_reader *reader, dashcdg_tick_t ts
 
     /*
      * Return seek success once the timeline cursor has reached ts or the stream ended.
-     * Do not use OR of process_packet() results: many packets advance ts while returning 0
-     * (non-graphics channel, no-op memory preset repeats, etc.). Commercial CDGs can run hundreds
-     * of ticks before the first tile — v4 anchor prep and snapshots must still seek there.
+     * Do not use OR of process_packet() raster-dirty results: per Red Book / in-repo
+     * docs/specs/cdg-subchannel-alignment.md, CD+G graphics opcodes apply only when
+     * (command & 0x3F) == 0x09; other commands are valid PACKs but do not paint — ts still
+     * advances (e.g. cdg/Cyndi Lauper - Time After Time [DK Karaoke].cdg has 324 leading
+     * command==0 packets before the first 0x09). v4 anchor prep and snapshots must seek there.
      */
     return reader->state.ts >= ts || reader->eof;
 }

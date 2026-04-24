@@ -151,9 +151,12 @@ static void test_reader_seek_and_keyframes(void) {
 }
 
 /*
- * Commercial CDGs often carry hundreds of low-channel or non-graphics packets before the first
- * visible draw. Seek must succeed once the tick cursor reaches the target even if every
- * process_packet() along the way returned 0 (v4 anchor and snapshot paths depend on this).
+ * IEC 60908 / Red Book R-W subchannel: TV-GRAPHICS (CD+G) uses command 0x09 (mode 5); other
+ * command values are still valid PACKs on the wire but are not interpreted as graphics opcodes
+ * (see docs/specs/cdg-subchannel-alignment.md, table "command ... CD+G uses 0x09").
+ *
+ * dashcdg_cdg_state_process_packet() therefore advances ts for every packet but often returns 0
+ * for long leading runs. Seek success must not require any process_packet to return 1.
  */
 static void test_reader_seek_non_graphics_leading_packets(void) {
     struct dashcdg_cdg_reader reader;
@@ -172,6 +175,36 @@ static void test_reader_seek_non_graphics_leading_packets(void) {
     assert(dashcdg_cdg_reader_seek(&reader, 25) == 1);
     assert(reader.state.ts == 25U);
 
+    dashcdg_cdg_reader_free(&reader);
+}
+
+/*
+ * Real asset: cdg/Cyndi Lauper - Time After Time [DK Karaoke].cdg has 324 leading packets with
+ * command&0x3F==0 before the first 0x09 graphics packet (packet index 324 = MEMORY_PRESET).
+ * v4 anchor prep seeks into that region; seek must succeed with every process_packet returning 0.
+ */
+static void test_reader_seek_cyndi_dk_leading_command_zero(void) {
+    struct dashcdg_cdg_reader reader;
+    FILE *fp;
+    uint8_t buf[400U * 24U];
+    size_t n;
+
+    fp = fopen("cdg/Cyndi Lauper - Time After Time [DK Karaoke].cdg", "rb");
+    if (fp == NULL) {
+        return;
+    }
+    n = fread(buf, 1, sizeof(buf), fp);
+    fclose(fp);
+    if (n < 200U * 24U) {
+        return;
+    }
+
+    dashcdg_cdg_reader_init(&reader);
+    assert((buf[0] & 0x3FU) == 0U);
+    assert(dashcdg_cdg_reader_load_memory(&reader, buf, n) == 1);
+    assert(dashcdg_cdg_reader_build_keyframes(&reader) == 1);
+    assert(dashcdg_cdg_reader_seek(&reader, 200) == 1);
+    assert(reader.state.ts == 200U);
     dashcdg_cdg_reader_free(&reader);
 }
 
@@ -1334,6 +1367,7 @@ int main(void) {
     test_scroll_copy_direction_and_offset_clamp();
     test_reader_seek_and_keyframes();
     test_reader_seek_non_graphics_leading_packets();
+    test_reader_seek_cyndi_dk_leading_command_zero();
     test_protocol_roundtrip();
     test_protocol_v4_roundtrip();
     test_v4_audio_codec_predicate_helpers();
