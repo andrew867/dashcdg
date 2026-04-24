@@ -28,7 +28,7 @@ CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n
 # PENIRQ low-power path (GPIO36 + ~10k pull-up on CYD); display_lvgl.c forces LV_INDEV_MODE_TIMER after add_touch.
 CONFIG_XPT2046_INTERRUPT_MODE=y
 
-# --- Internal DRAM headroom (CDG ~65 KiB + jitter on heap; LVGL DMA buffers are internal) ---
+# --- Internal DRAM headroom (CDG+jitter default .bss; optional CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP frees after rx_stop) ---
 # IPv4-only badge path (multicast / STA); frees lwIP IPv6 pools.
 CONFIG_LWIP_IPV6=n
 
@@ -40,6 +40,9 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
+
+# Do not restore a previous lwIP DHCP lease after reboot (cleaner when switching APs / lab networks).
+CONFIG_LWIP_DHCP_RESTORE_LAST_IP=n
 
 # lwIP: few sockets (mDNS + STA + one UDP RX path).
 CONFIG_LWIP_MAX_SOCKETS=6

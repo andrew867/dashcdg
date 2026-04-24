@@ -24,7 +24,9 @@
 #include "esp_lvgl_port.h"
 
 #include "board_cyd_freenove_32.h"
+#include "badge_rx.h"
 #include "display_lvgl.h"
+#include "nav.h"
 #include "platform_hw.h"
 #include "touch_cal_store.h"
 
@@ -69,10 +71,25 @@ static void dashcdg_indev_activity_on_press(lv_event_t *e)
     dashcdg_platform_hw_notify_activity();
 }
 
+static bool dashcdg_indev_click_is_button_like(lv_obj_t *obj)
+{
+    for (lv_obj_t *o = obj; o != NULL; o = lv_obj_get_parent(o)) {
+        if (lv_obj_check_type(o, &lv_button_class)) {
+            return true;
+        }
+        if (lv_obj_check_type(o, &lv_switch_class)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void dashcdg_indev_hw_feedback(lv_event_t *e)
 {
-    (void)e;
-    dashcdg_platform_hw_touch_click();
+    lv_obj_t *obj = lv_event_get_param(e);
+    if (obj != NULL && dashcdg_indev_click_is_button_like(obj)) {
+        dashcdg_platform_hw_ui_sound_confirm_click();
+    }
 }
 
 static void dashcdg_panel_power_lv_cb(lv_timer_t *t)
@@ -92,6 +109,15 @@ void dashcdg_display_lvgl_poll_panel_power(void)
     }
     (void)esp_lcd_panel_disp_on_off(s_lcd_panel, cmd == 2);
     if (cmd == 2) {
+        uint32_t wake = dashcdg_platform_hw_consume_post_wake_ui_mask();
+        if ((wake & 1U) != 0U) {
+            lv_disp_t *d = lv_display_get_default();
+            if (d != NULL) {
+                dashcdg_nav_home(d);
+            }
+        } else if ((wake & 2U) != 0U) {
+            dashcdg_badge_rx_start();
+        }
         dashcdg_display_schedule_post_wake_touch_rearm();
     }
     lvgl_port_unlock();

@@ -51,7 +51,11 @@ static char s_mcast_modal_scratch[1536];
 /** Wi-Fi / bat label refresh interval (also bounds `platform_hw` ADC reads from this UI path). */
 #define KARAOKE_STATUS_SLOW_PERIOD_MS 2500U
 /** Gap (px) between the header row and the CDG slot; tune for spacing vs vertical budget. */
-#define KARAOKE_HEADER_TO_CDG_GAP_PX 15
+#define KARAOKE_HEADER_TO_CDG_GAP_PX 10
+/** Decorative frame around the panel blit viewport (CDG paints on LCD, not inside this LVGL child). */
+#define KARAOKE_CDG_FRAME_PAD    5
+#define KARAOKE_CDG_FRAME_BORDER 3
+#define KARAOKE_CDG_FRAME_RADIUS 12
 
 static void dashcdg_ui_no_scroll(lv_obj_t *obj)
 {
@@ -266,6 +270,10 @@ static void mcast_modal_close(void)
     /* CDG overlay blit bypasses LVGL; after close, ask LVGL to repaint the slot area. */
     if (s_cdg_slot && lv_obj_is_valid(s_cdg_slot)) {
         lv_obj_invalidate(s_cdg_slot);
+        lv_obj_t *fr = lv_obj_get_parent(s_cdg_slot);
+        if (fr && lv_obj_is_valid(fr)) {
+            lv_obj_invalidate(fr);
+        }
     }
 }
 
@@ -599,13 +607,31 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
     lv_obj_set_flex_align(stage, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     dashcdg_ui_no_scroll(stage);
 
-    s_cdg_slot = lv_obj_create(stage);
-    lv_obj_set_size(s_cdg_slot, DASHCDG_BADGE_RX_VISIBLE_W, DASHCDG_BADGE_RX_VISIBLE_H);
-    lv_obj_set_style_bg_opa(s_cdg_slot, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_cdg_slot, 1, 0);
-    lv_obj_set_style_border_color(s_cdg_slot, lv_color_hex(0x335544), 0);
-    lv_obj_remove_flag(s_cdg_slot, LV_OBJ_FLAG_CLICKABLE);
-    dashcdg_ui_no_scroll(s_cdg_slot);
+    {
+        const int fp = KARAOKE_CDG_FRAME_PAD;
+        const int fb = KARAOKE_CDG_FRAME_BORDER;
+        const int fw = DASHCDG_BADGE_RX_VISIBLE_W + 2 * (fp + fb);
+        const int fh = DASHCDG_BADGE_RX_VISIBLE_H + 2 * (fp + fb);
+        lv_obj_t *cdg_frame = lv_obj_create(stage);
+        lv_obj_set_size(cdg_frame, fw, fh);
+        lv_obj_set_style_pad_all(cdg_frame, fp, 0);
+        lv_obj_set_style_border_width(cdg_frame, fb, 0);
+        lv_obj_set_style_border_color(cdg_frame, lv_color_hex(0x00ccaa), 0);
+        lv_obj_set_style_radius(cdg_frame, KARAOKE_CDG_FRAME_RADIUS, 0);
+        lv_obj_set_style_clip_corner(cdg_frame, true, 0);
+        lv_obj_set_style_bg_opa(cdg_frame, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_width(cdg_frame, 0, 0);
+        lv_obj_remove_flag(cdg_frame, LV_OBJ_FLAG_CLICKABLE);
+        dashcdg_ui_no_scroll(cdg_frame);
+
+        s_cdg_slot = lv_obj_create(cdg_frame);
+        lv_obj_set_size(s_cdg_slot, DASHCDG_BADGE_RX_VISIBLE_W, DASHCDG_BADGE_RX_VISIBLE_H);
+        lv_obj_center(s_cdg_slot);
+        lv_obj_set_style_bg_opa(s_cdg_slot, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_cdg_slot, 0, 0);
+        lv_obj_remove_flag(s_cdg_slot, LV_OBJ_FLAG_CLICKABLE);
+        dashcdg_ui_no_scroll(s_cdg_slot);
+    }
 
     lv_obj_t *stage_fill = lv_obj_create(stage);
     lv_obj_set_width(stage_fill, lv_pct(100));

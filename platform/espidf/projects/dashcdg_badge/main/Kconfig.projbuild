@@ -1,0 +1,12 @@
+menu "DashCDG badge"
+
+    config DASHCDG_BADGE_RX_CDG_ON_HEAP
+        bool "CDG + jitter on heap (free when RX stops)"
+        default n
+        help
+            Places CDG decode state and the batch jitter buffer in internal heap instead of .bss.
+            dashcdg_badge_rx_stop() frees them (plus blit scratch and v4 anchor assembly) so RAM is
+            reclaimed when leaving karaoke. Static .bss mode avoids that free and keeps buffers warm
+            for quick re-entry; heap mode trades a bit of fragmentation risk for smaller idle firmware RAM.
+
+endmenu
