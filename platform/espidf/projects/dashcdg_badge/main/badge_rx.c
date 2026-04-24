@@ -50,6 +50,7 @@ static const char *TAG = "badge_rx";
 /** Keep this many jitter slots free; evict furthest-ahead batches when tighter. */
 #define BADGE_RX_JB_HEADROOM 6U
 #define BADGE_RX_CDG_REPAIR_GROUP_SIZE 9U
+#define BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX 160U
 /*
  * Keep full-height blits for correctness. Partial-height pressure clipping produced visible banding/
  * stale lower scanlines (wrong palette stripes + bottom held color) under current overlay path.
@@ -57,7 +58,7 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_CDG_BLIT_PARTIAL_H DASHCDG_BADGE_RX_VISIBLE_H
 /* SPI write settle gap per band: avoids reusing one scratch band while prior DMA transfer is still active. */
 #define BADGE_RX_PANEL_BAND_SETTLE_US 2200U
-#define BADGE_RX_TRACKED_VIDEO_REPAIR_GROUPS 12U
+#define BADGE_RX_TRACKED_VIDEO_REPAIR_GROUPS 4U
 
 /** RGB565 band scratch (~6.9 KiB): keep off .bss so CDG+jitter static fits in dram0_0_seg. */
 #define BADGE_RX_BLIT_SCRATCH_BYTES \
@@ -77,7 +78,7 @@ struct badge_rx_video_repair_group {
     uint8_t parity_present;
     uint8_t member_present[BADGE_RX_CDG_REPAIR_GROUP_SIZE];
     uint16_t member_lengths[BADGE_RX_CDG_REPAIR_GROUP_SIZE];
-    uint8_t member_payloads[BADGE_RX_CDG_REPAIR_GROUP_SIZE][DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+    uint8_t member_payloads[BADGE_RX_CDG_REPAIR_GROUP_SIZE][BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX];
     uint32_t group_id;
     struct dashcdg_fec_parity_state parity;
 };
@@ -767,7 +768,7 @@ static void badge_rx_video_repair_try_recover_group(struct badge_rx_video_repair
 {
     const uint8_t *known_payloads[BADGE_RX_CDG_REPAIR_GROUP_SIZE];
     uint16_t known_lengths[BADGE_RX_CDG_REPAIR_GROUP_SIZE];
-    uint8_t recovered_payload[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+    uint8_t recovered_payload[BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX];
     uint16_t recovered_length = 0U;
     size_t known_count = 0U;
     int missing_index = -1;
@@ -795,7 +796,8 @@ static void badge_rx_video_repair_try_recover_group(struct badge_rx_video_repair
         g->parity_present = 0U;
         return;
     }
-    if (recovered_length == 0U || (recovered_length % DASHCDG_SUBCHANNEL_PACKET_BYTES) != 0U) {
+    if (recovered_length == 0U || recovered_length > BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX ||
+        (recovered_length % DASHCDG_SUBCHANNEL_PACKET_BYTES) != 0U) {
         s_stats.v4_video_repair_failed++;
         g->parity_present = 0U;
         return;
@@ -827,7 +829,7 @@ static void badge_rx_video_repair_observe_delta(uint32_t group_id, uint8_t group
 {
     struct badge_rx_video_repair_group *g;
 
-    if (delta_bytes == NULL || encoded_length == 0U || encoded_length > DASHCDG_MAX_FEC_PAYLOAD_BYTES ||
+    if (delta_bytes == NULL || encoded_length == 0U || encoded_length > BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX ||
         group_index >= BADGE_RX_CDG_REPAIR_GROUP_SIZE) {
         return;
     }
@@ -915,7 +917,7 @@ static void handle_video_repair_window(const struct dashcdg_packet_view *view)
     }
     g = badge_rx_video_repair_get_group(rw->group_id);
     if (g == NULL || rw->group_size <= 1U || rw->group_size > BADGE_RX_CDG_REPAIR_GROUP_SIZE || rw->payload_length == 0U ||
-        rw->payload_length > DASHCDG_MAX_FEC_PAYLOAD_BYTES || rw->payload_bytes == NULL) {
+        rw->payload_length > BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX || rw->payload_bytes == NULL) {
         return;
     }
     if (g->expected_group_size == 0U || g->expected_group_size > rw->group_size) {

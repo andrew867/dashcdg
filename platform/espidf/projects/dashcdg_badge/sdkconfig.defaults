@@ -15,3 +15,28 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # UART console (115200 is ESP-IDF default)
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# XPT2046: keep raw ADC; map with Freenove cal bounds in display_lvgl.c (see board_cyd_freenove_32.h)
+CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n
+# PENIRQ low-power path (GPIO36 + ~10k pull-up on CYD); display_lvgl.c forces LV_INDEV_MODE_TIMER after add_touch.
+CONFIG_XPT2046_INTERRUPT_MODE=y
+
+# --- Internal DRAM headroom (CDG ~65 KiB + jitter on heap; LVGL DMA buffers are internal) ---
+# IPv4-only badge path (multicast / STA); frees lwIP IPv6 pools.
+CONFIG_LWIP_IPV6=n
+
+# Wi-Fi RX/TX pools (defaults ~10 static RX + 32/32 dynamic on ESP32).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# Smaller AMPDU windows = less reordering buffer RAM (slightly lower peak Wi-Fi throughput).
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
+
+# lwIP: few sockets (mDNS + STA + one UDP RX path).
+CONFIG_LWIP_MAX_SOCKETS=6
+CONFIG_LWIP_MAX_ACTIVE_TCP=4
+CONFIG_LWIP_MAX_LISTENING_TCP=4
+CONFIG_LWIP_MAX_UDP_PCBS=8
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
