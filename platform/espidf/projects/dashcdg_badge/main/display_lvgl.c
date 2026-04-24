@@ -6,7 +6,7 @@
 #include "esp_check.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_st7789.h"
+#include "esp_lcd_panel_st7789.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 
