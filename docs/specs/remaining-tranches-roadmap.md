@@ -65,3 +65,21 @@ backlog that keeps “possible” from turning into “mythical”.
 3. **Log retention**: archive policy for multi-day zips (storage).
 
 When numeric caps are set, update [long-impairment-soak-validation.md](../test/long-impairment-soak-validation.md) §threshold table.
+
+## Future exploration: dual-ESP32 (SPI or dedicated link)
+
+**Intent:** Use a **second ESP32** alongside the badge (or CYD-class) host to offload work or improve isolation, without changing the v4 wire protocol on day one.
+
+**Feasibility:** **Yes, as an engineering spike** — with clear partitioning. SPI is a **byte stream + framing** between MCUs, not a substitute for network time sync; media time still comes from **v4 clock / playback timeline** (or the secondary’s own RX path if it joins Wi‑Fi independently).
+
+| Pattern | Role of primary | Role of secondary | Notes |
+| --- | --- | --- | --- |
+| **A — Audio coprocessor** | CDG / UI / optional thin audio | Join **same Wi‑Fi + multicast** (or accept **SPI-forwarded** compressed frames from primary), **decode**, **I2S/DAC** output | Offloads CPU/RAM on primary; SPI carries **framed codec packets or PCM blocks** + sequence/timestamp. Requires a **simple private protocol** (length + PTS + payload CRC). Latency budget must be explicit (buffer depth vs glitch). |
+| **B — Wi‑Fi RX + SPI downlink** | UI + CDG + optional local mix | **Only** Wi‑Fi + UDP RX + decode; ships **PCM (or decoded timeline)** to primary over SPI | Primary avoids Wi‑Fi stack contention with LVGL/SPI LCD; good if RF and UI share a stressed SoC. “Clock sync over SPI” = **delivering timeline-aligned chunks + occasional skew words**, not PTP-on-SPI. |
+| **C — Primary keeps Wi‑Fi; SPI = control/metadata** | Full RX | Minimal (e.g. LED meter, GPIO, second DAC) | Lower risk first step before moving audio. |
+
+**Hardware reality check:** On **CYD-style** boards the **LCD and touch already share SPI** with tight timing. A coprocessor link is cleanest on **separate GPIOs** (SPI **host** on primary ↔ SPI **slave** on secondary, or **UART** at high baud, or **I2S** for PCM-only). Sharing the **same** SPI bus as the panel is usually **not** the first choice.
+
+**Product / tranche placement:** Treat as **Tranche E** or **embedded productization** research — after v4 stabilization (Tranche 0) and preferably after a baseline **embedded RX audio** path is specified ([embedded-rx-audio-profile.md](embedded-rx-audio-profile.md), [../hardware/esp32-audio-feasibility.md](../hardware/esp32-audio-feasibility.md)).
+
+**Next doc actions when pursuing:** add a one-page **interface sketch** (pinout, frame format, who resets on brownout, watchdog) under `docs/hardware/` and link it here.

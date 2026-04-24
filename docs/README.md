@@ -39,6 +39,7 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`specs/narrowband-low-bitrate-audio-quality.md`](specs/narrowband-low-bitrate-audio-quality.md) | NB quality hypotheses, acceptance, test plan (draft) |
 | [`specs/tx-pause-screen.md`](specs/tx-pause-screen.md) | Pause screen packets |
 | [`specs/embedded-rx-audio-profile.md`](specs/embedded-rx-audio-profile.md) | Embedded RX audio (planning) |
+| [`specs/v4-rx-stats-embedded-extension.md`](specs/v4-rx-stats-embedded-extension.md) | **Planned** v4 RX stats extension — embedded buffer / clock / PTP / ADC (wire TBD) |
 | [`specs/transport-udp-boundary.md`](specs/transport-udp-boundary.md) | UDP helper boundary |
 | [`specs/audio-jitter-playout-boundary.md`](specs/audio-jitter-playout-boundary.md) | Audio jitter boundary |
 
