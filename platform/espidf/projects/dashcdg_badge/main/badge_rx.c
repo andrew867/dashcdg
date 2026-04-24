@@ -1070,20 +1070,16 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
              st.last_error[0] ? st.last_error : "(no socket error)");
 }
 
-/** Sum lv_obj_get_x/y up the parent chain (no transforms; karaoke tree is unscaled). */
+/** Absolute LVGL draw coords for the CDG slot (includes parent layout/padding/border offsets). */
 static void badge_rx_cdg_lv_origin(lv_obj_t *o, int *ox, int *oy, int *cw, int *ch)
 {
-    lv_coord_t sx = 0;
-    lv_coord_t sy = 0;
+    lv_area_t a;
 
-    for (lv_obj_t *w = o; w != NULL; w = lv_obj_get_parent(w)) {
-        sx += lv_obj_get_x(w);
-        sy += lv_obj_get_y(w);
-    }
-    *ox = (int)sx;
-    *oy = (int)sy;
-    *cw = (int)lv_obj_get_width(o);
-    *ch = (int)lv_obj_get_height(o);
+    lv_obj_get_coords(o, &a);
+    *ox = (int)a.x1;
+    *oy = (int)a.y1;
+    *cw = (int)(a.x2 - a.x1 + 1);
+    *ch = (int)(a.y2 - a.y1 + 1);
 }
 
 /** Caller holds `s_mtx`; `s_cdg` non-NULL; blit scratch ready. Consumes one `take_raster_dirty` pass. */
