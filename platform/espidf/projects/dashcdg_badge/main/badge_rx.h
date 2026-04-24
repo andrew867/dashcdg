@@ -47,6 +47,10 @@ typedef struct {
     uint16_t cdg_blit_max_y;
     /** Last insert after evict still failed (should be rare). */
     uint32_t cdg_delta_insert_fail;
+    /** v4 repair-window packets observed for CDG stream (metrics-only ingest, no apply yet). */
+    uint32_t v4_video_repair_rx_packets;
+    uint32_t v4_video_repair_rx_forward;
+    uint32_t v4_video_repair_rx_reverse;
 } dashcdg_badge_rx_stats_t;
 
 void dashcdg_badge_rx_start(void);

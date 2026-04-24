@@ -744,6 +744,30 @@ static void handle_video_delta(const struct dashcdg_packet_view *view, uint64_t 
     }
 }
 
+static void handle_video_repair_window(const struct dashcdg_packet_view *view)
+{
+    const struct dashcdg_v4_repair_window_payload *rw;
+    uint16_t dir;
+
+    if (view == NULL) {
+        return;
+    }
+    rw = &view->v4_repair_window;
+    if (rw->stream_type != DASHCDG_STREAM_TYPE_CDG) {
+        return;
+    }
+    if (rw->repair_mode != DASHCDG_V4_REPAIR_MODE_VIDEO_WINDOW_XOR) {
+        return;
+    }
+    s_stats.v4_video_repair_rx_packets++;
+    dir = (uint16_t)(rw->reserved & DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_MASK);
+    if (dir == DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_FORWARD) {
+        s_stats.v4_video_repair_rx_forward++;
+    } else if (dir == DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_REVERSE) {
+        s_stats.v4_video_repair_rx_reverse++;
+    }
+}
+
 static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
 {
     struct dashcdg_packet_view view;
@@ -774,6 +798,9 @@ static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
         break;
     case DASHCDG_PACKET_V4_VIDEO_DELTA:
         handle_video_delta(&view, local_now_ms);
+        break;
+    case DASHCDG_PACKET_V4_REPAIR_WINDOW:
+        handle_video_repair_window(&view);
         break;
     case DASHCDG_PACKET_V4_VIDEO_ANCHOR:
         s_stats.v4_anchor_chunks++;
@@ -1050,6 +1077,7 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
              "parse_fail %lu\n"
              "v4 session %lu  clock %lu\n"
              "delta %lu  anchor %lu\n"
+             "rwin %lu  fwd %lu  rev %lu\n"
              "seq %llu  skew_ema %ld ms\n"
              "have_clock %d\n"
              "song_id %s\n"
@@ -1064,8 +1092,10 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
              BADGE_RX_PORT, (unsigned long)st.v4_rx_stats_sent, (unsigned)st.cdg_blit_max_y,
              (unsigned long)st.jb_evict_rounds, (unsigned long)st.cdg_delta_insert_fail, (unsigned long long)st.datagrams,
              (unsigned long)st.parse_failures, (unsigned long)st.v4_session_count, (unsigned long)st.v4_clock_count,
-             (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks, (unsigned long long)st.last_sequence,
-             (long)st.skew_ema_ms, st.have_clock, st.song_id[0] ? st.song_id : "(none)",
+             (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks,
+             (unsigned long)st.v4_video_repair_rx_packets, (unsigned long)st.v4_video_repair_rx_forward,
+             (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long long)st.last_sequence, (long)st.skew_ema_ms,
+             st.have_clock, st.song_id[0] ? st.song_id : "(none)",
              (unsigned long long)st.jb_next_packet_index, (unsigned)st.jb_pending_slots, (unsigned long long)st.live_missing_skips,
              st.last_error[0] ? st.last_error : "(no socket error)");
 }
