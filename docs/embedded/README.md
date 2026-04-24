@@ -6,6 +6,7 @@ Start here:
 
 | Document | Purpose |
 | --- | --- |
+| [`esp-idf-setup.md`](esp-idf-setup.md) | Clone ESP-IDF locally, build `dashcdg_badge`, flash UART (COM), offline/toolchain notes. |
 | [`windows-desktop-reference.md`](windows-desktop-reference.md) | Current Windows TX/RX implementation map, threads, data ownership, and important functions. |
 | [`protocol-v4-porting-guide.md`](protocol-v4-porting-guide.md) | Wire protocol v4 packet families, receiver state machine, timing, FEC, and embedded parsing rules. |
 | [`freertos-esp32-implementation-plan.md`](freertos-esp32-implementation-plan.md) | FreeRTOS task model, queues, memory budgets, scheduler priorities, and staged implementation plan. |

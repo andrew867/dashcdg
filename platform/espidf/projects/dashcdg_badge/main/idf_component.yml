@@ -1,0 +1,4 @@
+## Managed components (see https://components.espressif.com/)
+dependencies:
+  espressif/esp_lvgl_port: "^2.7.0"
+  atanisoft/esp_lcd_touch_xpt2046: "^1.0.6"

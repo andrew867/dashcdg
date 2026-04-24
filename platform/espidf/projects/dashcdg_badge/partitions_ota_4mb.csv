@@ -1,0 +1,13 @@
+# DashCDG badge — 4 MB SPI flash, dual OTA slots (A/B).
+# Bootloader selects ota_0 vs ota_1 using otadata (esp_ota_* / esp_https_ota).
+#
+# ~1600 KiB per app slot (same order of magnitude as SINGLE_APP_LARGE factory).
+# Tail of flash (~768 KiB) unused — room for a future staging/data partition (e.g. FAT
+# for SD copy, or download buffer metadata) without shrinking slots yet.
+#
+# Name,   Type, SubType, Offset,  Size,   Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+otadata,  data, ota,     0xf000,  0x2000,
+phy_init, data, phy,     0x11000, 0x1000,
+ota_0,    app,  ota_0,   0x20000, 1600K,
+ota_1,    app,  ota_1,   ,        1600K,

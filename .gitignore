@@ -40,7 +40,15 @@
 !/build/dist/**
 
 # Local clones / experiments (use scripts/fetch_audio_codec_vendors.sh into audio_modules/*/vendor/)
-third_party/
+third_party/*
+!third_party/README.md
+
+# ESP-IDF generated config (per-machine)
+platform/espidf/projects/**/sdkconfig
+platform/espidf/projects/**/sdkconfig.old
+platform/espidf/projects/**/build/
+platform/espidf/projects/**/managed_components/
+platform/espidf/projects/**/dependencies.lock
 # Optional large upstream clones (see scripts/fetch_opus_portaudio_vendors.sh)
 audio_modules/opus/vendor/
 audio_modules/portaudio/vendor/
