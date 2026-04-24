@@ -97,8 +97,18 @@ enum dashcdg_v4_video_delta_mode {
 };
 
 enum dashcdg_v4_repair_mode {
-    DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY = 1
+    DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY = 1,
+    /* Planned/active additive video repair-window symbol (forward/reverse metadata in reserved bits). */
+    DASHCDG_V4_REPAIR_MODE_VIDEO_WINDOW_XOR = 2
 };
+
+/* `dashcdg_v4_repair_window_payload.reserved` bit layout for VIDEO_WINDOW_XOR mode. */
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_MASK 0x0003U
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_NONE 0x0000U
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_FORWARD 0x0001U
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_REVERSE 0x0002U
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT 2U
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_MASK (0x0007U << DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT)
 
 struct dashcdg_packet_header {
     uint32_t magic;

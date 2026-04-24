@@ -127,6 +127,8 @@
 #define DASHCDG_V4_MAX_VIDEO_PER_PASS 2U
 #define DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT 1U
 #define DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS 2U
+/* Slice 0/1 freeze: first-pass video repair window radius and alternating parity cadence metadata. */
+#define DASHCDG_V4_VIDEO_REPAIR_WINDOW_K 2U
 #define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 #define DASHCDG_TX_RX_REPORTER_SLOTS 32U
 #define DASHCDG_TX_RX_REPORTER_STALE_MS 8000U
@@ -1822,6 +1824,21 @@ static void dashcdg_tx_reset_audio_switch_state_locked(void) {
     memset(&g_tx_state.silence_audio_frame_template, 0, sizeof(g_tx_state.silence_audio_frame_template));
     g_tx_state.silence_audio_frame_valid = 0;
     g_tx_state.audio_producer_finished = track == NULL || track->mp3_path == NULL;
+}
+
+static void dashcdg_tx_reset_rx_reporters_locked(void) {
+    memset(g_tx_state.rx_reporters, 0, sizeof(g_tx_state.rx_reporters));
+    g_tx_state.v4_rx_stats_packets_received = 0U;
+    g_tx_state.v4_rx_stats_reporters_active = 0U;
+    g_tx_state.v4_rx_stats_reporters_healthy = 0U;
+    g_tx_state.v4_rx_stats_reporters_degraded = 0U;
+    g_tx_state.v4_rx_stats_reporters_stale = 0U;
+    g_tx_state.v4_rx_stats_reporters_controller = 0U;
+    g_tx_state.v4_rx_phase_error_min_ms = 0;
+    g_tx_state.v4_rx_phase_error_max_ms = 0;
+    g_tx_state.v4_rx_group_target_latency_ms = 0U;
+    g_tx_state.v4_rx_worst_buffer_ms = 0U;
+    g_tx_state.v4_rx_best_buffer_ms = 0U;
 }
 
 static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
@@ -3706,6 +3723,12 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.v4_video_anchor_packet_index = 0U;
     g_tx_state.v4_loading_phase = 0U;
     g_tx_state.v4_running_logged = 0;
+    /*
+     * RX reporter measurements are tied to the sender playback epoch. A new track/session resets
+     * playback to zero, so any old receiver stats would project against the wrong sender timeline
+     * and briefly show absurd negative latency until fresh reports arrive.
+     */
+    dashcdg_tx_reset_rx_reporters_locked();
 
     packet_count = asset_size / sizeof(struct dashcdg_subchannel_packet);
     g_tx_state.duration_ms = dashcdg_packet_count_to_ms(packet_count);
@@ -4157,11 +4180,13 @@ static int dashcdg_tx_send_fec_parity_locked(
 static int dashcdg_tx_send_v4_repair_window_locked(
         uint64_t now_ms,
         uint8_t stream_type,
+        uint8_t repair_mode,
         uint8_t redundancy_index,
         uint8_t group_size,
         uint32_t group_id,
         const uint8_t *payload_bytes,
-        uint16_t payload_length
+        uint16_t payload_length,
+        uint16_t reserved
 ) {
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
     struct dashcdg_v4_repair_window_payload payload;
@@ -4173,11 +4198,12 @@ static int dashcdg_tx_send_v4_repair_window_locked(
 
     memset(&payload, 0, sizeof(payload));
     payload.stream_type = stream_type;
-    payload.repair_mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
+    payload.repair_mode = repair_mode;
     payload.redundancy_index = redundancy_index;
     payload.group_size = group_size;
     payload.group_id = group_id;
     payload.payload_length = payload_length;
+    payload.reserved = reserved;
     payload.payload_bytes = payload_bytes;
 
     g_tx_state.header.flags = g_tx_state.paused ? DASHCDG_PACKET_FLAG_PAUSED : 0U;
@@ -4216,14 +4242,27 @@ static void dashcdg_tx_send_v4_repair_parity_locked(
     }
 
     for (uint8_t i = 0U; i < copies; ++i) {
+        uint8_t mode = DASHCDG_V4_REPAIR_MODE_XOR_PLUS_STARTUP_REDUNDANCY;
+        uint16_t reserved = 0U;
+
+        if (stream_type == DASHCDG_STREAM_TYPE_CDG) {
+            uint16_t dir = ((group_id & 1U) == 0U)
+                               ? DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_FORWARD
+                               : DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_REVERSE;
+            mode = DASHCDG_V4_REPAIR_MODE_VIDEO_WINDOW_XOR;
+            reserved = (uint16_t)(dir | ((DASHCDG_V4_VIDEO_REPAIR_WINDOW_K << DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT) &
+                                         DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_MASK));
+        }
         (void) dashcdg_tx_send_v4_repair_window_locked(
                 now_ms,
                 stream_type,
+                mode,
                 i,
                 group_size,
                 group_id,
                 payload_bytes,
-                payload_length
+                payload_length,
+                reserved
         );
     }
 }
