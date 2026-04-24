@@ -10,7 +10,10 @@
  * Browsing the SSID dropdown does not read or write NVS; only Connect applies a new candidate
  * to the Wi-Fi driver, and NVS updates only when that connection succeeds.
  *
- * dashcdg_wifi_ensure_init() starts the Wi-Fi driver once (safe to call from app_main).
+ * dashcdg_wifi_ensure_init() starts the Wi-Fi driver once (safe to call from app_main) and spawns
+ * a low-priority background task that re-applies saved NVS creds + esp_wifi_connect every 2–5 s
+ * (randomized) whenever STA is not associated — except while the Wi-Fi touch UI is visible, so
+ * scans/manual connect are not fought.
  * dashcdg_wifi_boot_auto_connect() loads saved creds from NVS (if any) and starts connect - call
  * from app_main so the device auto-rejoins without opening the Wi-Fi screen.
  * dashcdg_wifi_touch_ui_present() clears the active LVGL screen and builds this UI.

@@ -10,7 +10,10 @@
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_netif.h"
+#include "esp_random.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -26,11 +29,22 @@ static bool s_wifi_driver_ready;
 static esp_netif_t *s_wifi_sta_netif;
 static const char *NVS_NS = "dashcfg";
 
+/** Background STA reconnection when link drops; long random sleep 2–5 s between attempts. */
+static TaskHandle_t s_reconn_task;
+#define WIFI_RECONN_STACK_WORDS 4096
+#define WIFI_RECONN_TASK_PRIO     3
+
 static lv_obj_t *s_lbl_status;
 static lv_obj_t *s_dd_ssid;
 static lv_obj_t *s_ta_pass;
 static lv_obj_t *s_kb;
 static lv_obj_t *s_entry_row;
+
+static bool wifi_touch_ui_is_active(void)
+{
+    /* s_lbl_status is cleared in dashcdg_wifi_drop_lvgl_refs when leaving this screen. */
+    return s_lbl_status != NULL;
+}
 
 void dashcdg_wifi_drop_lvgl_refs(void)
 {
@@ -75,6 +89,13 @@ static esp_err_t nvs_load_creds(char *ssid, size_t ssid_sz, char *psk, size_t ps
     err = nvs_get_str(h, "psk", psk, &l);
     nvs_close(h);
     return err;
+}
+
+static bool nvs_has_saved_creds(void)
+{
+    char ssid[65] = {0};
+    char psk[65] = {0};
+    return nvs_load_creds(ssid, sizeof(ssid), psk, sizeof(psk)) == ESP_OK;
 }
 
 static esp_err_t nvs_save_creds(const char *ssid, const char *psk)
@@ -148,7 +169,11 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         ui_statusf("Wi-Fi started");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        ui_statusf("Disconnected (tap Connect after Scan)");
+        if (nvs_has_saved_creds()) {
+            ui_statusf("Disconnected\n(retry every 2–5 s in background)");
+        } else {
+            ui_statusf("Disconnected\n(tap Connect after Scan)");
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         /* Fresh DHCP on each association avoids stale lwIP client state / odd subnets on some APs. */
         esp_netif_t *na = s_wifi_sta_netif ? s_wifi_sta_netif : esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -437,6 +462,79 @@ static esp_err_t try_auto_connect_saved(void)
     return esp_wifi_connect();
 }
 
+/**
+ * Same as try_auto_connect_saved without LVGL status (for background task).
+ * Uses saved NVS SSID/PSK and current STA config path as the touch UI.
+ */
+static esp_err_t wifi_reconnect_apply_saved(void)
+{
+    char ssid[65] = {0};
+    char psk[65] = {0};
+    if (nvs_load_creds(ssid, sizeof(ssid), psk, sizeof(psk)) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, psk, sizeof(wc.sta.password) - 1);
+    wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "auto-reconnect set_config: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        /* ESP_ERR_WIFI_CONN: already connecting — ignore noise. */
+        ESP_LOGD(TAG, "auto-reconnect esp_wifi_connect -> %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static void wifi_reconn_task_fn(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        /* Time-bounded backoff: uniform random in [2000, 5000] ms (no tight spin). */
+        uint32_t wait_ms = 2000U + (esp_random() % 3001U);
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+
+        if (!s_wifi_driver_ready) {
+            continue;
+        }
+        /* Avoid fighting the Wi-Fi setup screen (scan / manual connect). */
+        if (wifi_touch_ui_is_active()) {
+            continue;
+        }
+        if (!nvs_has_saved_creds()) {
+            continue;
+        }
+        {
+            wifi_ap_record_t ap;
+            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                continue;
+            }
+        }
+        (void)wifi_reconnect_apply_saved();
+    }
+}
+
+static void wifi_reconn_task_start_once(void)
+{
+    if (s_reconn_task != NULL) {
+        return;
+    }
+    if (xTaskCreate(wifi_reconn_task_fn, "wifi_reconn", WIFI_RECONN_STACK_WORDS, NULL, WIFI_RECONN_TASK_PRIO,
+                    &s_reconn_task) != pdPASS) {
+        ESP_LOGW(TAG, "wifi_reconn task create failed");
+        s_reconn_task = NULL;
+    } else {
+        ESP_LOGI(TAG, "wifi_reconn: background reconnect every 2–5 s when disconnected + creds saved");
+    }
+}
+
 esp_err_t dashcdg_wifi_boot_auto_connect(void)
 {
     ESP_RETURN_ON_ERROR(dashcdg_wifi_ensure_init(), TAG, "wifi init");
@@ -466,6 +564,7 @@ esp_err_t dashcdg_wifi_ensure_init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi_start");
 
     s_wifi_driver_ready = true;
+    wifi_reconn_task_start_once();
     return ESP_OK;
 }
 
