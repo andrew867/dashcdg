@@ -42,7 +42,10 @@
 #define DASHCDG_HW_I2C_FREQ_HZ  100000
 
 /*
- * Auto idle (home / disconnected karaoke): dim then sleep backlight + panel.
+ * Auto idle: home uses touch/nav activity only. Karaoke stays at user brightness while
+ * `dashcdg_platform_hw_set_cdg_stream_ok(true)` or multicast UDP arrived within the last
+ * `DASHCDG_HW_IDLE_DIM_MS` (see `dashcdg_platform_hw_note_karaoke_mcast_rx`); then the same
+ * dim/sleep timers apply. IO0 long-hold always forces sleep from any screen.
  * Override from `-D` or a wrapper header before including this file if needed.
  */
 #ifndef DASHCDG_HW_IDLE_DIM_MS

@@ -14,6 +14,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
@@ -32,6 +33,7 @@
 
 #include "badge_cdg_rgb565.h"
 #include "display_lvgl.h"
+#include "platform_hw.h"
 
 static const char *TAG = "badge_rx";
 
@@ -90,12 +92,14 @@ static volatile int s_run;
 static SemaphoreHandle_t s_mtx;
 
 /*
- * CDG + jitter in static .dram0.bss; band blit scratch on internal heap (~7 KiB) to stay under dram0_0_seg.
- * v4 RLE anchors expand straight into `s_cdg` (no separate ~64 KiB decode buffer).
- * dashcdg_badge_rx_stop() does not tear down CDG/jitter/scratch so karaoke re-entry stays stable.
+ * CDG + jitter: static .bss by default, or internal heap when CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP.
+ * Band blit scratch is always heap (~7 KiB). v4 RLE anchors decode into `s_cdg`.
+ * With heap CDG, dashcdg_badge_rx_stop() frees CDG/jitter/scratch to return RAM to the pool.
  */
+#ifndef CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP
 static struct dashcdg_cdg_state s_cdg_storage;
 static struct dashcdg_cdg_batch_jitter_buffer s_jb_storage;
+#endif
 static struct dashcdg_cdg_state *s_cdg;
 static struct dashcdg_cdg_batch_jitter_buffer *s_jb;
 static struct dashcdg_media_clock s_mclk;
@@ -626,7 +630,7 @@ static void badge_rx_free_blit_scratch(void)
     }
 }
 
-/** Drop CDG/jitter pointers after a failed start (storage stays in .bss). Frees heap blit scratch. */
+/** Frees blit scratch + v4 anchor buffer; clears jitter. With heap CDG, frees CDG/jitter structs too. */
 static void badge_rx_free_heap(void)
 {
     badge_rx_v4_anchor_asm_reset();
@@ -634,18 +638,46 @@ static void badge_rx_free_heap(void)
     if (s_jb != NULL) {
         dashcdg_cdg_batch_jitter_clear(s_jb);
     }
+#ifdef CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP
+    if (s_jb != NULL) {
+        heap_caps_free(s_jb);
+        s_jb = NULL;
+    }
+    if (s_cdg != NULL) {
+        heap_caps_free(s_cdg);
+        s_cdg = NULL;
+    }
+#else
     s_jb = NULL;
     s_cdg = NULL;
+#endif
 }
 
-/** Wire static CDG + jitter; always succeeds if linked. */
+/** Wire CDG + jitter (.bss or heap per Kconfig). */
 static int badge_rx_ensure_heap(void)
 {
-    if (s_cdg != NULL) {
+    if (s_cdg != NULL && s_jb != NULL) {
         return 0;
     }
+#ifdef CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP
+    s_cdg = (struct dashcdg_cdg_state *)heap_caps_calloc(1, sizeof(*s_cdg), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_jb = (struct dashcdg_cdg_batch_jitter_buffer *)heap_caps_calloc(1, sizeof(*s_jb), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_cdg == NULL || s_jb == NULL) {
+        if (s_cdg != NULL) {
+            heap_caps_free(s_cdg);
+            s_cdg = NULL;
+        }
+        if (s_jb != NULL) {
+            heap_caps_free(s_jb);
+            s_jb = NULL;
+        }
+        ESP_LOGW(TAG, "CDG/jitter heap calloc failed");
+        return -1;
+    }
+#else
     s_cdg = &s_cdg_storage;
     s_jb = &s_jb_storage;
+#endif
     return 0;
 }
 
@@ -1108,12 +1140,13 @@ static void badge_rx_task(void *arg)
             if (src.sin_family == AF_INET && badge_rx_ipv4_is_unicast_src(src.sin_addr.s_addr)) {
                 s_v4_tx_src_ipv4 = src.sin_addr.s_addr;
             }
-            s_stats.datagrams++;
             {
                 uint64_t now_ms = dashcdg_clock_now_ms();
+                s_stats.datagrams++;
                 rx_one_datagram(buf, (size_t)n, now_ms);
+                xSemaphoreGive(s_mtx);
+                dashcdg_platform_hw_note_karaoke_mcast_rx(now_ms);
             }
-            xSemaphoreGive(s_mtx);
         }
         badge_rx_maybe_send_v4_stats(fd, dashcdg_clock_now_ms());
     }
@@ -1121,6 +1154,31 @@ static void badge_rx_task(void *arg)
     ESP_LOGI(TAG, "rx task exit");
     s_rx_task = NULL;
     vTaskDelete(NULL);
+}
+
+static void badge_rx_drop_multicast_membership(int fd)
+{
+    struct ip_mreq mr;
+
+    if (fd < 0) {
+        return;
+    }
+    memset(&mr, 0, sizeof(mr));
+    mr.imr_multiaddr.s_addr = inet_addr(BADGE_RX_MCAST_ADDR);
+    mr.imr_interface.s_addr = htonl(INADDR_ANY);
+    {
+        esp_netif_t *na = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (na) {
+            esp_netif_ip_info_t ipi;
+            if (esp_netif_get_ip_info(na, &ipi) == ESP_OK && ipi.ip.addr != 0) {
+                mr.imr_interface.s_addr = ipi.ip.addr;
+            }
+        }
+    }
+    if (setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mr, sizeof(mr)) != 0 && mr.imr_interface.s_addr != htonl(INADDR_ANY)) {
+        mr.imr_interface.s_addr = htonl(INADDR_ANY);
+        (void)setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mr, sizeof(mr));
+    }
 }
 
 static int open_multicast_rx(void)
@@ -1220,7 +1278,11 @@ void dashcdg_badge_rx_start(void)
         if (badge_rx_ensure_blit_scratch() != 0) {
             ESP_LOGW(TAG, "CDG blit scratch OOM (~7 KiB) — decode+jitter ok, LCD band blits off until heap frees");
         } else {
+#ifdef CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP
+            ESP_LOGI(TAG, "CDG+jitter heap + blit scratch; v4 anchors decode into CDG");
+#else
             ESP_LOGI(TAG, "CDG+jitter static + blit scratch; v4 anchors decode into CDG (no extra decode heap)");
+#endif
         }
     }
 
@@ -1255,15 +1317,20 @@ void dashcdg_badge_rx_stop(void)
     fd = (int)s_sock;
     if (fd >= 0) {
         s_sock = -1;
+        badge_rx_drop_multicast_membership(fd);
         close(fd);
     }
     for (int i = 0; i < 80 && s_rx_task != NULL; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+#ifdef CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP
+    badge_rx_free_heap();
+#else
     if (s_jb) {
         dashcdg_cdg_batch_jitter_clear(s_jb);
     }
-    /* Do not badge_rx_free_heap() here: keep pointers wired to static CDG/jitter across karaoke exits. */
+    /* Static CDG/jitter: keep wired across karaoke exits; scratch stays allocated for fast re-entry. */
+#endif
     ESP_LOGI(TAG, "rx stopped");
 }
 
@@ -1342,7 +1409,14 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
              "TX must send v4 to this group/port.\n"
              "dg 0: no UDP (AP may filter mcast, wrong VLAN, or TX off-net).",
              BADGE_RX_MCAST_ADDR, BADGE_RX_PORT, st.sta_ip[0] ? st.sta_ip : "--", st.igmp_joined ? "joined" : "not joined",
-             st.rx_task_running ? "running" : "stopped", st.cdg_heap_ok ? "on (bss+scratch)" : "off",
+             st.rx_task_running ? "running" : "stopped",
+             st.cdg_heap_ok
+#ifdef CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP
+                 ? "on (heap CDG+jitter+scratch)"
+#else
+                 ? "on (bss CDG+jitter + scratch)"
+#endif
+                 : "off",
              (st.tx_stats_dest[0] && st.tx_stats_dest[0] != '-') ? st.tx_stats_dest : "(wire src?)",
              BADGE_RX_PORT, (unsigned long)st.v4_rx_stats_sent, (unsigned)st.cdg_blit_max_y,
              (unsigned long)st.jb_evict_rounds, (unsigned long)st.cdg_delta_insert_fail, (unsigned long long)st.datagrams,

@@ -1,12 +1,14 @@
 /*
  * Low-priority FreeRTOS task: RGB status LED (LEDC), backlight PWM (IO27), battery cache,
- * user button (IO0), SC8002B enable (IO4), PWM beep on IO26, external I2C init (IO32/IO25).
+ * user button (IO0), SC8002B enable (IO4), PWM "chiptune" audio on IO26 (slow multi-note sequences,
+ * sine-shaped duty envelope; mid-range carriers — high/fast modulation reads as hash on PWM).
  */
 #include "platform_hw.h"
 
 #include "board_badge_hw.h"
 #include "board_cyd_freenove_32.h"
 #include "badge_prefs.h"
+#include "badge_rx.h"
 
 #include "dashcdg/media_clock.h"
 
@@ -23,6 +25,7 @@
 #include "vbat_sense.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #ifndef M_PI
@@ -46,9 +49,10 @@ static const char *TAG = "platform_hw";
 
 #define LEDC_DUTY_RES       LEDC_TIMER_8_BIT
 #define LEDC_RGB_BL_HZ      5000
-#define LEDC_BEEP_HZ        1760
+#define LEDC_BEEP_HZ        1760 /* initial install; runtime freq set per note */
 
-#define BEEP_MS             55
+#define BEEP_SEQ_CAP        12
+#define BEEP_TICK_FAST_MS   15 /* while a sequence runs; slower tick = less zipper noise on PWM */
 
 typedef enum {
     PM_ACTIVE = 0,
@@ -64,6 +68,10 @@ static SemaphoreHandle_t s_mtx;
 static bool s_ready;
 static dashcdg_hw_screen_t s_screen;
 static bool s_cdg_stream_ok;
+/** Last multicast UDP recv time (RX task); karaoke PM uses with `DASHCDG_HW_IDLE_DIM_MS`. */
+static _Atomic uint64_t s_karaoke_last_mcast_rx_ms;
+/** Throttle `pm_bump_activity_locked` from high packet rates (ms, monotonic clock). */
+static uint64_t s_karaoke_mcast_act_throttle_ms;
 
 /** User-selected max brightness (NVS / settings). */
 static uint8_t s_bl_user_pct = 100;
@@ -81,44 +89,134 @@ static bool s_rgb_status_enabled = true;
 static uint8_t s_rgb_status_pct = 100;
 static bool s_auto_sleep_enabled = true;
 
+/** Stashed when panel commits sleep; LVGL consumes on wake (see `dashcdg_platform_hw_consume_post_wake_ui_mask`). */
+static volatile uint32_t s_post_wake_ui_mask;
+
 static int s_bat_raw;
 static int s_bat_pin_mv;
 static int s_bat_vbat_mv;
 static uint64_t s_bat_sample_ms;
 
-static uint64_t s_beep_until_ms;
-/** 5-100: scales LEDC duty on IO26 (default 85; was hardcoded ~50% peak). */
+typedef struct {
+    uint16_t freq_hz;
+    uint16_t duration_ms;
+} beep_note_t;
+
+typedef enum {
+    BEEP_SEQ_NONE = 0,
+    BEEP_SEQ_WAKE,
+    BEEP_SEQ_SLEEP,
+    BEEP_SEQ_UI,
+    BEEP_SEQ_BLIP,
+} beep_seq_kind_t;
+
+static beep_note_t s_seq[BEEP_SEQ_CAP];
+static uint8_t s_seq_len;
+static uint8_t s_seq_idx;
+static uint64_t s_seq_note_t0_ms;
+static uint64_t s_seq_note_t1_ms;
+static beep_seq_kind_t s_seq_kind;
+
+/** 5-100: scales peak LEDC duty on IO26 (default 85; was hardcoded ~50% peak). */
 static uint8_t s_beep_vol_pct = 85;
-/** LVGL touch click beep only (not IO0 power tones). */
+/** LVGL UI tones (button triad, slider blip); power jingles ignore this. */
 static bool s_touch_beep_on = true;
+
+static const beep_note_t k_wake_seq[] = {
+    {784, 125},  /* G5 */
+    {988, 125},  /* B5 */
+    {1175, 140}, /* D6 */
+    {1319, 330}, /* E6 "channel open" */
+};
+
+static const beep_note_t k_sleep_seq[] = {
+    {1568, 155}, /* G6 */
+    {1047, 185}, /* C6 */
+    {698, 360},  /* F5 */
+};
+
+/** Slow "doo-dah-DEE" on buttons; mid-range only (high carriers + PWM = hash). */
+static const beep_note_t k_ui_seq[] = {
+    {784, 175},  /* G5 */
+    {659, 210},  /* E5 */
+    {1047, 300}, /* C6 */
+};
+
+static const beep_note_t k_blip_seq[] = {
+    {784, 135}, /* G5 soft preview */
+};
+
+/*
+ * AY-3-8910-class PSG + DMA PCM is very feasible on this chip: core emu is typically a few KB
+ * of code plus ~1–4 KB ring buffer at 32–44.1 kHz mono before any waveform LUTs. Not integrated
+ * here — output is still LEDC multi-tone; a future path could stream PCM via I2S or RMT DMA into
+ * the same amp chain for recognizable square/wave chip timbres.
+ */
+
+static bool beep_queue_copy_locked(const beep_note_t *src, uint8_t n, beep_seq_kind_t kind, uint64_t now);
 
 static uint8_t s_btn_low_streak;
 /** After sleep or wake from IO0, ignore further button edges until GPIO0 is released (avoids sleep->wake loop while held). */
 static bool s_btn_block_until_hi;
 
+/** Throttle slider preview blips (VALUE_CHANGED can fire very fast). */
+static uint64_t s_last_blip_queued_ms;
+/** Throttle indev button triads so double-events / tight navigation do not stack sequences. */
+static uint64_t s_last_ui_queued_ms;
+
+/** When true, `beep_seq_tick` yields IO26 to `dashcdg_platform_hw_lab_pcm_push_u8` (fixed-carrier PWM). */
+static volatile bool s_lab_pcm_streaming;
+
+static int beep_kind_priority(beep_seq_kind_t k)
+{
+    switch (k) {
+    case BEEP_SEQ_WAKE:
+    case BEEP_SEQ_SLEEP:
+        return 4;
+    case BEEP_SEQ_UI:
+        return 2;
+    case BEEP_SEQ_BLIP:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 #define USER_BTN_WAKE_FRAMES   5U   /* ~200 ms @ 40 ms/tick */
 #define USER_BTN_SLEEP_FRAMES  35U  /* ~1.4 s hold to sleep */
+
+/** Min gap between queued slider preview blips (fast VALUE_CHANGED). */
+#define BEEP_BLIP_MIN_GAP_MS   95U
+/** Min gap between indev button triads (duplicate CLICKED / tight double-tap). */
+#define BEEP_UI_MIN_GAP_MS     145U
 
 /** Sleep fade from IO0 long-hold: faster ramp to black than idle auto-sleep. */
 static bool s_bl_sleep_fade_manual;
 
-static bool pm_idle_eligible_locked(void)
+static bool pm_idle_eligible_locked(uint64_t now)
 {
     if (s_screen == DASHCDG_HW_SCREEN_HOME) {
         return true;
     }
-    if (s_screen == DASHCDG_HW_SCREEN_KARAOKE && !s_cdg_stream_ok) {
+    if (s_screen == DASHCDG_HW_SCREEN_KARAOKE) {
+        if (s_cdg_stream_ok) {
+            return false;
+        }
+        uint64_t last_rx = atomic_load_explicit(&s_karaoke_last_mcast_rx_ms, memory_order_relaxed);
+        if (last_rx != 0ULL && now >= last_rx && (now - last_rx) < (uint64_t)DASHCDG_HW_IDLE_DIM_MS) {
+            return false;
+        }
         return true;
     }
     return false;
 }
 
-static bool pm_idle_eligible_effective_locked(void)
+static bool pm_idle_eligible_effective_locked(uint64_t now)
 {
     if (!s_auto_sleep_enabled) {
         return false;
     }
-    return pm_idle_eligible_locked();
+    return pm_idle_eligible_locked(now);
 }
 
 static void pm_force_active_restore_locked(void)
@@ -137,6 +235,15 @@ static void pm_force_active_restore_locked(void)
 
 static void pm_commit_panel_sleep_locked(void)
 {
+    uint32_t wake_mask = 0U;
+    if (s_screen == DASHCDG_HW_SCREEN_SETTINGS || s_screen == DASHCDG_HW_SCREEN_APPLICATIONS || s_screen == DASHCDG_HW_SCREEN_DISPLAY ||
+        s_screen == DASHCDG_HW_SCREEN_WIFI || s_screen == DASHCDG_HW_SCREEN_AUDIO_LAB) {
+        wake_mask = 1U;
+    } else if (s_screen == DASHCDG_HW_SCREEN_KARAOKE) {
+        wake_mask = 2U;
+    }
+    __atomic_store_n(&s_post_wake_ui_mask, wake_mask, __ATOMIC_RELEASE);
+
     s_bl_sleep_fade_manual = false;
     __atomic_store_n(&s_disp_pwrcmd, 1, __ATOMIC_SEQ_CST);
     wifi_ps_type_t cur = WIFI_PS_NONE;
@@ -148,15 +255,21 @@ static void pm_commit_panel_sleep_locked(void)
     s_pm_state = PM_SLEEP;
     s_bl_applied_pct = 0;
     s_btn_block_until_hi = true;
+
+    if (wake_mask == 2U) {
+        /* Stop UDP + IGMP while panel is off; karaoke LVGL tree stays until user leaves or wake resumes RX. */
+        dashcdg_badge_rx_stop();
+    }
 }
 
-static void pm_request_manual_sleep_fade_locked(void)
+static void pm_request_manual_sleep_fade_locked(uint64_t now)
 {
     if (s_pm_state == PM_SLEEP || s_pm_state == PM_SLEEP_FADE) {
         return;
     }
     s_bl_sleep_fade_manual = true;
     s_pm_state = PM_SLEEP_FADE;
+    (void)beep_queue_copy_locked(k_sleep_seq, (uint8_t)(sizeof(k_sleep_seq) / sizeof(k_sleep_seq[0])), BEEP_SEQ_SLEEP, now);
 }
 
 static uint8_t pm_idle_dim_target_pct_locked(void)
@@ -234,6 +347,7 @@ static void pm_bump_activity_locked(uint64_t now)
             s_wifi_ps_saved_valid = false;
         }
         s_btn_block_until_hi = true;
+        (void)beep_queue_copy_locked(k_wake_seq, (uint8_t)(sizeof(k_wake_seq) / sizeof(k_wake_seq[0])), BEEP_SEQ_WAKE, now);
     } else if (s_pm_state == PM_SLEEP_FADE) {
         s_bl_sleep_fade_manual = false;
         s_pm_state = PM_ACTIVE;
@@ -246,7 +360,7 @@ static void pm_bump_activity_locked(uint64_t now)
 
 static void pm_update_idle_locked(uint64_t now)
 {
-    if (!pm_idle_eligible_effective_locked()) {
+    if (!pm_idle_eligible_effective_locked(now)) {
         if (s_pm_state == PM_SLEEP) {
             __atomic_store_n(&s_disp_pwrcmd, 2, __ATOMIC_SEQ_CST);
             if (s_wifi_ps_saved_valid) {
@@ -266,6 +380,7 @@ static void pm_update_idle_locked(uint64_t now)
         s_pm_state != PM_WAKE_FADE) {
         s_bl_sleep_fade_manual = false;
         s_pm_state = PM_SLEEP_FADE;
+        (void)beep_queue_copy_locked(k_sleep_seq, (uint8_t)(sizeof(k_sleep_seq) / sizeof(k_sleep_seq[0])), BEEP_SEQ_SLEEP, now);
         return;
     }
 
@@ -345,26 +460,153 @@ static void amp_set_run(bool run)
     gpio_set_level(DASHCDG_HW_GPIO_AMP_SHUTDOWN, run ? 0 : 1);
 }
 
-static void beep_pwm_off(void)
+/** PWM to 0 only; does not touch amp shutdown (use between envelope samples while a jingle runs). */
+static void beep_pwm_zero_locked(void)
 {
     ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, 0);
     ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
+}
+
+/** Full mute: zero PWM and assert SC8002B shutdown (call when idle / sequence finished). */
+static void beep_mute_locked(void)
+{
+    beep_pwm_zero_locked();
     amp_set_run(false);
 }
 
-static void beep_pwm_on(void)
+/**
+ * Map saved 5..100 "percent" to LEDC duty with a strong low-end taper.
+ * Linear mapping made 7–8% painfully loud through the SC8002B + divider; use a power law
+ * so low settings are actually quiet (perceptual-ish without full log10 on every tick).
+ */
+static uint32_t beep_peak_duty_u8(void)
 {
-    amp_set_run(true);
-    ledc_set_freq(LEDC_MODE, LEDC_TIMER_BEEP, LEDC_BEEP_HZ);
-    uint32_t d = (uint32_t)s_beep_vol_pct * 255U / 100U;
-    if (d < 1U) {
+    float p = (float)s_beep_vol_pct;
+    if (p < 5.f) {
+        p = 5.f;
+    }
+    if (p > 100.f) {
+        p = 100.f;
+    }
+    float t = (p - 5.f) / 95.f; /* 0 at slider min, 1 at max */
+    /* ~t^3.4: at 8% UI, duty stays in low single digits; near max still reaches full scale */
+    float g = powf(t, 3.4f);
+    uint32_t d = (uint32_t)(g * 255.f + 0.5f);
+    if (d < 1U && p >= 6.f) {
         d = 1U;
     }
     if (d > 255U) {
         d = 255U;
     }
-    ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, d);
+    return d;
+}
+
+/** Half-sine bell 0..1..0 over note length => soft attack/decay on square PWM ("AM sine"). */
+static float beep_envelope(uint32_t elapsed_ms, uint32_t dur_ms)
+{
+    if (dur_ms < 1U) {
+        return 0.f;
+    }
+    double ph = (double)elapsed_ms / (double)dur_ms;
+    if (ph < 0.0) {
+        ph = 0.0;
+    }
+    if (ph > 1.0) {
+        ph = 1.0;
+    }
+    return (float)sin(M_PI * ph);
+}
+
+static void beep_apply_freq_duty_locked(uint32_t freq_hz, uint32_t duty_u8)
+{
+    if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+    if (freq_hz < 400U) {
+        freq_hz = 400U;
+    }
+    if (freq_hz > 8000U) {
+        freq_hz = 8000U;
+    }
+    /* Do not assert amp shutdown when duty is ~0: envelope start/end and gaps between notes
+     * would toggle SC8002B every few ms and kill level / add thumps. Keep amp on; silence = PWM 0. */
+    amp_set_run(true);
+    if (duty_u8 < 1U) {
+        ledc_set_freq(LEDC_MODE, LEDC_TIMER_BEEP, freq_hz);
+        beep_pwm_zero_locked();
+        return;
+    }
+    if (duty_u8 > 255U) {
+        duty_u8 = 255U;
+    }
+    ledc_set_freq(LEDC_MODE, LEDC_TIMER_BEEP, freq_hz);
+    ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, duty_u8);
     ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
+}
+
+static bool beep_queue_copy_locked(const beep_note_t *src, uint8_t n, beep_seq_kind_t kind, uint64_t now)
+{
+    int neu;
+    int cur;
+
+    if (src == NULL || n == 0U || n > BEEP_SEQ_CAP) {
+        return false;
+    }
+    neu = beep_kind_priority(kind);
+    cur = beep_kind_priority(s_seq_kind);
+    if (s_seq_len > 0U && s_seq_idx < s_seq_len && neu < cur) {
+        return false;
+    }
+    memcpy(s_seq, src, (size_t)n * sizeof(beep_note_t));
+    s_seq_len = n;
+    s_seq_kind = kind;
+    s_seq_idx = 0;
+    s_seq_note_t0_ms = now;
+    s_seq_note_t1_ms = now + (uint64_t)s_seq[0].duration_ms;
+    return true;
+}
+
+static void beep_seq_tick_locked(uint64_t now)
+{
+    if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+    if (s_seq_len > 0U && s_seq_idx < s_seq_len) {
+        while (s_seq_idx < s_seq_len && now >= s_seq_note_t1_ms) {
+            s_seq_idx++;
+            if (s_seq_idx >= s_seq_len) {
+                s_seq_len = 0U;
+                s_seq_kind = BEEP_SEQ_NONE;
+                goto after_note_seq;
+            }
+            s_seq_note_t0_ms = now;
+            s_seq_note_t1_ms = now + (uint64_t)s_seq[s_seq_idx].duration_ms;
+        }
+
+        const beep_note_t *n = &s_seq[s_seq_idx];
+        uint32_t elapsed = (uint32_t)(now - s_seq_note_t0_ms);
+        uint32_t dur = (uint32_t)n->duration_ms;
+        if (dur < 1U) {
+            dur = 1U;
+        }
+        float env = beep_envelope(elapsed, dur);
+        uint32_t peak = beep_peak_duty_u8();
+        uint32_t duty = (uint32_t)((float)peak * env);
+        if (duty < 1U && env > 0.08f) {
+            duty = 1U;
+        }
+
+        beep_apply_freq_duty_locked((uint32_t)n->freq_hz, duty);
+        return;
+    }
+
+after_note_seq:
+    beep_mute_locked();
+}
+
+static bool beep_seq_active(void)
+{
+    return s_seq_len > 0U && s_seq_idx < s_seq_len;
 }
 
 static esp_err_t ledc_install_rgb_bl(void)
@@ -528,7 +770,9 @@ static void led_anim_frame(uint64_t now_ms)
     }
     case DASHCDG_HW_SCREEN_WIFI:
     case DASHCDG_HW_SCREEN_SETTINGS:
+    case DASHCDG_HW_SCREEN_APPLICATIONS:
     case DASHCDG_HW_SCREEN_DISPLAY:
+    case DASHCDG_HW_SCREEN_AUDIO_LAB:
         r = (uint8_t)(80 * breathe);
         g = (uint8_t)(40 * breathe);
         b = (uint8_t)(140 * breathe);
@@ -556,7 +800,8 @@ static void hw_task(void *arg)
     uint64_t last_bat_ms = 0;
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(HW_TICK_MS));
+        uint32_t tick_ms = beep_seq_active() ? BEEP_TICK_FAST_MS : HW_TICK_MS;
+        vTaskDelay(pdMS_TO_TICKS(tick_ms));
         uint64_t now = dashcdg_clock_now_ms();
 
         if (now - last_bat_ms >= 400U) {
@@ -585,30 +830,20 @@ static void hw_task(void *arg)
                     s_btn_low_streak++;
                 }
                 if (!s_btn_block_until_hi) {
-                    if (s_pm_state == PM_SLEEP && s_btn_low_streak == USER_BTN_WAKE_FRAMES) {
-                        ESP_LOGI(TAG, "user button wake (IO0)");
+                    /* Short tap: wake from panel sleep, or exit idle-dim to full brightness (same as touch). */
+                    if ((s_pm_state == PM_SLEEP || s_pm_state == PM_DIM) && s_btn_low_streak == USER_BTN_WAKE_FRAMES) {
+                        ESP_LOGI(TAG, "user button wake / exit dim (IO0)");
                         pm_bump_activity_locked(now);
-                        s_beep_until_ms = now + (uint64_t)BEEP_MS;
                     } else if (s_pm_state != PM_SLEEP && s_pm_state != PM_WAKE_FADE && s_pm_state != PM_SLEEP_FADE &&
                                s_btn_low_streak == USER_BTN_SLEEP_FRAMES) {
                         ESP_LOGI(TAG, "user button sleep (IO0 hold)");
-                        pm_request_manual_sleep_fade_locked();
+                        pm_request_manual_sleep_fade_locked(now);
                         s_btn_block_until_hi = true;
-                        s_beep_until_ms = now + (uint64_t)BEEP_MS;
                     }
                 }
             }
 
-            if (s_beep_until_ms != 0U) {
-                if (now < s_beep_until_ms) {
-                    beep_pwm_on();
-                } else {
-                    s_beep_until_ms = 0U;
-                    beep_pwm_off();
-                }
-            } else {
-                beep_pwm_off();
-            }
+            beep_seq_tick_locked(now);
             xSemaphoreGive(s_mtx);
         }
     }
@@ -725,7 +960,12 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
         return;
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        dashcdg_hw_screen_t prev = s_screen;
         s_screen = s;
+        if (s == DASHCDG_HW_SCREEN_KARAOKE && prev != DASHCDG_HW_SCREEN_KARAOKE) {
+            atomic_store_explicit(&s_karaoke_last_mcast_rx_ms, 0ULL, memory_order_relaxed);
+            s_karaoke_mcast_act_throttle_ms = 0ULL;
+        }
         pm_bump_activity_locked(dashcdg_clock_now_ms());
         xSemaphoreGive(s_mtx);
     }
@@ -745,6 +985,24 @@ void dashcdg_platform_hw_set_cdg_stream_ok(bool ok)
     }
 }
 
+void dashcdg_platform_hw_note_karaoke_mcast_rx(uint64_t rx_now_ms)
+{
+    atomic_store_explicit(&s_karaoke_last_mcast_rx_ms, rx_now_ms, memory_order_relaxed);
+    if (!s_ready || !s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, 0) != pdTRUE) {
+        return;
+    }
+    if (s_screen == DASHCDG_HW_SCREEN_KARAOKE) {
+        if (s_karaoke_mcast_act_throttle_ms == 0ULL || (rx_now_ms - s_karaoke_mcast_act_throttle_ms) >= 250ULL) {
+            s_karaoke_mcast_act_throttle_ms = rx_now_ms;
+            pm_bump_activity_locked(rx_now_ms);
+        }
+    }
+    xSemaphoreGive(s_mtx);
+}
+
 void dashcdg_platform_hw_touch_click(void)
 {
     if (!s_ready || !s_mtx) {
@@ -752,9 +1010,35 @@ void dashcdg_platform_hw_touch_click(void)
     }
     uint64_t now = dashcdg_clock_now_ms();
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(10)) == pdTRUE) {
+        bool was_sleep = (s_pm_state == PM_SLEEP);
         pm_bump_activity_locked(now);
-        if (s_touch_beep_on) {
-            s_beep_until_ms = now + (uint64_t)BEEP_MS;
+        if (s_touch_beep_on && !was_sleep) {
+            if ((now - s_last_blip_queued_ms) >= BEEP_BLIP_MIN_GAP_MS) {
+                if (beep_queue_copy_locked(k_blip_seq, (uint8_t)(sizeof(k_blip_seq) / sizeof(k_blip_seq[0])), BEEP_SEQ_BLIP,
+                                           now)) {
+                    s_last_blip_queued_ms = now;
+                }
+            }
+        }
+        xSemaphoreGive(s_mtx);
+    }
+}
+
+void dashcdg_platform_hw_ui_sound_confirm_click(void)
+{
+    if (!s_ready || !s_mtx) {
+        return;
+    }
+    uint64_t now = dashcdg_clock_now_ms();
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(10)) == pdTRUE) {
+        bool was_sleep = (s_pm_state == PM_SLEEP);
+        pm_bump_activity_locked(now);
+        if (s_touch_beep_on && !was_sleep) {
+            if ((now - s_last_ui_queued_ms) >= BEEP_UI_MIN_GAP_MS) {
+                if (beep_queue_copy_locked(k_ui_seq, (uint8_t)(sizeof(k_ui_seq) / sizeof(k_ui_seq[0])), BEEP_SEQ_UI, now)) {
+                    s_last_ui_queued_ms = now;
+                }
+            }
         }
         xSemaphoreGive(s_mtx);
     }
@@ -780,6 +1064,11 @@ int dashcdg_platform_hw_peek_display_power_cmd(void)
 void dashcdg_platform_hw_ack_display_power_cmd(void)
 {
     __atomic_store_n(&s_disp_pwrcmd, 0, __ATOMIC_SEQ_CST);
+}
+
+uint32_t dashcdg_platform_hw_consume_post_wake_ui_mask(void)
+{
+    return __atomic_exchange_n(&s_post_wake_ui_mask, 0U, __ATOMIC_ACQ_REL);
 }
 
 void dashcdg_platform_hw_set_rgb_status_enabled(bool on)
@@ -850,6 +1139,59 @@ void dashcdg_platform_hw_set_beep_volume_pct(uint8_t pct_5_100)
         s_beep_vol_pct = pct_5_100;
         xSemaphoreGive(s_mtx);
     }
+}
+
+void dashcdg_platform_hw_lab_pcm_stream_begin(void)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
+        return;
+    }
+    __atomic_store_n(&s_lab_pcm_streaming, true, __ATOMIC_RELEASE);
+    /* High carrier so duty changes approximate PCM; above UI beep path 8 kHz cap (see `beep_apply_freq_duty_locked`). */
+    (void)ledc_set_freq(LEDC_MODE, LEDC_TIMER_BEEP, 24000U);
+    amp_set_run(true);
+    ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, 128U);
+    ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
+    xSemaphoreGive(s_mtx);
+}
+
+void dashcdg_platform_hw_lab_pcm_stream_end(void)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
+        return;
+    }
+    __atomic_store_n(&s_lab_pcm_streaming, false, __ATOMIC_RELEASE);
+    beep_mute_locked();
+    xSemaphoreGive(s_mtx);
+}
+
+void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8)
+{
+    if (!__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+    amp_set_run(true);
+    ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, duty_u8);
+    ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
+}
+
+uint8_t dashcdg_platform_hw_get_beep_volume_pct(void)
+{
+    uint8_t v = 85;
+    if (!s_mtx) {
+        return v;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
+        v = s_beep_vol_pct;
+        xSemaphoreGive(s_mtx);
+    }
+    return v;
 }
 
 esp_err_t dashcdg_platform_hw_battery_read(int *out_raw, int *out_pin_mv, int *out_vbat_mv)
