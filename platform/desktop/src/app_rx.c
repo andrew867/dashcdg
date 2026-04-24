@@ -114,6 +114,28 @@
 #define DASHCDG_RX_HOST_UNDERRUN_RECOVER_MIN_STALE_MS 80U
 #define DASHCDG_RX_HOST_UNDERRUN_RECOVER_MAX_BUFFER_MS 120U
 #define DASHCDG_RX_SOURCE_IDLE_PARK_MS 1000U
+/*
+ * v4 stale-media filter compares header.sender_time_ms + preroll to session_start_ms. TX sets
+ * session_start_ms to the playback anchor, which can be now_ms + TX warmup — larger than preroll —
+ * so legitimate first-track / new-track packets were misclassified as prior-session and dropped
+ * until wall time caught up (long frozen video + audio, then a burst / "fast-forward" catch-up).
+ * When session_start_ms is ahead of the session_info datagram's sender time, remember that floor
+ * and only treat packets as stale if they are clearly older than that envelope (with reorder slack).
+ */
+#define DASHCDG_RX_V4_SESSION_REORDER_SENDER_SLACK_MS 100U
+/*
+ * WinMM (waveOut) builds — typical for GDI-only / legacy desktop-rx — expose coarser host
+ * underrun counters and less steady timestamp_ms than PortAudio. Default 750/900 ms stall gates
+ * plus a 3 s post-recover cooldown made auto-recover feel stuck versus GL+PortAudio player builds.
+ */
+#if defined(_WIN32) && defined(DASHCDG_DESKTOP_WIN32_WAVEOUT) && (DASHCDG_DESKTOP_WIN32_WAVEOUT)
+#undef DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS
+#define DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS 480U
+#undef DASHCDG_RX_BUFFERED_SILENT_STALL_RECOVER_MS
+#define DASHCDG_RX_BUFFERED_SILENT_STALL_RECOVER_MS 600U
+#undef DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS
+#define DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS 1200U
+#endif
 #if defined(DASHCDG_RX_UI_GDI_ONLY)
 #define DASHCDG_RX_RENDER_SNAPSHOT_INTERVAL_MS 20U
 #else
@@ -231,6 +253,7 @@ struct receiver_state {
     size_t chunk_count;
     size_t received_chunks;
     uint64_t session_start_ms;
+    uint64_t v4_session_epoch_anchor_sender_ms;
     uint64_t playback_base_ms;
     uint64_t playback_base_sender_ms;
     uint64_t last_audio_jitter_apply_local_ms;
@@ -1117,6 +1140,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->chunk_count = 0;
     state->received_chunks = 0;
     state->session_start_ms = 0;
+    state->v4_session_epoch_anchor_sender_ms = 0U;
     state->playback_base_ms = 0;
     state->playback_base_sender_ms = 0;
     state->last_audio_jitter_apply_local_ms = 0;
@@ -2071,7 +2095,11 @@ static uint32_t dashcdg_rx_stats_sanitized_audio_buffer_ms_locked(
     }
     max_reasonable_ms += DASHCDG_RX_APP_RING_HEADROOM_MS;
     if (raw_buffered_ms > max_reasonable_ms) {
-        return 0U;
+        /*
+         * Never report 0 here: TX treats audio_buffer_ms==0 as empty-buf (hard receiver underrun).
+         * A bogus high raw read (rate mismatch, ring repair glitch) must clamp, not masquerade as empty.
+         */
+        return max_reasonable_ms;
     }
     return raw_buffered_ms;
 }
@@ -3498,6 +3526,7 @@ static int dashcdg_rx_is_stale_prior_session_media_locked(
         const struct dashcdg_packet_view *view
 ) {
     uint64_t warmup_window_ms;
+    int looks_like_prior_session_wall;
 
     if (state == NULL || view == NULL || state->session_start_ms == 0U) {
         return 0;
@@ -3507,7 +3536,22 @@ static int dashcdg_rx_is_stale_prior_session_media_locked(
             ? (uint64_t) state->announced_playout_delay_ms
             : (uint64_t) DASHCDG_RX_DEFAULT_TOTAL_LATENCY_MS;
 
-    return view->header.sender_time_ms + warmup_window_ms < state->session_start_ms;
+    looks_like_prior_session_wall =
+            view->header.sender_time_ms + warmup_window_ms < state->session_start_ms;
+    if (!looks_like_prior_session_wall) {
+        return 0;
+    }
+    /*
+     * TX often sets session_start_ms to playback_anchor (now + warmup) while datagrams still carry
+     * sender_time_ms ≈ wall now. That satisfies the inequality above even for fresh media — gate
+     * with the session_info sender_time that established this session_start.
+     */
+    if (state->v4_session_epoch_anchor_sender_ms != 0U &&
+            view->header.sender_time_ms + DASHCDG_RX_V4_SESSION_REORDER_SENDER_SLACK_MS >=
+                    state->v4_session_epoch_anchor_sender_ms) {
+        return 0;
+    }
+    return 1;
 }
 
 static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -4780,15 +4824,21 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
 static void handle_v4_session_info(struct receiver_state *state, const struct dashcdg_packet_view *view, uint64_t local_now_ms) {
     int session_changed;
     int song_id_track_changed;
+    int asset_metadata_track_change;
     int material_track_change;
     int asset_changed;
     int has_network_audio;
     int need_audio_device_reconfigure;
+    int new_v4_session_epoch;
+    uint64_t prev_session_start_ms;
+    size_t prior_announced_asset_size;
 
     if (state == NULL || view == NULL) {
         return;
     }
 
+    prev_session_start_ms = state->session_start_ms;
+    prior_announced_asset_size = state->asset_size;
     session_changed = state->session_start_ms != 0 && state->session_start_ms != view->v4_session_info.session_start_ms;
     /*
      * TX sets session_start_ms from wall ms at track load. Two loads in the same millisecond reuse
@@ -4799,7 +4849,15 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
     song_id_track_changed =
             state->song_id[0] != '\0' &&
             strncmp(state->song_id, view->v4_session_info.song_id, sizeof(state->song_id)) != 0;
-    material_track_change = session_changed || song_id_track_changed;
+    /*
+     * v4 asset_size is metadata-only, but when it changes while the wire claims the same
+     * session_start_ms + song_id (TX same-ms collision or duplicate titles), we still need a full
+     * receiver reset so CDG jitter / anchor assembly do not splice two different canvases.
+     */
+    asset_metadata_track_change =
+            prior_announced_asset_size > 0U &&
+            (size_t) view->v4_session_info.asset_size != prior_announced_asset_size;
+    material_track_change = session_changed || song_id_track_changed || asset_metadata_track_change;
     asset_changed = state->asset_size != (size_t) view->v4_session_info.asset_size || state->asset_bytes != NULL;
     has_network_audio = view->v4_session_info.audio_sample_rate > 0 &&
             view->v4_session_info.audio_channels > 0 &&
@@ -4859,7 +4917,12 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
 
     strncpy(state->song_id, view->v4_session_info.song_id, sizeof(state->song_id) - 1U);
     state->song_id[sizeof(state->song_id) - 1U] = '\0';
+    new_v4_session_epoch =
+            material_track_change || view->v4_session_info.session_start_ms != prev_session_start_ms;
     state->session_start_ms = view->v4_session_info.session_start_ms;
+    if (new_v4_session_epoch) {
+        state->v4_session_epoch_anchor_sender_ms = view->header.sender_time_ms;
+    }
     state->announced_transport_version = DASHCDG_PROTOCOL_VERSION_V4;
     state->announced_audio_sample_rate = view->v4_session_info.audio_sample_rate;
     state->announced_audio_channels = view->v4_session_info.audio_channels;

@@ -117,6 +117,7 @@ static uint32_t s_rx_stats_seq;
 static uint32_t s_badge_receiver_instance_id;
 static int s_badge_receiver_instance_inited;
 static uint64_t s_active_session_start_ms;
+static uint32_t s_active_asset_size;
 static char s_active_song_id[DASHCDG_MAX_SONG_ID];
 static int s_active_session_valid;
 static struct badge_rx_video_repair_group s_video_repair_groups[BADGE_RX_TRACKED_VIDEO_REPAIR_GROUPS];
@@ -762,11 +763,13 @@ static void handle_session_info(const struct dashcdg_packet_view *view)
 
     same_session = (s_active_session_valid &&
                     s_active_session_start_ms == view->v4_session_info.session_start_ms &&
-                    memcmp(s_active_song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID) == 0);
+                    memcmp(s_active_song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID) == 0 &&
+                    s_active_asset_size == view->v4_session_info.asset_size);
     if (same_session) {
         return;
     }
     s_active_session_start_ms = view->v4_session_info.session_start_ms;
+    s_active_asset_size = view->v4_session_info.asset_size;
     memcpy(s_active_song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID);
     s_active_session_valid = 1;
 
@@ -1203,6 +1206,7 @@ void dashcdg_badge_rx_start(void)
     s_sync_local_ms = 0U;
     s_sync_playback_ms = 0U;
     s_active_session_start_ms = 0U;
+    s_active_asset_size = 0U;
     memset(s_active_song_id, 0, sizeof(s_active_song_id));
     s_active_session_valid = 0;
 

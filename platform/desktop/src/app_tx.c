@@ -288,6 +288,7 @@ struct dashcdg_tx_state {
     uint32_t sequence;
     uint64_t warmup_ms;
     uint64_t session_start_ms;
+    uint64_t last_wire_session_start_ms;
     uint64_t duration_ms;
     uint64_t last_announce_ms;
     uint64_t last_beacon_ms;
@@ -2595,7 +2596,14 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
     }
 
     receipt_age_ms = now_ms > slot->last_local_ms ? now_ms - slot->last_local_ms : 0U;
-    sender_playback_now_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    /*
+     * presented_audio_timestamp_ms on RX is derived from v4 frame playback_ms tags (encoder
+     * timeline) plus DAC progression — not the TX session wall clock. Comparing against
+     * dashcdg_tx_current_playback_ms_locked() mixes timelines; when the encoder falls behind or
+     * catches up relative to wall playback, remotes that track tags can look "ahead" and v4-rx-peer
+     * latency goes negative (bad-lat / no-latency) even though playout is fine.
+     */
+    sender_playback_now_ms = dashcdg_tx_network_playback_ms_locked(now_ms);
     projected_presented_ms = (uint64_t) stats->presented_audio_timestamp_ms + receipt_age_ms;
     projected_latency_ms = (int64_t) sender_playback_now_ms - (int64_t) projected_presented_ms;
 
@@ -3867,6 +3875,16 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     now_ms = dashcdg_clock_now_ms();
     g_tx_state.playback_anchor_local_ms = now_ms + (apply_warmup ? g_tx_state.warmup_ms : 0U);
     g_tx_state.session_start_ms = g_tx_state.playback_anchor_local_ms;
+    /*
+     * Monotonic session_start_ms even if two track loads share the same wall millisecond, so RX
+     * always observes a session change and resets jitter/decoders (same-ms collision otherwise
+     * wedged same song_id + same session_start_ms).
+     */
+    if (g_tx_state.session_start_ms <= g_tx_state.last_wire_session_start_ms) {
+        g_tx_state.session_start_ms = g_tx_state.last_wire_session_start_ms + 1U;
+        g_tx_state.playback_anchor_local_ms = g_tx_state.session_start_ms;
+    }
+    g_tx_state.last_wire_session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
     dashcdg_tx_send_v4_track_bootstrap_locked(now_ms);
@@ -3974,10 +3992,35 @@ static int dashcdg_tx_send_serialized_packet_locked(
         uint64_t *family_counter,
         uint64_t now_ms
 ) {
+    dashcdg_socket_t sockfd;
+    struct sockaddr_in dest;
+    int sent_ok;
+
     if (packet == NULL || packet_size == 0U) {
         return 0;
     }
-    if (!dashcdg_tx_send_packet(packet, packet_size)) {
+    /*
+     * Snapshot socket/destination and drop the mutex before sendto. The v4 audio send thread
+     * otherwise held this lock across audio + FEC bursts, starving the MP3/encode producer
+     * (same mutex for queue + sequence updates) and causing audio_queue_starve / RX empty-buf.
+     */
+    sockfd = g_tx_state.sockfd;
+    dest = g_tx_state.destination;
+    pthread_mutex_unlock(&g_tx_state.mutex);
+    {
+        int sent = (int) sendto(
+                sockfd,
+                (const char *) packet,
+                (int) packet_size,
+                0,
+                (struct sockaddr *) &dest,
+                (socklen_t) sizeof(dest)
+        );
+
+        sent_ok = (sent == (int) packet_size);
+    }
+    pthread_mutex_lock(&g_tx_state.mutex);
+    if (!sent_ok) {
         g_tx_state.send_failures++;
         return 0;
     }
@@ -7230,6 +7273,7 @@ static void dashcdg_tx_cleanup(void) {
         g_tx_logger_enabled = 0;
     }
     dashcdg_net_cleanup();
+    g_tx_state.last_wire_session_start_ms = 0U;
     pthread_mutex_destroy(&g_tx_state.mutex);
 }
 
@@ -7654,10 +7698,18 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     g_tx_state.sequence = 1;
+    /*
+     * load_track_with_history_locked ends in v4 bootstrap sends, which temporarily drop
+     * g_tx_state.mutex around sendto. Callers must already hold the mutex — otherwise unlock is UB
+     * and TX can exit immediately on startup.
+     */
+    pthread_mutex_lock(&g_tx_state.mutex);
     if (!dashcdg_tx_load_track_with_history_locked(initial_track_index, 1, 1)) {
+        pthread_mutex_unlock(&g_tx_state.mutex);
         dashcdg_tx_cleanup();
         return 1;
     }
+    pthread_mutex_unlock(&g_tx_state.mutex);
 
     fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
     fprintf(stdout, "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "v4 (default)" : "v3 (--v3)");
