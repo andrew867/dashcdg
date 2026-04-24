@@ -116,6 +116,14 @@ static void on_tile_settings(lv_event_t *e)
     }
 }
 
+static void on_tile_applications(lv_event_t *e)
+{
+    lv_disp_t *disp = lv_event_get_user_data(e);
+    if (disp) {
+        dashcdg_nav_applications(disp);
+    }
+}
+
 static void sysinfo_modal_close(void)
 {
     if (s_info_modal && lv_obj_is_valid(s_info_modal)) {
@@ -731,11 +739,11 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
                        th,
                        on_tile_karaoke,
                        disp);
-        /* SD card app picker placeholder (header gear opens settings). */
+        /* Applications hub (Audio lab, …). */
         make_app_tile(tiles,
-                       "SD card loader\ncoming soon\n" LV_SYMBOL_DRIVE "  " LV_SYMBOL_LIST "  " LV_SYMBOL_FILE,
+                       "Applications\n" LV_SYMBOL_AUDIO "  " LV_SYMBOL_LIST "  " LV_SYMBOL_KEYBOARD,
                        th,
-                       NULL,
+                       on_tile_applications,
                        disp);
     }
 

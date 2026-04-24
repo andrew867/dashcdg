@@ -1,5 +1,5 @@
 /*
- * Display lab: LCD backlight, rear RGB, idle power, touch beep + PWM level (NVS-backed).
+ * Display lab: LCD backlight, rear RGB, idle power (NVS-backed). Audio prefs live in Audio lab.
  */
 #include <stdio.h>
 
@@ -17,6 +17,35 @@
 #include "wifi_touch_ui.h"
 
 static const char *TAG = "display_ui";
+
+/** NVS + platform use 5..100 in 5% steps; keep UI aligned. */
+static int snap_pct_step5(int v)
+{
+    if (v <= 5) {
+        return 5;
+    }
+    if (v >= 100) {
+        return 100;
+    }
+    int r = ((v + 2) / 5) * 5;
+    if (r < 5) {
+        r = 5;
+    }
+    if (r > 100) {
+        r = 100;
+    }
+    return r;
+}
+
+static void on_pct_slider_snap(lv_event_t *e)
+{
+    lv_obj_t *sl = lv_event_get_target(e);
+    int v = (int)lv_slider_get_value(sl);
+    int s = snap_pct_step5(v);
+    if (s != v) {
+        lv_slider_set_value(sl, (int32_t)s, LV_ANIM_OFF);
+    }
+}
 
 static void ui_no_scroll(lv_obj_t *obj)
 {
@@ -37,13 +66,7 @@ static void on_brightness_changed(lv_event_t *e)
 {
     lv_obj_t *sl = lv_event_get_target(e);
     lv_obj_t *lbl = lv_event_get_user_data(e);
-    int v = lv_slider_get_value(sl);
-    if (v < 5) {
-        v = 5;
-    }
-    if (v > 100) {
-        v = 100;
-    }
+    int v = snap_pct_step5((int)lv_slider_get_value(sl));
     dashcdg_platform_hw_notify_activity();
     dashcdg_platform_hw_backlight_set_pct((uint8_t)v);
     (void)dashcdg_badge_prefs_save_brightness((uint8_t)v);
@@ -69,67 +92,12 @@ typedef struct {
 
 static aslp_ui_t s_aslp_ui;
 
-typedef struct {
-    lv_obj_t *sw;
-    lv_obj_t *lbl;
-} touchbeep_ui_t;
-
-typedef struct {
-    lv_obj_t *sl;
-    lv_obj_t *lbl;
-} beepvol_ui_t;
-
-static touchbeep_ui_t s_tb_ui;
-static beepvol_ui_t s_bv_ui;
-
-static void on_touch_beep_changed(lv_event_t *e)
-{
-    lv_obj_t *sw = lv_event_get_target(e);
-    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    uint8_t onu = on ? 1U : 0U;
-    dashcdg_platform_hw_notify_activity();
-    dashcdg_platform_hw_set_touch_beep_enabled(on);
-    (void)dashcdg_badge_prefs_save_touch_beep(onu);
-    if (s_tb_ui.lbl) {
-        lv_label_set_text(s_tb_ui.lbl,
-                           on ? LV_SYMBOL_VOLUME_MAX "  Touch beep on  saved"
-                              : LV_SYMBOL_MUTE "  Touch beep off  saved");
-    }
-}
-
-static void on_beep_volume_changed(lv_event_t *e)
-{
-    lv_obj_t *sl = lv_event_get_target(e);
-    lv_obj_t *lbl = lv_event_get_user_data(e);
-    int v = lv_slider_get_value(sl);
-    if (v < 5) {
-        v = 5;
-    }
-    if (v > 100) {
-        v = 100;
-    }
-    dashcdg_platform_hw_notify_activity();
-    dashcdg_platform_hw_set_beep_volume_pct((uint8_t)v);
-    (void)dashcdg_badge_prefs_save_beep_volume((uint8_t)v);
-    if (lbl) {
-        char buf[56];
-        snprintf(buf, sizeof(buf), LV_SYMBOL_AUDIO "  %d%%  saved", v);
-        lv_label_set_text(lbl, buf);
-    }
-    if (s_tb_ui.sw && lv_obj_is_valid(s_tb_ui.sw) && lv_obj_has_state(s_tb_ui.sw, LV_STATE_CHECKED)) {
-        dashcdg_platform_hw_touch_click();
-    }
-}
-
 static void on_rear_switch_changed(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *sw = lv_event_get_target(e);
     bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    int rp = lv_slider_get_value(s_rear_ui.sl);
-    if (rp < 5) {
-        rp = 5;
-    }
+    int rp = snap_pct_step5((int)lv_slider_get_value(s_rear_ui.sl));
     dashcdg_platform_hw_notify_activity();
     dashcdg_platform_hw_set_rgb_status_enabled(on);
     dashcdg_platform_hw_set_rgb_status_brightness((uint8_t)rp);
@@ -152,13 +120,7 @@ static void on_rear_slider_changed(lv_event_t *e)
     if (!lv_obj_has_state(s_rear_ui.sw, LV_STATE_CHECKED)) {
         return;
     }
-    int v = lv_slider_get_value(s_rear_ui.sl);
-    if (v < 5) {
-        v = 5;
-    }
-    if (v > 100) {
-        v = 100;
-    }
+    int v = snap_pct_step5((int)lv_slider_get_value(s_rear_ui.sl));
     dashcdg_platform_hw_notify_activity();
     dashcdg_platform_hw_set_rgb_status_brightness((uint8_t)v);
     (void)dashcdg_badge_prefs_save_rgb_status(1U, (uint8_t)v);
@@ -259,15 +221,11 @@ esp_err_t dashcdg_display_ui_present(lv_disp_t *disp)
     uint8_t rgb_on = 1;
     uint8_t rgb_pct = 100;
     uint8_t aslp_on = 1;
-    uint8_t beep_pct = 85;
-    uint8_t touch_beep_on = 1;
     (void)dashcdg_badge_prefs_load_brightness(&bp);
     (void)dashcdg_badge_prefs_load_rgb_status(&rgb_on, &rgb_pct);
     (void)dashcdg_badge_prefs_load_auto_sleep(&aslp_on);
-    (void)dashcdg_badge_prefs_load_beep_volume(&beep_pct);
-    (void)dashcdg_badge_prefs_load_touch_beep(&touch_beep_on);
-    dashcdg_platform_hw_set_beep_volume_pct(beep_pct);
-    dashcdg_platform_hw_set_touch_beep_enabled(touch_beep_on != 0);
+    bp = (uint8_t)snap_pct_step5((int)bp);
+    rgb_pct = (uint8_t)snap_pct_step5((int)rgb_pct);
 
     lv_obj_t *box = lv_obj_create(scroll);
     lv_obj_set_width(box, lv_pct(100));
@@ -299,6 +257,7 @@ esp_err_t dashcdg_display_ui_present(lv_disp_t *disp)
     lv_obj_set_width(sl, lv_pct(100));
     lv_slider_set_range(sl, 5, 100);
     lv_slider_set_value(sl, (int32_t)bp, LV_ANIM_OFF);
+    lv_obj_add_event_cb(sl, on_pct_slider_snap, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(sl, on_brightness_changed, LV_EVENT_VALUE_CHANGED, lcd_h);
 
     lv_obj_t *rgb_sec = lv_label_create(box);
@@ -352,70 +311,8 @@ esp_err_t dashcdg_display_ui_present(lv_disp_t *disp)
     s_rear_ui.sl = rgb_sl;
     s_rear_ui.lbl_pct = rgb_lbl;
     lv_obj_add_event_cb(rear_sw, on_rear_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(rgb_sl, on_pct_slider_snap, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(rgb_sl, on_rear_slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    lv_obj_t *snd_sec = lv_label_create(box);
-    lv_label_set_text(snd_sec, "TOUCH & SOUND");
-    lv_obj_set_style_text_color(snd_sec, lv_color_hex(0x7a8f86), 0);
-    lv_obj_set_style_text_opa(snd_sec, LV_OPA_90, 0);
-
-    lv_obj_t *snd_cap = lv_label_create(box);
-    lv_label_set_text(snd_cap,
-                      "Tap tick uses IO26 PWM into SC8002B (4k7 + 20k divider). Raise level if taps are too quiet.");
-    lv_obj_set_style_text_color(snd_cap, lv_color_hex(0x5c6e66), 0);
-    lv_label_set_long_mode(snd_cap, LV_LABEL_LONG_MODE_WRAP);
-    lv_obj_set_width(snd_cap, lv_pct(100));
-
-    lv_obj_t *tb_row = lv_obj_create(box);
-    lv_obj_set_width(tb_row, lv_pct(100));
-    lv_obj_set_height(tb_row, 40);
-    lv_obj_set_style_pad_all(tb_row, 0, 0);
-    lv_obj_set_style_border_width(tb_row, 0, 0);
-    lv_obj_set_style_bg_opa(tb_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_flex_flow(tb_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(tb_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(tb_row, 12, 0);
-    ui_no_scroll(tb_row);
-
-    lv_obj_t *tb_sw = lv_switch_create(tb_row);
-    lv_obj_set_size(tb_sw, 52, 26);
-    if (touch_beep_on) {
-        lv_obj_add_state(tb_sw, LV_STATE_CHECKED);
-    }
-    lv_obj_t *tb_sw_lbl = lv_label_create(tb_row);
-    lv_label_set_text(tb_sw_lbl, "Touch beep");
-    lv_obj_set_style_text_color(tb_sw_lbl, lv_color_hex(0xb8d4c8), 0);
-
-    lv_obj_t *tb_lbl = lv_label_create(box);
-    lv_label_set_text(tb_lbl,
-                      touch_beep_on ? LV_SYMBOL_VOLUME_MAX "  Touch beep on  saved"
-                                    : LV_SYMBOL_MUTE "  Touch beep off  saved");
-    lv_obj_set_style_text_color(tb_lbl, lv_color_hex(0xc4ddd0), 0);
-
-    lv_obj_t *beep_sec = lv_label_create(box);
-    lv_label_set_text(beep_sec, "BEEP LEVEL");
-    lv_obj_set_style_text_color(beep_sec, lv_color_hex(0x7a8f86), 0);
-    lv_obj_set_style_text_opa(beep_sec, LV_OPA_90, 0);
-
-    lv_obj_t *beep_lbl = lv_label_create(box);
-    {
-        char buf[56];
-        snprintf(buf, sizeof(buf), LV_SYMBOL_AUDIO "  %u%%  saved", (unsigned)beep_pct);
-        lv_label_set_text(beep_lbl, buf);
-    }
-    lv_obj_set_style_text_color(beep_lbl, lv_color_hex(0xc4ddd0), 0);
-
-    lv_obj_t *beep_sl = lv_slider_create(box);
-    lv_obj_set_width(beep_sl, lv_pct(100));
-    lv_slider_set_range(beep_sl, 5, 100);
-    lv_slider_set_value(beep_sl, (int32_t)beep_pct, LV_ANIM_OFF);
-
-    s_tb_ui.sw = tb_sw;
-    s_tb_ui.lbl = tb_lbl;
-    s_bv_ui.sl = beep_sl;
-    s_bv_ui.lbl = beep_lbl;
-    lv_obj_add_event_cb(tb_sw, on_touch_beep_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(beep_sl, on_beep_volume_changed, LV_EVENT_VALUE_CHANGED, beep_lbl);
 
     lv_obj_t *aslp_sec = lv_label_create(box);
     lv_label_set_text(aslp_sec, "POWER");
