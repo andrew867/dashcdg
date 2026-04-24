@@ -208,6 +208,41 @@ static void test_reader_seek_cyndi_dk_leading_command_zero(void) {
     dashcdg_cdg_reader_free(&reader);
 }
 
+/*
+ * When the first keyframe is late (only MEMORY_PRESET repeat==0 creates keyframes), a backward
+ * seek to ts inside the leading idle region must reset and replay — not restore keyframe[0], which
+ * would leave state.ts past the target (SF-style intros, e.g. Tom Petty - Learning To Fly).
+ */
+static void test_reader_seek_backward_before_first_keyframe(void) {
+    struct dashcdg_cdg_reader reader;
+    struct dashcdg_subchannel_packet stream[220];
+    size_t i;
+
+    dashcdg_cdg_reader_init(&reader);
+    memset(stream, 0, sizeof(stream));
+    for (i = 0; i < 200U; i++) {
+        stream[i] = make_packet(0);
+        stream[i].command = 0x01;
+    }
+    stream[200] = make_packet(DASHCDG_INSN_MEMORY_PRESET);
+    ((struct dashcdg_insn_memory_preset *) stream[200].data)->color = 3;
+    ((struct dashcdg_insn_memory_preset *) stream[200].data)->repeat = 0;
+
+    assert(dashcdg_cdg_reader_load_memory(&reader, (const uint8_t *) stream, sizeof(stream)) == 1);
+    assert(dashcdg_cdg_reader_build_keyframes(&reader) == 1);
+    assert(reader.keyframes.count >= 1U);
+
+    assert(dashcdg_cdg_reader_seek(&reader, 210) == 1);
+    assert(reader.state.ts == 210U);
+    assert(reader.state.framebuffer[DASHCDG_ARRAY_INDEX(10, 10)] == 3);
+
+    assert(dashcdg_cdg_reader_seek(&reader, 15) == 1);
+    assert(reader.state.ts == 15U);
+    assert(reader.state.framebuffer[DASHCDG_ARRAY_INDEX(10, 10)] == 0);
+
+    dashcdg_cdg_reader_free(&reader);
+}
+
 static void test_protocol_roundtrip(void) {
     uint8_t buffer[DASHCDG_MAX_PACKET_SIZE];
     struct dashcdg_packet_header header;
@@ -1368,6 +1403,7 @@ int main(void) {
     test_reader_seek_and_keyframes();
     test_reader_seek_non_graphics_leading_packets();
     test_reader_seek_cyndi_dk_leading_command_zero();
+    test_reader_seek_backward_before_first_keyframe();
     test_protocol_roundtrip();
     test_protocol_v4_roundtrip();
     test_v4_audio_codec_predicate_helpers();

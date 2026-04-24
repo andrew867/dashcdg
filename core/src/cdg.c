@@ -227,6 +227,15 @@ static const struct dashcdg_cdg_keyframe *dashcdg_find_closest_keyframe(
         }
     }
 
+    /*
+     * If every keyframe is strictly after ts (e.g. long leading non-graphics run before the first
+     * MEMORY_PRESET repeat==0), best_index can remain 0 while items[0].timestamp > ts. Restoring
+     * that keyframe would jump past the seek target — fall back to full reset in the caller.
+     */
+    if (list->items[best_index].timestamp > ts) {
+        return NULL;
+    }
+
     return &list->items[best_index];
 }
 
