@@ -387,7 +387,8 @@ struct dashcdg_v4_rx_stats_payload {
     uint32_t recovery_zero_buffer_count;
     uint32_t recovery_silent_stall_count;
     uint32_t source_idle_park_count;
-    uint32_t startup_flags;};
+    uint32_t startup_flags;
+};
 #pragma pack(pop)
 
 struct dashcdg_packet_view {
