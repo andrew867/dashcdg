@@ -12,6 +12,7 @@
 #include "home_ui.h"
 #include "nav.h"
 #include "platform_hw.h"
+#include "wifi_touch_ui.h"
 
 static const char *TAG = "apps_ui";
 
