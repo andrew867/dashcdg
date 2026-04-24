@@ -10,6 +10,9 @@
 #define DASHCDG_BADGE_RX_VISIBLE_H 192
 #define DASHCDG_BADGE_RX_RGB565_BYTES (DASHCDG_BADGE_RX_VISIBLE_W * DASHCDG_BADGE_RX_VISIBLE_H * sizeof(uint16_t))
 
+/** Added to LVGL slot Y before `esp_lcd_panel_draw_bitmap` (optional trim; keep 0 when karaoke layout fits). */
+#define DASHCDG_BADGE_RX_CDG_OVERLAY_BLIT_Y_NUDGE (0)
+
 /** Panel band blit height (scratch = W * H * 2 bytes, no full framebuffer). */
 #define DASHCDG_BADGE_RX_BLIT_BAND_H 12
 

@@ -1,7 +1,7 @@
 /*
  * Vbat on GPIO34: ADC1 oneshot + optional line fitting, divider math from board_cyd_freenove_32.h.
  *
- * ESP32 (classic): ADC1_CH6 == GPIO34 only. Do NOT use ADC1_CH5 here — that muxes GPIO33, which
+ * ESP32 (classic): ADC1_CH6 == GPIO34 only. Do NOT use ADC1_CH5 here - that muxes GPIO33, which
  * is XPT2046 TP_CS on the CYD; reassigning it to SARADC kills SPI touch chip-select.
  */
 #include "vbat_sense.h"

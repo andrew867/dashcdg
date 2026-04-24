@@ -6,12 +6,16 @@ idf_component_register(
         "home_ui.c"
         "karaoke_ui.c"
         "settings_ui.c"
+        "badge_ui_flair.c"
+        "display_ui.c"
         "touch_cal_store.c"
         "touch_cal_ui.c"
         "wifi_touch_ui.c"
         "badge_rx.c"
         "badge_cdg_rgb565.c"
         "vbat_sense.c"
+        "badge_prefs.c"
+        "platform_hw.c"
     INCLUDE_DIRS "."
     REQUIRES
         heap

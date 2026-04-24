@@ -10,6 +10,12 @@
 /** ST7789 + XPT2046 + esp_lvgl_port (FreeRTOS). Touch axis map lives in display_lvgl.c + board_cyd_freenove_32.h. */
 esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp);
 
+/**
+ * LVGL-thread hook: apply panel sleep/wake requested by `platform_hw` (call from an LVGL timer).
+ * Uses `lvgl_port_lock` + `esp_lcd_panel_disp_on_off`.
+ */
+void dashcdg_display_lvgl_poll_panel_power(void);
+
 /** Panel used by LVGL (same MADCTL as port). NULL before init. */
 esp_lcd_panel_handle_t dashcdg_display_lcd_panel(void);
 

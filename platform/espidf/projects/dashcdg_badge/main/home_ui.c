@@ -12,9 +12,11 @@
 #include "esp_wifi.h"
 #include "lvgl.h"
 
+#include "board_cyd_freenove_32.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
 #include "nav.h"
+#include "platform_hw.h"
 #include "vbat_sense.h"
 
 /* TODO(remove): on-screen XPT2046 read snapshot (LVGL-mapped x/y + z + PENIRQ). Set 0 before ship. */
@@ -31,6 +33,17 @@ static lv_obj_t *s_lbl_wifi;
 static lv_obj_t *s_lbl_ip;
 static lv_obj_t *s_lbl_bat;
 static lv_obj_t *s_info_modal;
+
+/** Full-width low-pack warning on `lv_layer_top` (dismiss tap; re-arms above clear mV). */
+static lv_obj_t *s_lowbat_root;
+static lv_obj_t *s_lowbat_lbl;
+static lv_timer_t *s_lowbat_anim_timer;
+static uint8_t s_lowbat_user_dismissed;
+static uint8_t s_lowbat_anim_step;
+
+/** Show bar at/under this pack mV; hide until re-armed after reaching CLEAR mV. */
+#define HOME_LOWBAT_SHOW_MV  3620
+#define HOME_LOWBAT_CLEAR_MV 3760
 
 /** Battery label text color: dedicated style so theme refresh cannot revert to primary (blue). */
 static lv_style_t s_home_bat_text_style;
@@ -55,6 +68,28 @@ static void dashcdg_ui_no_scroll(lv_obj_t *obj)
     if (obj) {
         lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     }
+}
+
+/**
+ * Height for each home launcher tile, derived from `CYD_LCD_V_RES` and the real layout in
+ * `dashcdg_home_ui_present` (outer pad, header row, three outer pad_row gaps, tiles wrapper pad,
+ * gap between tiles, per-tile col pad, status bar) plus a small reserve so the dock stays visible.
+ */
+static lv_coord_t home_launcher_tile_height_px(void)
+{
+    const int v = CYD_LCD_V_RES;
+    /* Flex column height = 6 + 32 + 4 + (2+(T+4)+4+(T+4)+2) + 4 + spacer + 4 + 30 + 6 = 2T + 102
+     * (spacer min 0). Matches `dashcdg_home_ui_present` padding and row gaps. */
+    const int non_tile = 102;
+    const int extra_reserve = 26;
+    int t = (v - non_tile - extra_reserve) / 2;
+    if (t < 44) {
+        t = 44;
+    }
+    if (t > 56) {
+        t = 56;
+    }
+    return (lv_coord_t)t;
 }
 
 static void on_tile_wifi(lv_event_t *e)
@@ -106,6 +141,125 @@ static void on_modal_ok_click(lv_event_t *e)
     sysinfo_modal_close();
 }
 
+static esp_err_t home_battery_read_once(int *out_raw, int *out_vbat_mv)
+{
+    int raw = 0;
+    int vbat = 0;
+    esp_err_t br = ESP_FAIL;
+
+    if (dashcdg_platform_hw_is_ready()) {
+        br = dashcdg_platform_hw_battery_read(&raw, NULL, &vbat);
+    }
+    if (br != ESP_OK) {
+        if (!dashcdg_vbat_sense_is_ready() || dashcdg_vbat_sense_read(&raw, NULL, &vbat) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    if (out_raw) {
+        *out_raw = raw;
+    }
+    if (out_vbat_mv) {
+        *out_vbat_mv = vbat;
+    }
+    return ESP_OK;
+}
+
+static void home_lowbat_overlay_destroy(void)
+{
+    if (s_lowbat_anim_timer) {
+        lv_timer_del(s_lowbat_anim_timer);
+        s_lowbat_anim_timer = NULL;
+    }
+    if (s_lowbat_root && lv_obj_is_valid(s_lowbat_root)) {
+        lv_obj_del(s_lowbat_root);
+    }
+    s_lowbat_root = NULL;
+    s_lowbat_lbl = NULL;
+}
+
+static void home_lowbat_anim_timer_cb(lv_timer_t *t)
+{
+    if (!s_lowbat_root || !lv_obj_is_valid(s_lowbat_root)) {
+        lv_timer_del(t);
+        s_lowbat_anim_timer = NULL;
+        return;
+    }
+    s_lowbat_anim_step++;
+    lv_obj_set_style_bg_color(s_lowbat_root, (s_lowbat_anim_step & 1U) ? lv_color_hex(0x481010) : lv_color_hex(0x702020), 0);
+    lv_obj_set_style_border_color(s_lowbat_root, (s_lowbat_anim_step & 2U) ? lv_color_hex(0xff8800) : lv_color_hex(0xff2200), 0);
+}
+
+static void home_lowbat_overlay_touch_dismiss(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    s_lowbat_user_dismissed = 1U;
+    home_lowbat_overlay_destroy();
+}
+
+static void home_lowbat_overlay_update(int raw, int vbat_mv)
+{
+    if (vbat_mv >= HOME_LOWBAT_CLEAR_MV) {
+        s_lowbat_user_dismissed = 0U;
+        home_lowbat_overlay_destroy();
+        return;
+    }
+    if (s_lowbat_user_dismissed) {
+        return;
+    }
+    if (vbat_mv > HOME_LOWBAT_SHOW_MV) {
+        return;
+    }
+
+    int deci = (vbat_mv * 10 + 500) / 1000;
+    if (deci < 0) {
+        deci = 0;
+    }
+    int w = deci / 10;
+    int f = deci % 10;
+
+    if (!s_lowbat_root || !lv_obj_is_valid(s_lowbat_root)) {
+        s_lowbat_root = lv_obj_create(lv_layer_top());
+        lv_obj_set_width(s_lowbat_root, lv_pct(100));
+        lv_obj_set_height(s_lowbat_root, 38);
+        lv_obj_align(s_lowbat_root, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_style_bg_opa(s_lowbat_root, LV_OPA_COVER, 0);
+        lv_obj_set_style_opa(s_lowbat_root, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_lowbat_root, lv_color_hex(0x501010), 0);
+        lv_obj_set_style_border_side(s_lowbat_root, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(s_lowbat_root, 3, 0);
+        lv_obj_set_style_border_color(s_lowbat_root, lv_color_hex(0xff6600), 0);
+        lv_obj_set_style_pad_hor(s_lowbat_root, 8, 0);
+        lv_obj_set_style_pad_ver(s_lowbat_root, 4, 0);
+        lv_obj_set_style_radius(s_lowbat_root, 0, 0);
+        lv_obj_add_flag(s_lowbat_root, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_lowbat_root, home_lowbat_overlay_touch_dismiss, LV_EVENT_CLICKED, NULL);
+        lv_obj_remove_flag(s_lowbat_root, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_lowbat_lbl = lv_label_create(s_lowbat_root);
+        lv_label_set_long_mode(s_lowbat_lbl, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_width(s_lowbat_lbl, lv_pct(94));
+        lv_obj_set_style_text_color(s_lowbat_lbl, lv_color_hex(0xffccaa), 0);
+        lv_obj_align(s_lowbat_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+        s_lowbat_anim_step = 0U;
+        if (s_lowbat_anim_timer == NULL) {
+            s_lowbat_anim_timer = lv_timer_create(home_lowbat_anim_timer_cb, 180, NULL);
+        }
+        lv_obj_move_foreground(s_lowbat_root);
+    }
+
+    if (s_lowbat_lbl && lv_obj_is_valid(s_lowbat_lbl)) {
+        char line[140];
+        snprintf(line, sizeof(line),
+                 LV_SYMBOL_WARNING "  LOW PACK  %d.%dV   raw %d   %d mV\n"
+                 "tap bar to dismiss   (re-arms after %d mV)",
+                 w, f, raw, vbat_mv, HOME_LOWBAT_CLEAR_MV);
+        lv_label_set_text(s_lowbat_lbl, line);
+    }
+}
+
 static void on_info_btn(lv_event_t *e)
 {
     lv_disp_t *disp = lv_event_get_user_data(e);
@@ -119,7 +273,7 @@ static void on_info_btn(lv_event_t *e)
     memset(&ap, 0, sizeof(ap));
     esp_err_t werr = esp_wifi_sta_get_ap_info(&ap);
 
-    char body[720];
+    char body[960];
     const esp_app_desc_t *app = esp_app_get_description();
 
     snprintf(body, sizeof(body),
@@ -168,40 +322,78 @@ static void on_info_btn(lv_event_t *e)
         snprintf(body + z1, sizeof(body) - z1, "\n[wifi] idle / disconnected\n");
     }
 
+    {
+        int braw = 0;
+        int bmv = 0;
+        size_t zb = strlen(body);
+        if (home_battery_read_once(&braw, &bmv) == ESP_OK) {
+            snprintf(body + zb, sizeof(body) - zb,
+                     "\n--- Pack (ADC) ---\n"
+                     "raw .... %d   (log at shutdown for colour cal)\n"
+                     "pack ... %d mV\n"
+                     "dock tint mix: 3450 mV (red) .. 4180 mV (green)\n",
+                     braw, bmv);
+        } else {
+            snprintf(body + zb, sizeof(body) - zb, "\n--- Pack (ADC) ---\n(read failed)\n");
+        }
+    }
+
     lv_obj_t *layer = lv_layer_top();
     s_info_modal = lv_obj_create(layer);
     lv_obj_set_size(s_info_modal, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(s_info_modal, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_info_modal, LV_OPA_70, 0);
+    lv_obj_set_style_bg_color(s_info_modal, lv_color_hex(0x080a09), 0);
+    lv_obj_set_style_bg_opa(s_info_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(s_info_modal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_info_modal, 0, 0);
     lv_obj_add_event_cb(s_info_modal, on_modal_scrim_clicked, LV_EVENT_CLICKED, NULL);
+    dashcdg_ui_no_scroll(s_info_modal);
+    lv_obj_remove_flag(s_info_modal, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *panel = lv_obj_create(s_info_modal);
-    lv_obj_set_width(panel, 300);
-    lv_obj_set_style_max_height(panel, 220, 0);
+    lv_obj_set_width(panel, lv_pct(90));
+    lv_obj_set_height(panel, lv_pct(72));
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05080a), 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x00cc66), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x00aa88), 0);
     lv_obj_set_style_border_width(panel, 1, 0);
     lv_obj_set_style_pad_all(panel, 10, 0);
     lv_obj_set_style_radius(panel, 4, 0);
-    lv_obj_set_style_shadow_width(panel, 12, 0);
-    lv_obj_set_style_shadow_color(panel, lv_color_hex(0x003322), 0);
+    lv_obj_set_style_shadow_width(panel, 0, 0);
     lv_obj_add_event_cb(panel, on_modal_panel_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(panel, 6, 0);
+    dashcdg_ui_no_scroll(panel);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(panel);
     lv_label_set_text(title, "[ SYS | INF0 ]");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x00ff99), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x66ffcc), 0);
 
-    lv_obj_t *txt = lv_label_create(panel);
+    lv_obj_t *scroll = lv_obj_create(panel);
+    lv_obj_set_width(scroll, lv_pct(100));
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_min_height(scroll, 120, 0);
+    lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(scroll, 4, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(scroll, on_modal_panel_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *txt = lv_label_create(scroll);
     lv_label_set_long_mode(txt, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_width(txt, lv_pct(100));
-    lv_obj_set_style_text_color(txt, lv_color_hex(0x88ccb0), 0);
+    lv_obj_set_style_text_color(txt, lv_color_hex(0xaaccbb), 0);
     lv_label_set_text(txt, body);
 
     lv_obj_t *row = lv_obj_create(panel);
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_height(row, 32);
+    lv_obj_set_flex_grow(row, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
@@ -210,15 +402,19 @@ static void on_info_btn(lv_event_t *e)
 
     lv_obj_t *b = lv_button_create(row);
     lv_obj_set_width(b, 72);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x113322), 0);
-    lv_obj_set_style_border_color(b, lv_color_hex(0x00aa55), 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x0a1510), 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(0x338866), 0);
     lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_radius(b, 3, 0);
     lv_obj_t *bl = lv_label_create(b);
     lv_label_set_text(bl, "> ok");
+    lv_obj_set_style_text_color(bl, lv_color_hex(0x66ffcc), 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(b, on_modal_ok_click, LV_EVENT_CLICKED, NULL);
 
     lv_obj_update_layout(panel);
+    lv_obj_move_foreground(s_info_modal);
 }
 
 void dashcdg_home_ui_pause_status_updates(void)
@@ -238,6 +434,7 @@ void dashcdg_home_ui_pause_status_updates(void)
     s_lbl_ip = NULL;
     s_lbl_bat = NULL;
     sysinfo_modal_close();
+    home_lowbat_overlay_destroy();
 }
 
 /*
@@ -255,7 +452,7 @@ static lv_color_t home_bat_color_from_pack_mv(int vbat_mv)
     if (x > 255) {
         x = 255;
     }
-    /* lv_color_mix(c1,c2,mix): mix→255 pulls toward c1, mix→0 toward c2 — green high, red low. */
+    /* lv_color_mix(c1,c2,mix): mix->255 pulls toward c1, mix->0 toward c2 - green high, red low. */
     return lv_color_mix(lv_color_hex(0x33dd66), lv_color_hex(0xff4444), (uint8_t)x);
 }
 
@@ -263,7 +460,7 @@ static void home_status_fill_bat(char *bat_txt, size_t bat_sz, lv_color_t *bat_c
 {
     int raw = 0;
     int vbat = 0;
-    if (!dashcdg_vbat_sense_is_ready() || dashcdg_vbat_sense_read(&raw, NULL, &vbat) != ESP_OK) {
+    if (home_battery_read_once(&raw, &vbat) != ESP_OK) {
         snprintf(bat_txt, bat_sz, " -- ");
         *bat_col = lv_color_hex(0x887766);
         return;
@@ -292,7 +489,7 @@ static void home_touch_dbg_timer_cb(lv_timer_t *t)
 #endif
 
 /*
- * LVGL timers run on the LVGL task — never lvgl_port_lock from timer cb.
+ * LVGL timers run on the LVGL task - never lvgl_port_lock from timer cb.
  */
 static void home_status_gather(char *wifi_txt, size_t wifi_sz, char *ip_txt, size_t ip_sz, char *bat_txt, size_t bat_sz,
                                lv_color_t *bat_col)
@@ -366,6 +563,15 @@ static void home_status_timer_cb(lv_timer_t *t)
     char bat_txt[28];
     lv_color_t bat_col;
     home_status_gather(wifi_txt, sizeof(wifi_txt), ip_txt, sizeof(ip_txt), bat_txt, sizeof(bat_txt), &bat_col);
+    {
+        int br = 0;
+        int bmv = 0;
+        if (home_battery_read_once(&br, &bmv) == ESP_OK) {
+            home_lowbat_overlay_update(br, bmv);
+        } else {
+            home_lowbat_overlay_destroy();
+        }
+    }
     home_status_apply_labels(wifi_txt, ip_txt, bat_txt, bat_col);
 }
 
@@ -384,19 +590,30 @@ static void home_status_refresh_foreign(void)
     if (!lvgl_port_lock(400)) {
         return;
     }
+    {
+        int br = 0;
+        int bmv = 0;
+        if (home_battery_read_once(&br, &bmv) == ESP_OK) {
+            home_lowbat_overlay_update(br, bmv);
+        }
+    }
     home_status_apply_labels(wifi_txt, ip_txt, bat_txt, bat_col);
     lvgl_port_unlock();
 }
 
-/** Compact tile: in-button label only. */
-static lv_obj_t *make_app_tile(lv_obj_t *parent, const char *btn_lines, lv_event_cb_t cb, lv_disp_t *disp)
+/**
+ * Compact tile: in-button label. `cb` NULL = disabled placeholder (no tap); settings stay on header gear.
+ * `tile_h` from `home_launcher_tile_height_px()`.
+ */
+static lv_obj_t *make_app_tile(lv_obj_t *parent, const char *btn_lines, lv_coord_t tile_h, lv_event_cb_t cb,
+                               lv_disp_t *disp)
 {
     lv_obj_t *col = lv_obj_create(parent);
     /* Never flex_grow the wrapper in a column: two grow siblings split free height and leave a
      * huge empty band between stacked tiles. */
     lv_obj_set_width(col, lv_pct(100));
     lv_obj_set_height(col, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_all(col, 3, 0);
+    lv_obj_set_style_pad_all(col, 2, 0);
     lv_obj_set_style_border_width(col, 0, 0);
     lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
     dashcdg_ui_no_scroll(col);
@@ -404,14 +621,18 @@ static lv_obj_t *make_app_tile(lv_obj_t *parent, const char *btn_lines, lv_event
 
     lv_obj_t *tile = lv_button_create(col);
     lv_obj_set_width(tile, lv_pct(100));
-    lv_obj_set_height(tile, 54);
+    lv_obj_set_height(tile, tile_h);
     lv_obj_set_style_radius(tile, 6, 0);
     lv_obj_set_style_bg_color(tile, lv_color_hex(0x0a1410), 0);
     lv_obj_set_style_border_color(tile, lv_color_hex(0x00aa55), 0);
     lv_obj_set_style_border_width(tile, 1, 0);
-    lv_obj_set_style_shadow_width(tile, 4, 0);
+    lv_obj_set_style_shadow_width(tile, 2, 0);
     lv_obj_set_style_shadow_color(tile, lv_color_hex(0x002211), 0);
-    lv_obj_add_event_cb(tile, cb, LV_EVENT_CLICKED, disp);
+    if (cb != NULL) {
+        lv_obj_add_event_cb(tile, cb, LV_EVENT_CLICKED, disp);
+    } else {
+        lv_obj_add_state(tile, LV_STATE_DISABLED);
+    }
 
     lv_obj_t *lg = lv_label_create(tile);
     lv_label_set_long_mode(lg, LV_LABEL_LONG_MODE_WRAP);
@@ -453,15 +674,43 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
     dashcdg_ui_no_scroll(outer);
     lv_obj_remove_flag(outer, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *hdr = lv_label_create(outer);
+    lv_obj_t *hdr_row = lv_obj_create(outer);
+    lv_obj_set_width(hdr_row, lv_pct(100));
+    lv_obj_set_height(hdr_row, 32);
+    /* Match status bar horizontal inset so trailing controls share one vertical line (gear right = info "?"). */
+    lv_obj_set_style_pad_left(hdr_row, 6, 0);
+    lv_obj_set_style_pad_right(hdr_row, 4, 0);
+    lv_obj_set_style_pad_top(hdr_row, 0, 0);
+    lv_obj_set_style_pad_bottom(hdr_row, 0, 0);
+    lv_obj_set_style_border_width(hdr_row, 0, 0);
+    lv_obj_set_style_bg_opa(hdr_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(hdr_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hdr_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    dashcdg_ui_no_scroll(hdr_row);
+    lv_obj_remove_flag(hdr_row, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *hdr = lv_label_create(hdr_row);
     lv_label_set_text(hdr, "> Shadyvision // BADGE");
     lv_obj_set_style_text_color(hdr, lv_color_hex(0x33ff99), 0);
+    lv_obj_set_flex_grow(hdr, 1);
+    lv_obj_set_style_min_width(hdr, 0, 0);
+    lv_label_set_long_mode(hdr, LV_LABEL_LONG_MODE_CLIP);
 
-    lv_obj_t *sub = lv_label_create(outer);
-    lv_label_set_text(sub, "// pick exploit module ;)");
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x558866), 0);
+    lv_obj_t *b_gear = lv_button_create(hdr_row);
+    lv_obj_set_size(b_gear, 26, 22);
+    lv_obj_set_style_pad_all(b_gear, 0, 0);
+    lv_obj_set_style_shadow_width(b_gear, 0, 0);
+    lv_obj_set_style_bg_color(b_gear, lv_color_hex(0x0a1510), 0);
+    lv_obj_set_style_border_color(b_gear, lv_color_hex(0x338866), 0);
+    lv_obj_set_style_border_width(b_gear, 1, 0);
+    lv_obj_set_style_radius(b_gear, 3, 0);
+    lv_obj_t *gl = lv_label_create(b_gear);
+    lv_label_set_text(gl, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_color(gl, lv_color_hex(0x88ffcc), 0);
+    lv_obj_center(gl);
+    lv_obj_add_event_cb(b_gear, on_tile_settings, LV_EVENT_CLICKED, disp);
 
-    /* Two full-width tiles only: karaoke, then settings (no flex-grow spacer — it ate layout and
+    /* Two full-width tiles only: karaoke, then settings (no flex-grow spacer - it ate layout and
      * pushed the status dock off-screen / clipped tiles). */
     lv_obj_t *tiles = lv_obj_create(outer);
     lv_obj_set_width(tiles, lv_pct(100));
@@ -471,11 +720,24 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
     lv_obj_set_style_bg_opa(tiles, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(tiles, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(tiles, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(tiles, 6, 0);
+    lv_obj_set_style_pad_row(tiles, 3, 0);
     dashcdg_ui_no_scroll(tiles);
     lv_obj_remove_flag(tiles, LV_OBJ_FLAG_CLICKABLE);
-    make_app_tile(tiles, "[ mcast ]\nrx/karaoke", on_tile_karaoke, disp);
-    make_app_tile(tiles, "[ cfg ]\nsettings", on_tile_settings, disp);
+    {
+        const lv_coord_t th = home_launcher_tile_height_px();
+        /* Line 1 ASCII; line 2: three Montserrat symbols (mic-ish + video + loop). */
+        make_app_tile(tiles,
+                       "mcast / karaoke\n" LV_SYMBOL_AUDIO "  " LV_SYMBOL_VIDEO "  " LV_SYMBOL_LOOP,
+                       th,
+                       on_tile_karaoke,
+                       disp);
+        /* SD card app picker placeholder (header gear opens settings). */
+        make_app_tile(tiles,
+                       "SD card loader\ncoming soon\n" LV_SYMBOL_DRIVE "  " LV_SYMBOL_LIST "  " LV_SYMBOL_FILE,
+                       th,
+                       NULL,
+                       disp);
+    }
 
     /* Push status bar to the physical bottom; only this spacer flex-grows (not inside tile column). */
     lv_obj_t *dock_spacer = lv_obj_create(outer);
@@ -590,8 +852,9 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
     if (!lvgl_port_lock(1000)) {
         return ESP_ERR_TIMEOUT;
     }
-    s_status_timer = lv_timer_create(home_status_timer_cb, 2000, NULL);
+    s_status_timer = lv_timer_create(home_status_timer_cb, 3000, NULL);
     lvgl_port_unlock();
 
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_HOME);
     return ESP_OK;
 }

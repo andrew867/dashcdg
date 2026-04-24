@@ -15,12 +15,15 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "badge_ui_flair.h"
 #include "display_lvgl.h"
 #include "nav.h"
+#include "platform_hw.h"
 #include "wifi_touch_ui.h"
 
 static const char *TAG = "wifi_ui";
 static bool s_wifi_driver_ready;
+static esp_netif_t *s_wifi_sta_netif;
 static const char *NVS_NS = "dashcfg";
 
 static lv_obj_t *s_lbl_status;
@@ -146,6 +149,16 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         ui_statusf("Wi-Fi started");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         ui_statusf("Disconnected (tap Connect after Scan)");
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        /* Fresh DHCP on each association avoids stale lwIP client state / odd subnets on some APs. */
+        esp_netif_t *na = s_wifi_sta_netif ? s_wifi_sta_netif : esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (na) {
+            (void)esp_netif_dhcpc_stop(na);
+            esp_err_t d = esp_netif_dhcpc_start(na);
+            if (d != ESP_OK) {
+                ESP_LOGW(TAG, "dhcpc_start after STA_CONNECTED: %s", esp_err_to_name(d));
+            }
+        }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ui_statusf("Online\nIP: " IPSTR, IP2STR(&ev->ip_info.ip));
@@ -320,8 +333,14 @@ static void build_ui(lv_disp_t *disp)
     lv_obj_add_event_cb(b_home, on_nav_home, LV_EVENT_CLICKED, disp);
 
     lv_obj_t *title = lv_label_create(root);
-    lv_label_set_text(title, "dashcdg badge - Wi-Fi");
+    lv_label_set_text(title, LV_SYMBOL_WIFI "  Wi-Fi Settings");
     lv_obj_set_style_text_color(title, lv_color_hex(0xb0ffe8), 0);
+
+    lv_obj_t *wsub = lv_label_create(root);
+    lv_label_set_text(wsub, dashcdg_ui_flair_wifi_sub());
+    lv_label_set_long_mode(wsub, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(wsub, lv_pct(100));
+    lv_obj_set_style_text_color(wsub, lv_color_hex(0x669988), 0);
 
     s_lbl_status = lv_label_create(root);
     lv_label_set_long_mode(s_lbl_status, LV_LABEL_LONG_WRAP);
@@ -430,7 +449,12 @@ esp_err_t dashcdg_wifi_ensure_init(void)
         return ESP_OK;
     }
 
-    (void)esp_netif_create_default_wifi_sta();
+    s_wifi_sta_netif = esp_netif_create_default_wifi_sta();
+    if (s_wifi_sta_netif == NULL) {
+        ESP_LOGE(TAG, "esp_netif_create_default_wifi_sta failed");
+        return ESP_FAIL;
+    }
+    esp_netif_set_default_netif(s_wifi_sta_netif);
 
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&wcfg), TAG, "esp_wifi_init");
@@ -468,6 +492,7 @@ esp_err_t dashcdg_wifi_touch_ui_present(lv_disp_t *disp)
 
     try_auto_connect_saved();
 
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_WIFI);
     return ESP_OK;
 }
 

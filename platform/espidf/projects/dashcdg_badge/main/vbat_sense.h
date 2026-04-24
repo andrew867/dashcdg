@@ -8,7 +8,7 @@
 /**
  * Vbat sense on IO34: classic divider to ADC (see board_cyd_freenove_32.h). Call once at boot
  * (before home UI) so the status bar can read raw + estimated pack voltage. Two-point
- * (full/empty) calibration can be layered later; for now, full ≈ value when TP4054 (3.3k PROG) hits
+ * (full/empty) calibration can be layered later; for now, full ~ value when TP4054 (3.3k PROG) hits
  * charge end; empty TBD.
  */
 esp_err_t dashcdg_vbat_sense_init(void);

@@ -12,8 +12,13 @@
 #include "lvgl.h"
 #include "misc/lv_async.h"
 
+#include "board_badge_hw.h"
 #include "board_cyd_freenove_32.h"
+#include "badge_ui_flair.h"
 #include "display_lvgl.h"
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "platform_hw.h"
 #include "touch_cal_store.h"
 #include "touch_cal_ui.h"
 
@@ -60,6 +65,9 @@ typedef struct {
     uint8_t release_stable;
     dashcdg_touch_cal_nav_fn on_done;
     dashcdg_touch_cal_nav_fn on_cancel;
+    /** IO0 (user button): short press cancel while LVGL touch is disabled. */
+    bool io0_down;
+    int64_t io0_press_us;
 } cal_ctx_t;
 
 #ifndef MIN
@@ -162,8 +170,8 @@ static void cal_fail(cal_ctx_t *c, const char *msg)
 
 /**
  * Raw samples at cross centers (r = CROSS_SZ/2). NVS stores chip X register bounds in xmin/xmax
- * and chip Y register in ymin/ymax (same as TFT_eSPI calData). display_lvgl maps chip Y → LVGL X
- * and chip X → LVGL Y, so extrapolation pairs axes to **screen** geometry as follows:
+ * and chip Y register in ymin/ymax (same as TFT_eSPI calData). display_lvgl maps chip Y -> LVGL X
+ * and chip X -> LVGL Y, so extrapolation pairs axes to **screen** geometry as follows:
  *   - adc Y vs horizontal position: left column (TL,BL) vs right (TR,BR)
  *   - adc X vs vertical position: top row (TL,TR) vs bottom (BL,BR)
  */
@@ -358,11 +366,46 @@ static void cal_async_do_complete(void *ud)
     cal_complete_ok(c);
 }
 
+/** Timer already removed; free ctx then navigate (same end state as on-screen cancel). */
+static void cal_async_cancel_from_timer(void *ud)
+{
+    cal_ctx_t *c = (cal_ctx_t *)ud;
+    if (!c) {
+        return;
+    }
+    dashcdg_touch_cal_nav_fn cancel = c->on_cancel;
+    lv_disp_t *disp = c->disp;
+    c->timer = NULL;
+    dashcdg_touch_rearm_locked();
+    free(c);
+    cal_nav_dispatch_async(disp, cancel);
+}
+
 static void cal_timer_cb(lv_timer_t *t)
 {
     cal_ctx_t *c = (cal_ctx_t *)lv_timer_get_user_data(t);
     if (!c || !c->disp) {
         return;
+    }
+
+    if (c->show_cancel && c->on_cancel) {
+        const bool io0_now = (gpio_get_level(DASHCDG_HW_GPIO_USER_BTN) == 0);
+        if (!c->io0_down && io0_now) {
+            c->io0_down = true;
+            c->io0_press_us = esp_timer_get_time();
+        } else if (c->io0_down && !io0_now) {
+            const int64_t dt = esp_timer_get_time() - c->io0_press_us;
+            c->io0_down = false;
+            /* 40 ms debounce .. 1.1 s - stay under long-hold sleep (~1.4 s @ 40 ms x 35). */
+            if (dt >= 40000 && dt <= 1100000LL) {
+                lv_timer_del(t);
+                c->timer = NULL;
+                if (lv_async_call(cal_async_cancel_from_timer, c) != LV_RESULT_OK) {
+                    cal_async_cancel_from_timer(c);
+                }
+                return;
+            }
+        }
     }
 
     uint16_t rx = 0, ry = 0;
@@ -455,18 +498,6 @@ static void cal_timer_cb(lv_timer_t *t)
     }
 }
 
-static void on_cancel_clicked(lv_event_t *e)
-{
-    cal_ctx_t *c = (cal_ctx_t *)lv_event_get_user_data(e);
-    if (!c) {
-        return;
-    }
-    dashcdg_touch_cal_nav_fn cancel = c->on_cancel;
-    lv_disp_t *disp = c->disp;
-    cal_destroy(c);
-    cal_nav_dispatch_async(disp, cancel);
-}
-
 /** LVGL 9: containers default to scrollable; strip chrome from footer. */
 static void ui_no_scroll(lv_obj_t *o)
 {
@@ -519,8 +550,16 @@ esp_err_t dashcdg_touch_cal_ui_present(lv_disp_t *disp, bool show_cancel_button,
     ui_no_scroll(foot);
 
     lv_obj_t *title = lv_label_create(foot);
-    lv_label_set_text(title, "> touch_cal // 4-corner");
+    lv_label_set_text(title, "TOUCH CALIBRATION");
     lv_obj_set_style_text_color(title, lv_color_hex(0x33ff99), 0);
+    lv_obj_set_style_text_letter_space(title, 1, 0);
+
+    lv_obj_t *tag = lv_label_create(foot);
+    lv_label_set_text(tag, dashcdg_ui_flair_touch_cal_sub());
+    lv_obj_set_style_text_color(tag, lv_color_hex(0x669988), 0);
+    lv_label_set_long_mode(tag, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(tag, 300);
+    lv_obj_set_style_text_align(tag, LV_TEXT_ALIGN_CENTER, 0);
 
     c->lbl_instr = lv_label_create(foot);
     lv_label_set_text(c->lbl_instr, k_step_text[0]);
@@ -535,17 +574,12 @@ esp_err_t dashcdg_touch_cal_ui_present(lv_disp_t *disp, bool show_cancel_button,
     lv_obj_set_style_text_align(c->lbl_debug, LV_TEXT_ALIGN_CENTER, 0);
 
     if (show_cancel_button && on_cancel) {
-        lv_obj_t *b = lv_button_create(foot);
-        lv_obj_set_width(b, 120);
-        lv_obj_set_height(b, 32);
-        lv_obj_set_style_bg_color(b, lv_color_hex(0x0a1510), 0);
-        lv_obj_set_style_border_color(b, lv_color_hex(0x338866), 0);
-        lv_obj_set_style_border_width(b, 1, 0);
-        lv_obj_t *lb = lv_label_create(b);
-        lv_label_set_text(lb, "Cancel");
-        lv_obj_set_style_text_color(lb, lv_color_hex(0x88ffcc), 0);
-        lv_obj_center(lb);
-        lv_obj_add_event_cb(b, on_cancel_clicked, LV_EVENT_CLICKED, c);
+        lv_obj_t *hint = lv_label_create(foot);
+        lv_label_set_text(hint, LV_SYMBOL_LEFT "  IO0 short tap = cancel  (touch is off for cal)");
+        lv_obj_set_style_text_color(hint, lv_color_hex(0x88aa99), 0);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_width(hint, 300);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     }
 
     /* Targets last so they paint above the footer strip (corners remain unobstructed). */
@@ -561,6 +595,9 @@ esp_err_t dashcdg_touch_cal_ui_present(lv_disp_t *disp, bool show_cancel_button,
     lv_obj_center(c->cross_lbl);
     lv_obj_move_foreground(c->cross);
 
+    c->io0_down = (gpio_get_level(DASHCDG_HW_GPIO_USER_BTN) == 0);
+    c->io0_press_us = 0;
+
     c->timer = lv_timer_create(cal_timer_cb, 40, c);
     if (!c->timer) {
         dashcdg_touch_rearm_locked();
@@ -571,5 +608,6 @@ esp_err_t dashcdg_touch_cal_ui_present(lv_disp_t *disp, bool show_cancel_button,
 
     lv_obj_invalidate(scr);
     lvgl_port_unlock();
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_SETTINGS);
     return ESP_OK;
 }

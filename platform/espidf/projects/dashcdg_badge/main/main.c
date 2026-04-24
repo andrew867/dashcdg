@@ -1,5 +1,5 @@
 /*
- * dashcdg_badge — CYD 3.2" LVGL + touch launcher (Wi-Fi, Karaoke stubs; CD-G multicast later).
+ * dashcdg_badge - CYD 3.2" LVGL + touch launcher (Wi-Fi, Karaoke stubs; CD-G multicast later).
  */
 #include <stdio.h>
 
@@ -16,6 +16,7 @@
 #include "nav.h"
 #include "touch_cal_store.h"
 #include "touch_cal_ui.h"
+#include "platform_hw.h"
 #include "vbat_sense.h"
 #include "wifi_touch_ui.h"
 
@@ -130,6 +131,19 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "display OK");
 
+    {
+        esp_err_t vb = dashcdg_vbat_sense_init();
+        if (vb != ESP_OK) {
+            ESP_LOGW(TAG, "Vbat sense init: %s", esp_err_to_name(vb));
+        }
+    }
+    {
+        esp_err_t ph = dashcdg_platform_hw_init();
+        if (ph != ESP_OK) {
+            ESP_LOGW(TAG, "platform hw init: %s", esp_err_to_name(ph));
+        }
+    }
+
     if (!dashcdg_touch_cal_store_has_valid()) {
         esp_err_t c = dashcdg_touch_cal_ui_present(disp, false, dashcdg_nav_home, NULL);
         if (c != ESP_OK) {
@@ -145,14 +159,6 @@ void app_main(void)
         if (err != ESP_OK) {
             dashcdg_show_boot_error_screen(disp, "home_ui_present", err);
             return;
-        }
-    }
-
-    /* After LVGL + touch UI are up: vbat only touches GPIO34 / ADC1_CH6 (never GPIO33 / TP_CS). */
-    {
-        esp_err_t vb = dashcdg_vbat_sense_init();
-        if (vb != ESP_OK) {
-            ESP_LOGW(TAG, "Vbat sense init: %s", esp_err_to_name(vb));
         }
     }
 

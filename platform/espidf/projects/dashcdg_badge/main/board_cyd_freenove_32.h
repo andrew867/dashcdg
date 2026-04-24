@@ -23,7 +23,7 @@
 #define CYD_GPIO_TP_IRQ        GPIO_NUM_36
 
 /*
- * Battery sense (ADC1) — 100k from Vbat to node, 100k node to GND (Vpin = Vbat * Rb / (Rt+Rb)).
+ * Battery sense (ADC1) - 100k from Vbat to node, 100k node to GND (Vpin = Vbat * Rb / (Rt+Rb)).
  * IO34: input-only, suits ADC. "Full" cal point: note raw + pack V when TP4054 hits end-of-charge
  * (common ~4.2 V cell w/ 3.3k PROG on TP4054/4056 class CC/CV, ~0.1C termination); "empty" TBD
  * (e.g. at brownout). Tweak Rtop/Rbottom if your build differs.
@@ -43,7 +43,7 @@
 #define CYD_LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)
 
 /*
- * LVGL partial-draw RAM (internal DMA): total ≈ CYD_LCD_H_RES * CYD_LVGL_BUF_LINES * 2 bytes × (1 or 2 buffers).
+ * LVGL partial-draw RAM (internal DMA): total ~ CYD_LCD_H_RES * CYD_LVGL_BUF_LINES * 2 bytes x (1 or 2 buffers).
  * Default is lean for ESP32 internal DRAM (CDG state ~65 KiB on heap). Raise lines / double-buffer for smoother UI.
  */
 #ifndef CYD_LVGL_BUF_LINES
@@ -63,7 +63,7 @@
 
 /*
  * ST7789 color pipeline (SPI RGB565 + LVGL): if you see wrong hues (e.g. green/red swap,
- * magenta faces), toggle these — see display_lvgl.c.
+ * magenta faces), toggle these - see display_lvgl.c.
  * - SWAP_RGB565_BYTES: almost always 1 on ESP SPI DMA path so LVGL RGB565 matches panel order.
  * - RGB_ELEMENT_ORDER: many ST7789 modules want BGR; try RGB if skin tones look wrong.
  * - PANEL_INVERT: panel inversion command; some batches need false instead of true.
@@ -76,7 +76,7 @@
 #define CYD_LCD_PANEL_INVERT        1
 
 /*
- * XPT2046 → LVGL (landscape), verified on Freenove CYD 3.2" IPS:
+ * XPT2046 -> LVGL (landscape), verified on Freenove CYD 3.2" IPS:
  * - Do not use esp_lcd_touch swap_xy to pair axes (see display_lvgl.c).
  * - Software mirror X in esp_lcd_touch is ON for this stack.
  * - CYD_TP_TOUCH_INVERT_LVGL_Y is OFF; use mirror_x + mapping instead of post-map Y invert.
@@ -84,7 +84,7 @@
 #define CYD_TP_SWAP_XY    0
 #define CYD_TP_MIRROR_X   1
 #define CYD_TP_MIRROR_Y   0
-/* Optional: flip LVGL Y after chip-X→LVGL-Y map (normally 0 when mirror_x handles orientation). */
+/* Optional: flip LVGL Y after chip-X->LVGL-Y map (normally 0 when mirror_x handles orientation). */
 #ifndef CYD_TP_TOUCH_INVERT_LVGL_Y
 #define CYD_TP_TOUCH_INVERT_LVGL_Y 0
 #endif
@@ -94,7 +94,7 @@
  * From third_party/Freenove_ESP32_Display/.../Sketch_12.2_TFT_Touch_Draw_3.2_Inch.ino:
  *   uint16_t calData[5] = { 412, 3502, 262, 3596, 3 }; // tft.setTouch(calData);
  * Touch foil is slightly larger than the visible LCD; mapping full 0..4095 to pixels exaggerates
- * that — use these mins/maxs with CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n + process_coordinates.
+ * that - use these mins/maxs with CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n + process_coordinates.
  */
 #ifndef CYD_TP_RAW_X_MIN
 #define CYD_TP_RAW_X_MIN 412

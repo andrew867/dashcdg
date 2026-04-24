@@ -1,11 +1,11 @@
 /*
- * CYD 3.2" — ST7789 + XPT2046 on shared SPI2, backlight GPIO, LVGL via esp_lvgl_port.
+ * CYD 3.2" - ST7789 + XPT2046 on shared SPI2, backlight GPIO, LVGL via esp_lvgl_port.
  *
  * Freenove Arduino samples use tft.setTouch(calData) with raw ADC min/max per axis; the atanisoft
- * driver's default (full 0..4096 → pixels) exaggerates misalignment when the digitizer extends
+ * driver's default (full 0..4096 -> pixels) exaggerates misalignment when the digitizer extends
  * past the LCD. We disable built-in conversion and map raw ADC with the same bounds (see board
  * header). swap_xy/mirror_y are off; mirror_x may be on (board_cyd_freenove_32.h).
- * dashcdg_touch_process_coordinates maps chip Y-ADC → LVGL X and chip X-ADC → LVGL Y, then
+ * dashcdg_touch_process_coordinates maps chip Y-ADC -> LVGL X and chip X-ADC -> LVGL Y, then
  * esp_lcd_touch applies mirror_x; optional CYD_TP_TOUCH_INVERT_LVGL_Y is usually 0.
  *
  * PENIRQ on CYD_GPIO_TP_IRQ + CONFIG_XPT2046_INTERRUPT_MODE (sdkconfig.defaults): chip drives PENIRQ
@@ -25,6 +25,7 @@
 
 #include "board_cyd_freenove_32.h"
 #include "display_lvgl.h"
+#include "platform_hw.h"
 #include "touch_cal_store.h"
 
 #include "esp_lcd_touch.h"
@@ -39,8 +40,63 @@ static esp_lcd_touch_handle_t s_tp;
 static lv_indev_t *s_touch_indev;
 static volatile bool s_touch_raw_mode;
 
+/** After panel wake, drop stale pen-down so the first mapped point does not click UI. */
+static lv_timer_t *s_post_wake_touch_timer;
+
+static void post_wake_touch_timer_cb(lv_timer_t *t)
+{
+    lv_timer_del(t);
+    s_post_wake_touch_timer = NULL;
+    /* LVGL timer context: avoid nesting `lvgl_port_lock` (mutex is often already held). */
+    dashcdg_touch_rearm_locked();
+}
+
+static void dashcdg_display_schedule_post_wake_touch_rearm(void)
+{
+    if (s_post_wake_touch_timer) {
+        lv_timer_del(s_post_wake_touch_timer);
+        s_post_wake_touch_timer = NULL;
+    }
+    s_post_wake_touch_timer = lv_timer_create(post_wake_touch_timer_cb, 420, NULL);
+}
+
 /** Same panel handle passed to esp_lvgl_port (LVGL logical coords == draw_bitmap after MADCTL). */
 static esp_lcd_panel_handle_t s_lcd_panel;
+
+static void dashcdg_indev_activity_on_press(lv_event_t *e)
+{
+    (void)e;
+    dashcdg_platform_hw_notify_activity();
+}
+
+static void dashcdg_indev_hw_feedback(lv_event_t *e)
+{
+    (void)e;
+    dashcdg_platform_hw_touch_click();
+}
+
+static void dashcdg_panel_power_lv_cb(lv_timer_t *t)
+{
+    (void)t;
+    dashcdg_display_lvgl_poll_panel_power();
+}
+
+void dashcdg_display_lvgl_poll_panel_power(void)
+{
+    int cmd = dashcdg_platform_hw_peek_display_power_cmd();
+    if (cmd == 0 || s_lcd_panel == NULL) {
+        return;
+    }
+    if (!lvgl_port_lock(120)) {
+        return;
+    }
+    (void)esp_lcd_panel_disp_on_off(s_lcd_panel, cmd == 2);
+    if (cmd == 2) {
+        dashcdg_display_schedule_post_wake_touch_rearm();
+    }
+    lvgl_port_unlock();
+    dashcdg_platform_hw_ack_display_power_cmd();
+}
 
 static int32_t s_tp_xmin = CYD_TP_RAW_X_MIN;
 static int32_t s_tp_xmax = CYD_TP_RAW_X_MAX;
@@ -77,7 +133,7 @@ static uint16_t map_adc_axis(uint16_t raw, int32_t raw_min, int32_t raw_max, int
 /**
  * Called by esp_lcd_touch before optional swap/mirror (see esp_lcd_touch.c).
  * XPT2046 returns chip X register in x[], Y register in y[]. On this CYD stack, landscape LVGL X
- * follows the resistive Y measurement and LVGL Y follows X — map to correct output sizes here;
+ * follows the resistive Y measurement and LVGL Y follows X - map to correct output sizes here;
  * do not use esp_lcd_touch swap_xy for that (it only swaps two numbers with mismatched ranges).
  */
 static void dashcdg_touch_process_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, uint16_t *y,
@@ -133,7 +189,7 @@ esp_err_t dashcdg_touch_apply_store_or_defaults(void)
     }
     if (e == ESP_OK) {
         ESP_LOGW(TAG,
-                 "touch cal NVS failed sanity (span); using board defaults — re-run touch cal or erase namespace dashcfg");
+                 "touch cal NVS failed sanity (span); using board defaults - re-run touch cal or erase namespace dashcfg");
     }
     dashcdg_touch_set_calibration_adc(CYD_TP_RAW_X_MIN, CYD_TP_RAW_X_MAX, CYD_TP_RAW_Y_MIN, CYD_TP_RAW_Y_MAX);
     ESP_LOGI(TAG, "touch cal: board defaults (no NVS or rejected)");
@@ -169,7 +225,7 @@ void dashcdg_touch_rearm_locked(void)
 
 /*
  * If NVS cal is active but mapped (x,y) stay in a pinhole while Z swings (finger moving / varying
- * pressure), the stored ADC bounds are almost certainly wrong — clear NVS and use board defaults.
+ * pressure), the stored ADC bounds are almost certainly wrong - clear NVS and use board defaults.
  */
 #define STUCK_CAL_RING 36
 #define STUCK_CAL_MIN_SAMPLES 22
@@ -250,10 +306,10 @@ static bool stuck_cal_maybe_invalidate_nvs(uint16_t x, uint16_t y, uint16_t z)
     }
     (void)dashcdg_touch_apply_store_or_defaults();
     ESP_LOGW(TAG,
-             "touch: cleared NVS cal (Z span=%lu mapped XY span %lu x %lu) — using board defaults; re-run cal if needed",
+             "touch: cleared NVS cal (Z span=%lu mapped XY span %lu x %lu) - using board defaults; re-run cal if needed",
              (unsigned long)zspan, (unsigned long)xspan, (unsigned long)yspan);
     stuck_cal_ring_reset();
-    /* Overlay runs from an LVGL timer; same context as other lv_* touch calls — rearm without nesting port lock. */
+    /* Overlay runs from an LVGL timer; same context as other lv_* touch calls - rearm without nesting port lock. */
     dashcdg_touch_rearm_locked();
     return true;
 }
@@ -274,7 +330,7 @@ void dashcdg_touch_debug_format_line(char *buf, size_t buf_sz)
     uint8_t cnt = 0;
     esp_err_t e2 = esp_lcd_touch_get_data(s_tp, pts, &cnt, CONFIG_ESP_LCD_TOUCH_MAX_POINTS);
 
-    /* Runtime only: GPIO_NUM_* are enums — #if (CYD_GPIO_TP_IRQ != GPIO_NUM_NC) is unreliable in cpp. */
+    /* Runtime only: GPIO_NUM_* are enums - #if (CYD_GPIO_TP_IRQ != GPIO_NUM_NC) is unreliable in cpp. */
     int irq = -1;
     if (CYD_GPIO_TP_IRQ != GPIO_NUM_NC) {
         irq = gpio_get_level(CYD_GPIO_TP_IRQ);
@@ -438,7 +494,7 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
     touch_cfg.y_max = CYD_LCD_V_RES;
     touch_cfg.rst_gpio_num = GPIO_NUM_NC;
     touch_cfg.int_gpio_num = CYD_GPIO_TP_IRQ;
-    touch_cfg.levels.interrupt = 0; /* PENIRQ active low → NEGEDGE before esp_lcd_touch registers ISR */
+    touch_cfg.levels.interrupt = 0; /* PENIRQ active low -> NEGEDGE before esp_lcd_touch registers ISR */
     touch_cfg.flags.swap_xy = CYD_TP_SWAP_XY;
     touch_cfg.flags.mirror_x = CYD_TP_MIRROR_X;
     touch_cfg.flags.mirror_y = CYD_TP_MIRROR_Y;
@@ -455,7 +511,11 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
 
     s_tp = touch;
     s_touch_indev = indev;
+    lv_indev_add_event_cb(indev, dashcdg_indev_activity_on_press, LV_EVENT_PRESSED, NULL);
+    lv_indev_add_event_cb(indev, dashcdg_indev_hw_feedback, LV_EVENT_CLICKED, NULL);
     (void)dashcdg_touch_apply_store_or_defaults();
+
+    (void)lv_timer_create(dashcdg_panel_power_lv_cb, 150, NULL);
 
     lvgl_port_lock(0);
     lv_display_set_default(disp);
@@ -482,7 +542,7 @@ static void dashcdg_display_pack_rgb565_buffer_for_panel(uint16_t *buf, size_t c
         uint16_t c = buf[i];
 
 #if CYD_LCD_RGB_ELEMENT_ORDER == LCD_RGB_ELEMENT_ORDER_BGR
-        /* Classic RGB565 → BGR565 (swap 5-bit R and B fields; G stays in the middle). */
+        /* Classic RGB565 -> BGR565 (swap 5-bit R and B fields; G stays in the middle). */
         c = (uint16_t)(((c & 0xF800U) >> 11) | (c & 0x07E0U) | ((c & 0x001FU) << 11));
 #endif
 #if CYD_LCD_SWAP_RGB565_BYTES

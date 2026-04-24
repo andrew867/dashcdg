@@ -11,7 +11,7 @@
  * to the Wi-Fi driver, and NVS updates only when that connection succeeds.
  *
  * dashcdg_wifi_ensure_init() starts the Wi-Fi driver once (safe to call from app_main).
- * dashcdg_wifi_boot_auto_connect() loads saved creds from NVS (if any) and starts connect — call
+ * dashcdg_wifi_boot_auto_connect() loads saved creds from NVS (if any) and starts connect - call
  * from app_main so the device auto-rejoins without opening the Wi-Fi screen.
  * dashcdg_wifi_touch_ui_present() clears the active LVGL screen and builds this UI.
  */

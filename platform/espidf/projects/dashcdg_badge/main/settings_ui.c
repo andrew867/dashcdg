@@ -1,18 +1,23 @@
 /*
- * Settings hub: Wi-Fi setup and touch calibration entry points.
+ * Settings hub: display lab, Wi-Fi, touch calibration (see display_ui.c).
  */
 #include "esp_check.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 
+#include "badge_ui_flair.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
 #include "nav.h"
+#include "platform_hw.h"
 #include "settings_ui.h"
 #include "touch_cal_ui.h"
 #include "wifi_touch_ui.h"
 
 static const char *TAG = "settings_ui";
+
+/** Fixed tile height: title + up to two flair lines without jarring size jumps between rows. */
+#define DASHCDG_SETTINGS_TILE_H 84
 
 static void on_back(lv_event_t *e)
 {
@@ -49,6 +54,55 @@ static void on_touch_cal(lv_event_t *e)
     (void)dashcdg_touch_cal_ui_present(disp, true, cal_done_to_settings, cal_cancel_to_settings);
 }
 
+static void on_display(lv_event_t *e)
+{
+    lv_disp_t *disp = lv_event_get_user_data(e);
+    if (disp) {
+        dashcdg_nav_display(disp);
+    }
+}
+
+/** Full-width tile: title line + dim flair subtitle (wrap). Fixed height for every row. */
+static lv_obj_t *settings_make_tile(lv_obj_t *parent, const char *title, const char *flair, lv_event_cb_t cb,
+                                    lv_disp_t *disp)
+{
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_set_width(b, lv_pct(100));
+    lv_obj_set_height(b, DASHCDG_SETTINGS_TILE_H);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x060c0a), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(0x00aa55), 0);
+    lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_radius(b, 3, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_pad_left(b, 10, 0);
+    lv_obj_set_style_pad_right(b, 8, 0);
+    lv_obj_set_style_pad_top(b, 8, 0);
+    lv_obj_set_style_pad_bottom(b, 8, 0);
+    lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(b, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(b, 4, 0);
+
+    lv_obj_t *t = lv_label_create(b);
+    lv_label_set_text(t, title);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(t, lv_pct(94));
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(0x77eeaa), 0);
+
+    lv_obj_t *f = lv_label_create(b);
+    lv_label_set_text(f, flair ? flair : "");
+    lv_label_set_long_mode(f, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(f, lv_pct(94));
+    lv_obj_set_style_text_align(f, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(f, lv_color_hex(0x558877), 0);
+    lv_obj_set_style_text_opa(f, LV_OPA_90, 0);
+
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, disp);
+    return b;
+}
+
 esp_err_t dashcdg_settings_ui_present(lv_disp_t *disp)
 {
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_ERR_INVALID_ARG, TAG, "disp");
@@ -71,10 +125,13 @@ esp_err_t dashcdg_settings_ui_present(lv_disp_t *disp)
     lv_obj_set_size(outer, lv_pct(100), lv_pct(100));
     lv_obj_set_style_pad_all(outer, 8, 0);
     lv_obj_set_style_border_width(outer, 0, 0);
-    lv_obj_set_style_bg_opa(outer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(outer, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(outer, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(outer, lv_color_hex(0x020403), 0);
     lv_obj_set_flex_flow(outer, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(outer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(outer, 12, 0);
+    lv_obj_set_style_pad_row(outer, 8, 0);
+    lv_obj_remove_flag(outer, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *top = lv_obj_create(outer);
     lv_obj_set_width(top, lv_pct(100));
@@ -84,45 +141,56 @@ esp_err_t dashcdg_settings_ui_present(lv_disp_t *disp)
     lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(top, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *b_back = lv_button_create(top);
-    lv_obj_set_width(b_back, 72);
+    lv_obj_set_width(b_back, 88);
     lv_obj_t *lb = lv_label_create(b_back);
-    lv_label_set_text(lb, "Home");
+    lv_label_set_text(lb, LV_SYMBOL_HOME "  main");
     lv_obj_center(lb);
     lv_obj_add_event_cb(b_back, on_back, LV_EVENT_CLICKED, disp);
 
-    lv_obj_t *title = lv_label_create(outer);
-    lv_label_set_text(title, "> settings");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x33ff99), 0);
+    lv_obj_t *top_sp = lv_obj_create(top);
+    lv_obj_set_flex_grow(top_sp, 1);
+    lv_obj_set_height(top_sp, 1);
+    lv_obj_set_style_bg_opa(top_sp, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(top_sp, 0, 0);
+    lv_obj_remove_flag(top_sp, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(top_sp, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *b_wifi = lv_button_create(outer);
-    lv_obj_set_width(b_wifi, lv_pct(100));
-    lv_obj_set_height(b_wifi, 44);
-    lv_obj_set_style_bg_color(b_wifi, lv_color_hex(0x0a1410), 0);
-    lv_obj_set_style_border_color(b_wifi, lv_color_hex(0x00aa55), 0);
-    lv_obj_set_style_border_width(b_wifi, 1, 0);
-    lv_obj_t *lw = lv_label_create(b_wifi);
-    lv_label_set_text(lw, "[ 802.11 ]  Wi-Fi / net cfg");
-    lv_obj_set_style_text_color(lw, lv_color_hex(0x66ffaa), 0);
-    lv_obj_center(lw);
-    lv_obj_add_event_cb(b_wifi, on_wifi, LV_EVENT_CLICKED, disp);
+    lv_obj_t *hdr_r = lv_label_create(top);
+    lv_label_set_text(hdr_r, LV_SYMBOL_SETTINGS "  setup");
+    lv_obj_set_style_text_color(hdr_r, lv_color_hex(0x33ff99), 0);
 
-    lv_obj_t *b_cal = lv_button_create(outer);
-    lv_obj_set_width(b_cal, lv_pct(100));
-    lv_obj_set_height(b_cal, 44);
-    lv_obj_set_style_bg_color(b_cal, lv_color_hex(0x0a1410), 0);
-    lv_obj_set_style_border_color(b_cal, lv_color_hex(0x00aa55), 0);
-    lv_obj_set_style_border_width(b_cal, 1, 0);
-    lv_obj_t *lc = lv_label_create(b_cal);
-    lv_label_set_text(lc, "[ touch ]  4-corner calibration");
-    lv_obj_set_style_text_color(lc, lv_color_hex(0x66ffaa), 0);
-    lv_obj_center(lc);
-    lv_obj_add_event_cb(b_cal, on_touch_cal, LV_EVENT_CLICKED, disp);
+    lv_obj_t *scroll = lv_obj_create(outer);
+    lv_obj_set_width(scroll, lv_pct(100));
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_pad_all(scroll, 2, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(scroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(scroll, 10, 0);
+
+    lv_obj_t *sub = lv_label_create(scroll);
+    lv_label_set_text(sub, dashcdg_ui_flair_movie_tagline());
+    lv_obj_set_width(sub, lv_pct(98));
+    lv_label_set_long_mode(sub, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x557766), 0);
+
+    settings_make_tile(scroll, LV_SYMBOL_TINT "  Display & power", dashcdg_ui_flair_display_sub(), on_display, disp);
+
+    settings_make_tile(scroll, LV_SYMBOL_WIFI "  Wi-Fi Settings", dashcdg_ui_flair_wifi_sub(), on_wifi, disp);
+
+    settings_make_tile(scroll, LV_SYMBOL_EYE_OPEN "  Touch Calibration", dashcdg_ui_flair_touch_cal_sub(),
+                        on_touch_cal, disp);
 
     lv_obj_update_layout(outer);
     lv_obj_invalidate(scr);
     lvgl_port_unlock();
 
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_SETTINGS);
     return ESP_OK;
 }

@@ -1,15 +1,23 @@
 /*
  * v4 multicast CDG proof: full CDG viewport + panel band blit; mcast diagnostics in (i) modal.
  */
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "esp_wifi.h"
 #include "lvgl.h"
 
 #include "badge_rx.h"
+#include "dashcdg/media_clock.h"
 #include "display_lvgl.h"
 #include "karaoke_ui.h"
 #include "nav.h"
+#include "platform_hw.h"
+#include "vbat_sense.h"
 
 static const char *TAG = "karaoke_ui";
 
@@ -20,18 +28,232 @@ static lv_obj_t *s_mcast_modal_root;
 /** Layout anchor + border; pixels drawn via esp_lcd_panel_draw_bitmap (see badge_rx_ui_tick). */
 static lv_obj_t *s_cdg_slot;
 
+static lv_obj_t *s_bar_wifi;
+static lv_obj_t *s_bar_bat;
+static lv_obj_t *s_bar_m;
+static lv_obj_t *s_bar_c;
+static lv_obj_t *s_bar_d;
+static lv_obj_t *s_bar_line;
+
 typedef struct {
     lv_disp_t *disp;
 } tick_ctx_t;
 
 static tick_ctx_t s_tick_ctx;
 static uint32_t s_heap_retry_ticks;
+/** Modal body refresh ~2x/s to avoid heavy snprintf + relayout every CDG tick while scrolling. */
+static uint16_t s_mcast_modal_body_ticks;
+/** Next time (ms) to refresh Wi-Fi + battery in the status dock (~phone-like cadence). */
+static uint64_t s_status_slow_deadline_ms;
+
+/** Large RX stats text for mcast modal (avoid ~1.4 KiB on stack in `on_tick`). */
+static char s_mcast_modal_scratch[1536];
+/** Wi-Fi / bat label refresh interval (also bounds `platform_hw` ADC reads from this UI path). */
+#define KARAOKE_STATUS_SLOW_PERIOD_MS 2500U
+/** Gap (px) between the header row and the CDG slot; tune for spacing vs vertical budget. */
+#define KARAOKE_HEADER_TO_CDG_GAP_PX 15
 
 static void dashcdg_ui_no_scroll(lv_obj_t *obj)
 {
     if (obj) {
         lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     }
+}
+
+/* Pack-side battery colour (same curve as home_ui). */
+static lv_color_t karaoke_bat_color_from_pack_mv(int vbat_mv)
+{
+    const int mv_red = 3450;
+    const int mv_green = 4180;
+    int x = (vbat_mv - mv_red) * 255 / (mv_green - mv_red);
+    if (x < 0) {
+        x = 0;
+    }
+    if (x > 255) {
+        x = 255;
+    }
+    return lv_color_mix(lv_color_hex(0x33dd66), lv_color_hex(0xff4444), (uint8_t)x);
+}
+
+static const char *karaoke_bat_sym_from_mv(int vbat_mv)
+{
+    if (vbat_mv >= 4180) {
+        return LV_SYMBOL_BATTERY_FULL;
+    }
+    if (vbat_mv >= 4000) {
+        return LV_SYMBOL_BATTERY_3;
+    }
+    if (vbat_mv >= 3850) {
+        return LV_SYMBOL_BATTERY_2;
+    }
+    if (vbat_mv >= 3650) {
+        return LV_SYMBOL_BATTERY_1;
+    }
+    return LV_SYMBOL_BATTERY_EMPTY;
+}
+
+static void karaoke_status_fill_bat(char *bat_txt, size_t bat_sz, lv_color_t *bat_col)
+{
+    int raw = 0;
+    int vbat = 0;
+    esp_err_t br = ESP_FAIL;
+    if (dashcdg_platform_hw_is_ready()) {
+        br = dashcdg_platform_hw_battery_read(&raw, NULL, &vbat);
+    }
+    if (br != ESP_OK) {
+        if (!dashcdg_vbat_sense_is_ready() || dashcdg_vbat_sense_read(&raw, NULL, &vbat) != ESP_OK) {
+            snprintf(bat_txt, bat_sz, LV_SYMBOL_BATTERY_EMPTY " --");
+            *bat_col = lv_color_hex(0x887766);
+            return;
+        }
+    }
+    int deci = (vbat * 10 + 500) / 1000;
+    if (deci < 0) {
+        deci = 0;
+    }
+    int w = deci / 10;
+    int f = deci % 10;
+    (void)raw;
+    snprintf(bat_txt, bat_sz, "%s %d.%dV", karaoke_bat_sym_from_mv(vbat), w, f);
+    *bat_col = karaoke_bat_color_from_pack_mv(vbat);
+}
+
+static void karaoke_status_fill_wifi(char *wifi_txt, size_t wifi_sz)
+{
+    wifi_ap_record_t ap;
+    memset(&ap, 0, sizeof(ap));
+    esp_err_t werr = esp_wifi_sta_get_ap_info(&ap);
+    if (werr == ESP_ERR_WIFI_NOT_INIT) {
+        snprintf(wifi_txt, wifi_sz, LV_SYMBOL_WIFI " off");
+    } else if (werr == ESP_OK) {
+        snprintf(wifi_txt, wifi_sz, LV_SYMBOL_WIFI " %d", ap.rssi);
+    } else {
+        snprintf(wifi_txt, wifi_sz, LV_SYMBOL_WIFI " --");
+    }
+}
+
+static void karaoke_status_bar_set_pill(lv_obj_t *lbl, lv_color_t col)
+{
+    lv_obj_set_style_text_color(lbl, col, 0);
+    lv_obj_set_style_bg_color(lbl, lv_color_hex(0x0a1210), 0);
+    lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(lbl, 5, 0);
+    lv_obj_set_style_pad_ver(lbl, 1, 0);
+    lv_obj_set_style_radius(lbl, 3, 0);
+    lv_obj_set_style_border_width(lbl, 1, 0);
+    lv_obj_set_style_border_color(lbl, col, 0);
+}
+
+static bool karaoke_status_bar_widgets_ok(void)
+{
+    return s_bar_wifi && lv_obj_is_valid(s_bar_wifi) && s_bar_bat && lv_obj_is_valid(s_bar_bat) && s_bar_m &&
+           lv_obj_is_valid(s_bar_m) && s_bar_c && lv_obj_is_valid(s_bar_c) && s_bar_d && lv_obj_is_valid(s_bar_d) &&
+           s_bar_line && lv_obj_is_valid(s_bar_line);
+}
+
+static void karaoke_status_bar_update_slow(void)
+{
+    if (!karaoke_status_bar_widgets_ok()) {
+        return;
+    }
+
+    char wbuf[40];
+    karaoke_status_fill_wifi(wbuf, sizeof(wbuf));
+    lv_label_set_text(s_bar_wifi, wbuf);
+
+    char bbuf[40];
+    lv_color_t bcol;
+    karaoke_status_fill_bat(bbuf, sizeof(bbuf), &bcol);
+    lv_label_set_text(s_bar_bat, bbuf);
+    lv_obj_set_style_text_color(s_bar_bat, bcol, 0);
+}
+
+static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
+{
+    if (!karaoke_status_bar_widgets_ok()) {
+        return;
+    }
+
+    const lv_color_t okc = lv_color_hex(0x44ee99);
+    const lv_color_t waitc = lv_color_hex(0xddbb44);
+    const lv_color_t idlec = lv_color_hex(0x556677);
+    const lv_color_t badc = lv_color_hex(0xff8866);
+
+    const bool rx_on = st->rx_task_running != 0;
+    const bool joined = st->igmp_joined != 0;
+    const bool clock = st->have_clock != 0;
+    const bool buf_ok = (st->jb_pending_slots > 0U) && (st->v4_video_delta_count > 0U);
+    const bool stream_ok = clock && buf_ok && (st->cdg_heap_ok != 0);
+
+    lv_color_t mc = idlec;
+    if (!rx_on) {
+        mc = idlec;
+    } else if (joined) {
+        mc = okc;
+    } else {
+        mc = waitc;
+    }
+    karaoke_status_bar_set_pill(s_bar_m, mc);
+    lv_label_set_text(s_bar_m, "M");
+
+    lv_color_t cc = idlec;
+    if (!rx_on) {
+        cc = idlec;
+    } else if (!joined) {
+        cc = idlec;
+    } else if (clock) {
+        cc = okc;
+    } else {
+        cc = waitc;
+    }
+    karaoke_status_bar_set_pill(s_bar_c, cc);
+    lv_label_set_text(s_bar_c, "C");
+
+    lv_color_t dc = idlec;
+    if (!rx_on || !joined || !clock) {
+        dc = idlec;
+    } else if (stream_ok) {
+        dc = okc;
+    } else if (st->cdg_heap_ok == 0) {
+        dc = badc;
+    } else {
+        dc = waitc;
+    }
+    karaoke_status_bar_set_pill(s_bar_d, dc);
+    lv_label_set_text(s_bar_d, "D");
+
+    const char *sym = LV_SYMBOL_REFRESH;
+    const char *msg = "...";
+    lv_color_t lcol = waitc;
+    if (!rx_on) {
+        sym = LV_SYMBOL_PAUSE;
+        msg = "rx off";
+        lcol = idlec;
+    } else if (!joined) {
+        sym = LV_SYMBOL_REFRESH;
+        msg = "mcast";
+        lcol = waitc;
+    } else if (!clock) {
+        sym = LV_SYMBOL_REFRESH;
+        msg = "clock";
+        lcol = waitc;
+    } else if (st->cdg_heap_ok == 0) {
+        sym = LV_SYMBOL_CLOSE;
+        msg = "mem";
+        lcol = badc;
+    } else if (!buf_ok) {
+        sym = LV_SYMBOL_REFRESH;
+        msg = "buffer";
+        lcol = waitc;
+    } else {
+        sym = LV_SYMBOL_OK;
+        msg = "live";
+        lcol = okc;
+    }
+    char line[48];
+    snprintf(line, sizeof(line), "%s %s", sym, msg);
+    lv_label_set_text(s_bar_line, line);
+    lv_obj_set_style_text_color(s_bar_line, lcol, 0);
 }
 
 static void mcast_modal_close(void)
@@ -41,10 +263,22 @@ static void mcast_modal_close(void)
     }
     s_mcast_modal_root = NULL;
     s_mcast_modal_lbl = NULL;
+    /* CDG overlay blit bypasses LVGL; after close, ask LVGL to repaint the slot area. */
+    if (s_cdg_slot && lv_obj_is_valid(s_cdg_slot)) {
+        lv_obj_invalidate(s_cdg_slot);
+    }
+}
+
+/** CDG is drawn with draw_bitmap on the panel; while the modal exists it must not run or it paints over the dialog. */
+static bool karaoke_mcast_modal_is_open(void)
+{
+    return s_mcast_modal_root != NULL && lv_obj_is_valid(s_mcast_modal_root);
 }
 
 void dashcdg_karaoke_ui_teardown(void)
 {
+    dashcdg_platform_hw_set_cdg_stream_ok(false);
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_HOME);
     mcast_modal_close();
     if (lvgl_port_lock(1000)) {
         if (s_tick) {
@@ -57,6 +291,13 @@ void dashcdg_karaoke_ui_teardown(void)
     }
     s_tick_ctx.disp = NULL;
     s_cdg_slot = NULL;
+    s_bar_wifi = NULL;
+    s_bar_bat = NULL;
+    s_bar_m = NULL;
+    s_bar_c = NULL;
+    s_bar_d = NULL;
+    s_bar_line = NULL;
+    s_status_slow_deadline_ms = 0U;
 }
 
 static void on_mcast_scrim_clicked(lv_event_t *e)
@@ -78,34 +319,42 @@ static void on_mcast_ok(lv_event_t *e)
 
 static void on_info_btn(lv_event_t *e)
 {
-    lv_disp_t *disp = lv_event_get_user_data(e);
-    (void)disp;
-    if (s_mcast_modal_root) {
+    (void)e;
+    if (karaoke_mcast_modal_is_open()) {
         return;
     }
 
     lv_obj_t *layer = lv_layer_top();
-    s_mcast_modal_root = lv_obj_create(layer);
-    lv_obj_set_size(s_mcast_modal_root, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(s_mcast_modal_root, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_mcast_modal_root, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(s_mcast_modal_root, 0, 0);
-    lv_obj_add_event_cb(s_mcast_modal_root, on_mcast_scrim_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *root = lv_obj_create(layer);
+    lv_obj_set_size(root, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(root, lv_color_hex(0x080a09), 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(root, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_add_event_cb(root, on_mcast_scrim_clicked, LV_EVENT_CLICKED, NULL);
+    dashcdg_ui_no_scroll(root);
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    s_mcast_modal_root = root;
 
-    lv_obj_t *panel = lv_obj_create(s_mcast_modal_root);
-    lv_obj_set_width(panel, 300);
-    lv_obj_set_style_max_height(panel, 280, 0);
+    lv_obj_t *panel = lv_obj_create(root);
+    /* ~72% of display height leaves scrim top/bottom for tap-outside; tweak pct for read vs dismiss. */
+    lv_obj_set_width(panel, lv_pct(90));
+    lv_obj_set_height(panel, lv_pct(72));
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05080a), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(panel, lv_color_hex(0x00aa88), 0);
     lv_obj_set_style_border_width(panel, 1, 0);
     lv_obj_set_style_pad_all(panel, 10, 0);
     lv_obj_set_style_radius(panel, 4, 0);
+    lv_obj_set_style_shadow_width(panel, 0, 0);
     lv_obj_add_event_cb(panel, on_mcast_panel_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(panel, 6, 0);
     dashcdg_ui_no_scroll(panel);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *mtitle = lv_label_create(panel);
     lv_label_set_text(mtitle, "[ MCAST | RX ]");
@@ -114,24 +363,23 @@ static void on_info_btn(lv_event_t *e)
     lv_obj_t *scroll = lv_obj_create(panel);
     lv_obj_set_width(scroll, lv_pct(100));
     lv_obj_set_flex_grow(scroll, 1);
-    lv_obj_set_style_min_height(scroll, 96, 0);
-    lv_obj_set_style_max_height(scroll, 190, 0);
+    lv_obj_set_style_min_height(scroll, 120, 0);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_pad_all(scroll, 2, 0);
+    lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(scroll, 4, 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
+    /* Same plane as panel (was darker #040608 vs #05080a). */
     lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
     lv_obj_add_event_cb(scroll, on_mcast_panel_clicked, LV_EVENT_CLICKED, NULL);
 
     s_mcast_modal_lbl = lv_label_create(scroll);
-    lv_label_set_long_mode(s_mcast_modal_lbl, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(s_mcast_modal_lbl, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_width(s_mcast_modal_lbl, lv_pct(100));
     lv_obj_set_style_text_color(s_mcast_modal_lbl, lv_color_hex(0xaaccbb), 0);
     {
-        char body[768];
-        dashcdg_badge_rx_format_mcast_modal(body, sizeof(body));
-        lv_label_set_text(s_mcast_modal_lbl, body);
+        dashcdg_badge_rx_format_mcast_modal(s_mcast_modal_scratch, sizeof(s_mcast_modal_scratch));
+        lv_label_set_text(s_mcast_modal_lbl, s_mcast_modal_scratch);
     }
 
     lv_obj_t *row = lv_obj_create(panel);
@@ -145,16 +393,19 @@ static void on_info_btn(lv_event_t *e)
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     lv_obj_t *b = lv_button_create(row);
-    lv_obj_set_width(b, 88);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x113322), 0);
-    lv_obj_set_style_border_color(b, lv_color_hex(0x00aa55), 0);
+    lv_obj_set_width(b, 72);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x0a1510), 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(0x338866), 0);
     lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_radius(b, 3, 0);
     lv_obj_t *bl = lv_label_create(b);
-    lv_label_set_text(bl, "Close");
+    lv_label_set_text(bl, "> ok");
+    lv_obj_set_style_text_color(bl, lv_color_hex(0x66ffcc), 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(b, on_mcast_ok, LV_EVENT_CLICKED, NULL);
 
     lv_obj_update_layout(panel);
+    lv_obj_move_foreground(root);
 }
 
 static void on_tick(lv_timer_t *t)
@@ -166,15 +417,35 @@ static void on_tick(lv_timer_t *t)
          * from LV_EVENT_FLUSH_FINISH: that fires as soon as flush_cb returns while the SPI DMA for
          * LVGL may still be in flight, so overlapping CDG blits corrupt color / leave long black gaps.
          */
-        if (++s_heap_retry_ticks >= 91U) {
+        if (++s_heap_retry_ticks >= 120U) {
             s_heap_retry_ticks = 0U;
             dashcdg_badge_rx_try_upgrade_cdg_heap();
         }
-        dashcdg_badge_rx_cdg_overlay_tick(s_cdg_slot);
+        if (!karaoke_mcast_modal_is_open()) {
+            dashcdg_badge_rx_cdg_overlay_tick(s_cdg_slot);
+        }
+        {
+            dashcdg_badge_rx_stats_t st;
+            dashcdg_badge_rx_get_stats(&st);
+            bool ok = (st.have_clock != 0) && (st.jb_pending_slots > 0U) && (st.v4_video_delta_count > 0U);
+            dashcdg_platform_hw_set_cdg_stream_ok(ok);
+            {
+                uint64_t now = dashcdg_clock_now_ms();
+                if (s_status_slow_deadline_ms == 0U || now >= s_status_slow_deadline_ms) {
+                    karaoke_status_bar_update_slow();
+                    s_status_slow_deadline_ms = now + (uint64_t)KARAOKE_STATUS_SLOW_PERIOD_MS;
+                }
+            }
+            karaoke_status_bar_update_fast(&st);
+        }
         if (s_mcast_modal_lbl && lv_obj_is_valid(s_mcast_modal_lbl)) {
-            char body[768];
-            dashcdg_badge_rx_format_mcast_modal(body, sizeof(body));
-            lv_label_set_text(s_mcast_modal_lbl, body);
+            if (++s_mcast_modal_body_ticks >= 20U) {
+                s_mcast_modal_body_ticks = 0U;
+                dashcdg_badge_rx_format_mcast_modal(s_mcast_modal_scratch, sizeof(s_mcast_modal_scratch));
+                lv_label_set_text(s_mcast_modal_lbl, s_mcast_modal_scratch);
+            }
+        } else {
+            s_mcast_modal_body_ticks = 0U;
         }
     }
 }
@@ -220,17 +491,24 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
 
     lv_obj_t *outer = lv_obj_create(scr);
     lv_obj_set_size(outer, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_pad_all(outer, 6, 0);
+    /*
+     * Vertical budget: 240 ~= header(22) + stage (rest). Status is the flex-grow middle of the
+     * header row (back | status | ?). CDG slot is the first child of the stage so it sits under
+     * the header with spacer below, not a large empty band above the raster.
+     */
+    lv_obj_set_style_pad_hor(outer, 6, 0);
+    lv_obj_set_style_pad_top(outer, 0, 0);
+    lv_obj_set_style_pad_bottom(outer, 0, 0);
     lv_obj_set_style_border_width(outer, 0, 0);
     lv_obj_set_style_bg_opa(outer, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(outer, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(outer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(outer, 4, 0);
+    lv_obj_set_style_pad_row(outer, 0, 0);
     dashcdg_ui_no_scroll(outer);
 
     lv_obj_t *top = lv_obj_create(outer);
     lv_obj_set_width(top, lv_pct(100));
-    lv_obj_set_height(top, 36);
+    lv_obj_set_height(top, 22);
     lv_obj_set_style_pad_all(top, 0, 0);
     lv_obj_set_style_border_width(top, 0, 0);
     lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
@@ -239,33 +517,89 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
     dashcdg_ui_no_scroll(top);
 
     lv_obj_t *b_back = lv_button_create(top);
-    lv_obj_set_width(b_back, 72);
+    lv_obj_set_size(b_back, 26, 22);
+    lv_obj_set_style_pad_all(b_back, 0, 0);
+    lv_obj_set_style_radius(b_back, 3, 0);
+    lv_obj_set_style_bg_color(b_back, lv_color_hex(0x0a1510), 0);
+    lv_obj_set_style_border_color(b_back, lv_color_hex(0x338866), 0);
+    lv_obj_set_style_border_width(b_back, 1, 0);
+    lv_obj_set_style_shadow_width(b_back, 0, 0);
     lv_obj_t *lb = lv_label_create(b_back);
-    lv_label_set_text(lb, "Home");
+    lv_label_set_text(lb, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(lb, lv_color_hex(0x66ffcc), 0);
     lv_obj_center(lb);
     lv_obj_add_event_cb(b_back, on_back, LV_EVENT_CLICKED, disp);
 
-    lv_obj_t *mid = lv_obj_create(top);
-    lv_obj_set_flex_grow(mid, 1);
-    lv_obj_set_height(mid, 36);
-    lv_obj_set_style_pad_all(mid, 0, 0);
-    lv_obj_set_style_border_width(mid, 0, 0);
-    lv_obj_set_style_bg_opa(mid, LV_OPA_TRANSP, 0);
-    dashcdg_ui_no_scroll(mid);
+    /* One flex-grow strip between fixed buttons: keeps "?" on-screen (content-sized middle + two
+     * spacers was wider than 320 - pad and pushed b_info off). */
+    lv_obj_t *row_stat = lv_obj_create(top);
+    lv_obj_set_height(row_stat, 22);
+    lv_obj_set_flex_grow(row_stat, 1);
+    lv_obj_set_style_min_width(row_stat, 0, 0);
+    lv_obj_set_style_pad_all(row_stat, 0, 0);
+    lv_obj_set_style_border_width(row_stat, 0, 0);
+    lv_obj_set_style_bg_opa(row_stat, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(row_stat, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row_stat, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row_stat, 3, 0);
+    dashcdg_ui_no_scroll(row_stat);
 
-    lv_obj_t *title = lv_label_create(mid);
-    lv_label_set_text(title, "v4 CDG");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x66ffcc), 0);
-    lv_obj_center(title);
+    s_bar_wifi = lv_label_create(row_stat);
+    lv_label_set_long_mode(s_bar_wifi, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_style_text_color(s_bar_wifi, lv_color_hex(0xaaccdd), 0);
+    lv_label_set_text(s_bar_wifi, LV_SYMBOL_WIFI " --");
+
+    s_bar_bat = lv_label_create(row_stat);
+    lv_label_set_long_mode(s_bar_bat, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_style_text_color(s_bar_bat, lv_color_hex(0xaaccbb), 0);
+    lv_label_set_text(s_bar_bat, LV_SYMBOL_BATTERY_EMPTY " --");
+
+    s_bar_m = lv_label_create(row_stat);
+    lv_label_set_text(s_bar_m, "M");
+    lv_obj_set_style_text_align(s_bar_m, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_bar_c = lv_label_create(row_stat);
+    lv_label_set_text(s_bar_c, "C");
+
+    s_bar_d = lv_label_create(row_stat);
+    lv_label_set_text(s_bar_d, "D");
+
+    s_bar_line = lv_label_create(row_stat);
+    lv_obj_set_flex_grow(s_bar_line, 1);
+    lv_obj_set_style_min_width(s_bar_line, 0, 0);
+    lv_label_set_long_mode(s_bar_line, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_style_text_align(s_bar_line, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_text(s_bar_line, LV_SYMBOL_REFRESH " ...");
+    lv_obj_set_style_text_color(s_bar_line, lv_color_hex(0xddbb44), 0);
 
     lv_obj_t *b_info = lv_button_create(top);
-    lv_obj_set_width(b_info, 72);
+    lv_obj_set_size(b_info, 26, 22);
+    lv_obj_set_style_pad_all(b_info, 0, 0);
+    lv_obj_set_style_radius(b_info, 3, 0);
+    lv_obj_set_style_bg_color(b_info, lv_color_hex(0x0a1510), 0);
+    lv_obj_set_style_border_color(b_info, lv_color_hex(0x338866), 0);
+    lv_obj_set_style_border_width(b_info, 1, 0);
+    lv_obj_set_style_shadow_width(b_info, 0, 0);
     lv_obj_t *li = lv_label_create(b_info);
-    lv_label_set_text(li, "(i)");
+    lv_label_set_text(li, "?");
+    lv_obj_set_style_text_color(li, lv_color_hex(0x88ffcc), 0);
     lv_obj_center(li);
     lv_obj_add_event_cb(b_info, on_info_btn, LV_EVENT_CLICKED, disp);
 
-    s_cdg_slot = lv_obj_create(outer);
+    lv_obj_t *stage = lv_obj_create(outer);
+    lv_obj_set_width(stage, lv_pct(100));
+    lv_obj_set_flex_grow(stage, 1);
+    lv_obj_set_style_pad_all(stage, 0, 0);
+    lv_obj_set_style_pad_top(stage, KARAOKE_HEADER_TO_CDG_GAP_PX, 0);
+    lv_obj_set_style_border_width(stage, 0, 0);
+    lv_obj_set_style_bg_opa(stage, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(stage, LV_FLEX_FLOW_COLUMN);
+    /* CDG slot first so it sits directly under the header; flex spacer below eats unused height
+     * (was a large gap above the slot when the slot was bottom-pinned). */
+    lv_obj_set_flex_align(stage, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    dashcdg_ui_no_scroll(stage);
+
+    s_cdg_slot = lv_obj_create(stage);
     lv_obj_set_size(s_cdg_slot, DASHCDG_BADGE_RX_VISIBLE_W, DASHCDG_BADGE_RX_VISIBLE_H);
     lv_obj_set_style_bg_opa(s_cdg_slot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_cdg_slot, 1, 0);
@@ -273,10 +607,19 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
     lv_obj_remove_flag(s_cdg_slot, LV_OBJ_FLAG_CLICKABLE);
     dashcdg_ui_no_scroll(s_cdg_slot);
 
+    lv_obj_t *stage_fill = lv_obj_create(stage);
+    lv_obj_set_width(stage_fill, lv_pct(100));
+    lv_obj_set_flex_grow(stage_fill, 1);
+    lv_obj_set_style_min_height(stage_fill, 0, 0);
+    lv_obj_set_style_bg_opa(stage_fill, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(stage_fill, 0, 0);
+    dashcdg_ui_no_scroll(stage_fill);
+    lv_obj_remove_flag(stage_fill, LV_OBJ_FLAG_CLICKABLE);
+
     if (!dashcdg_display_lcd_panel()) {
         ESP_LOGE(TAG, "LCD panel handle missing");
         lv_obj_t *err = lv_label_create(outer);
-        lv_label_set_long_mode(err, LV_LABEL_LONG_WRAP);
+        lv_label_set_long_mode(err, LV_LABEL_LONG_MODE_WRAP);
         lv_obj_set_width(err, lv_pct(100));
         lv_obj_set_style_text_color(err, lv_color_hex(0xff8866), 0);
         lv_label_set_text(err, "Display panel not ready.");
@@ -292,6 +635,14 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
     }
 
     lv_obj_update_layout(outer);
+    {
+        uint64_t t0 = dashcdg_clock_now_ms();
+        dashcdg_badge_rx_stats_t st0;
+        dashcdg_badge_rx_get_stats(&st0);
+        karaoke_status_bar_update_slow();
+        karaoke_status_bar_update_fast(&st0);
+        s_status_slow_deadline_ms = t0 + (uint64_t)KARAOKE_STATUS_SLOW_PERIOD_MS;
+    }
     lv_refr_now(disp);
     lvgl_port_unlock();
 
@@ -301,6 +652,7 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
         ESP_LOGW(TAG, "lv_timer_create failed");
     }
 
-    ESP_LOGI(TAG, "karaoke / v4 proof UI up");
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_KARAOKE);
+    ESP_LOGI(TAG, "karaoke UI up");
     return ESP_OK;
 }
