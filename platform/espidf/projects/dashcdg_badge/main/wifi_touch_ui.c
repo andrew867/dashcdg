@@ -226,7 +226,8 @@ static void build_ui(lv_disp_t *disp)
     lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_AUTO);
 
     lv_obj_t *title = lv_label_create(root);
-    lv_label_set_text(title, "dashcdg badge · Wi-Fi");
+    /* ASCII only — default LVGL font has no U+00B7 middle dot (would show as a box). */
+    lv_label_set_text(title, "dashcdg badge - Wi-Fi");
     lv_obj_set_style_text_color(title, lv_color_hex(0xb0ffe8), 0);
 
     s_lbl_status = lv_label_create(root);
