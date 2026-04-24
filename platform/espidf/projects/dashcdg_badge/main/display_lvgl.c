@@ -77,28 +77,31 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = lcd_io,
         .panel_handle = lcd_panel,
+        .control_handle = NULL,
         .buffer_size = CYD_LCD_H_RES * CYD_LVGL_BUF_LINES,
         .double_buffer = true,
+        .trans_size = 0,
         .hres = CYD_LCD_H_RES,
         .vres = CYD_LCD_V_RES,
         .monochrome = false,
-        .mipi_dsi = false,
-        .color_format = LV_COLOR_FORMAT_RGB565,
         .rotation = {
             .swap_xy = false,
             .mirror_x = false,
             .mirror_y = false,
         },
+        .rounder_cb = NULL,
+        .color_format = LV_COLOR_FORMAT_RGB565,
         .flags = {
-            .buff_dma = true,
-            .swap_bytes = false,
-            .sw_rotate = false,
-            .full_refresh = false,
-            .direct_mode = false,
+            .buff_dma = 1,
+            .buff_spiram = 0,
+            .sw_rotate = 0,
+            .swap_bytes = 0,
+            .full_refresh = 0,
+            .direct_mode = 0,
         },
     };
 
-    lv_disp_t *disp = lvgl_port_add_disp(&disp_cfg);
+    lv_disp_t *disp = (lv_disp_t *)lvgl_port_add_disp(&disp_cfg);
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_FAIL, TAG, "lvgl_port_add_disp");
 
     esp_lcd_panel_io_handle_t tp_io = NULL;

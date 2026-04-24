@@ -165,8 +165,7 @@ static void on_connect(lv_event_t *e)
     char psk[65] = {0};
 
     if (lvgl_port_lock(1000)) {
-        uint32_t sel = lv_dropdown_get_selected(s_dd_ssid);
-        lv_dropdown_get_option(s_dd_ssid, sel, ssid, sizeof(ssid));
+        lv_dropdown_get_selected_str(s_dd_ssid, ssid, sizeof(ssid));
         const char *pw = lv_textarea_get_text(s_ta_pass);
         strncpy(psk, pw, sizeof(psk) - 1);
         lvgl_port_unlock();
