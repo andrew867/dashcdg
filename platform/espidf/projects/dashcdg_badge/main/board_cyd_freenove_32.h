@@ -32,6 +32,18 @@
 #define CYD_VBAT_R_OHM_TOP    100000u
 #define CYD_VBAT_R_OHM_BOTTOM 100000u
 
+/*
+ * One-point pack voltage trim (see vbat_sense.c): at known averaged raw, true pack mV (DMM).
+ * Applies a constant gain so that raw matches the reference. Set DASHCDG_VBAT_CAL_REF_RAW to 0
+ * to disable. Add more points later if you extend vbat_sense to a piecewise table.
+ */
+#ifndef DASHCDG_VBAT_CAL_REF_RAW
+#define DASHCDG_VBAT_CAL_REF_RAW 2100
+#endif
+#ifndef DASHCDG_VBAT_CAL_REF_BAT_MV
+#define DASHCDG_VBAT_CAL_REF_BAT_MV 3620
+#endif
+
 /* Physical panel pixels (before rotation). */
 #define CYD_LCD_PHYS_W         240
 #define CYD_LCD_PHYS_H         320

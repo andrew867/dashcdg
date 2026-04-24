@@ -22,6 +22,9 @@ static adc_oneshot_unit_handle_t s_unit;
 static adc_cali_handle_t s_cali;
 static bool s_cali_ok;
 static bool s_ready;
+/** One-point gain: vbat_display = vbat_linear * s_cal_num / s_cal_den (identity when den==0). */
+static int s_vbat_cal_num = 1;
+static int s_vbat_cal_den = 0;
 
 /* ESP32: GPIO34 == ADC1 ch6. */
 #define VBAT_ADC_UNIT     ADC_UNIT_1
@@ -58,6 +61,17 @@ static int pin_mv_from_raw(int raw)
     return mV;
 }
 
+/** Pack mV from raw using divider only (same as dashcdg_vbat_sense_read before one-point trim). */
+static int vbat_linear_mv_from_raw(int raw)
+{
+    int pin = pin_mv_from_raw(raw);
+    if (pin < 0) {
+        pin = 0;
+    }
+    int64_t numer = (int64_t)pin * (int64_t)(CYD_VBAT_R_OHM_TOP + CYD_VBAT_R_OHM_BOTTOM);
+    return (int)(numer / (int64_t)CYD_VBAT_R_OHM_BOTTOM);
+}
+
 esp_err_t dashcdg_vbat_sense_init(void)
 {
     if (s_ready) {
@@ -89,6 +103,22 @@ esp_err_t dashcdg_vbat_sense_init(void)
 
     vbat_sense_install_cali();
 
+    s_vbat_cal_num = 1;
+    s_vbat_cal_den = 0;
+#if DASHCDG_VBAT_CAL_REF_RAW > 0
+    {
+        int est_mv = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_REF_RAW);
+        if (est_mv > 100) {
+            s_vbat_cal_num = DASHCDG_VBAT_CAL_REF_BAT_MV;
+            s_vbat_cal_den = est_mv;
+            ESP_LOGI(TAG, "VBAT one-point cal: raw %d -> est %d mV, trim to %d mV (gain %d/%d)",
+                     DASHCDG_VBAT_CAL_REF_RAW, est_mv, DASHCDG_VBAT_CAL_REF_BAT_MV, s_vbat_cal_num, s_vbat_cal_den);
+        } else {
+            ESP_LOGW(TAG, "VBAT cal ref raw %d gave est %d mV; cal disabled", DASHCDG_VBAT_CAL_REF_RAW, est_mv);
+        }
+    }
+#endif
+
     s_ready = true;
     ESP_LOGI(TAG, "Vbat sense ready (IO%u, cali %s)", (unsigned)CYD_GPIO_VBAT_SENSE, s_cali_ok ? "on" : "off");
     return ESP_OK;
@@ -117,6 +147,9 @@ esp_err_t dashcdg_vbat_sense_read(int *out_raw, int *out_pin_mv, int *out_vbat_m
     int pin = pin_mv_from_raw(raw);
     int64_t numer = (int64_t)pin * (int64_t)(CYD_VBAT_R_OHM_TOP + CYD_VBAT_R_OHM_BOTTOM);
     int vbat = (int)(numer / (int64_t)CYD_VBAT_R_OHM_BOTTOM);
+    if (s_vbat_cal_den > 0 && s_vbat_cal_num > 0) {
+        vbat = (int)(((int64_t)vbat * (int64_t)s_vbat_cal_num) / (int64_t)s_vbat_cal_den);
+    }
 
     if (out_raw) {
         *out_raw = raw;

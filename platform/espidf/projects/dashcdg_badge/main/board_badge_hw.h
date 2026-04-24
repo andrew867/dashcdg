@@ -44,7 +44,8 @@
 /*
  * Auto idle: home uses touch/nav activity only. Karaoke stays at user brightness while
  * `dashcdg_platform_hw_set_cdg_stream_ok(true)` or multicast UDP arrived within the last
- * `DASHCDG_HW_IDLE_DIM_MS` (see `dashcdg_platform_hw_note_karaoke_mcast_rx`); then the same
+ * `DASHCDG_HW_IDLE_DIM_MS` (see `dashcdg_platform_hw_note_karaoke_mcast_rx` and
+ * `dashcdg_platform_hw_note_karaoke_cdg_overlay_tick`); then the same
  * dim/sleep timers apply. IO0 long-hold always forces sleep from any screen.
  * Override from `-D` or a wrapper header before including this file if needed.
  */

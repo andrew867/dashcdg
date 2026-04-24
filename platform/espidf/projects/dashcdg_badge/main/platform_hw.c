@@ -70,6 +70,8 @@ static dashcdg_hw_screen_t s_screen;
 static bool s_cdg_stream_ok;
 /** Last multicast UDP recv time (RX task); karaoke PM uses with `DASHCDG_HW_IDLE_DIM_MS`. */
 static _Atomic uint64_t s_karaoke_last_mcast_rx_ms;
+/** Last CDG overlay tick (LVGL); combined with RX so jitter-empty gaps do not arm idle sleep. */
+static _Atomic uint64_t s_karaoke_last_overlay_ms;
 /** Throttle `pm_bump_activity_locked` from high packet rates (ms, monotonic clock). */
 static uint64_t s_karaoke_mcast_act_throttle_ms;
 
@@ -203,7 +205,9 @@ static bool pm_idle_eligible_locked(uint64_t now)
             return false;
         }
         uint64_t last_rx = atomic_load_explicit(&s_karaoke_last_mcast_rx_ms, memory_order_relaxed);
-        if (last_rx != 0ULL && now >= last_rx && (now - last_rx) < (uint64_t)DASHCDG_HW_IDLE_DIM_MS) {
+        uint64_t last_ov = atomic_load_explicit(&s_karaoke_last_overlay_ms, memory_order_relaxed);
+        uint64_t last_live = (last_rx > last_ov) ? last_rx : last_ov;
+        if (last_live != 0ULL && now >= last_live && (now - last_live) < (uint64_t)DASHCDG_HW_IDLE_DIM_MS) {
             return false;
         }
         return true;
@@ -964,6 +968,7 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
         s_screen = s;
         if (s == DASHCDG_HW_SCREEN_KARAOKE && prev != DASHCDG_HW_SCREEN_KARAOKE) {
             atomic_store_explicit(&s_karaoke_last_mcast_rx_ms, 0ULL, memory_order_relaxed);
+            atomic_store_explicit(&s_karaoke_last_overlay_ms, 0ULL, memory_order_relaxed);
             s_karaoke_mcast_act_throttle_ms = 0ULL;
         }
         pm_bump_activity_locked(dashcdg_clock_now_ms());
@@ -1001,6 +1006,11 @@ void dashcdg_platform_hw_note_karaoke_mcast_rx(uint64_t rx_now_ms)
         }
     }
     xSemaphoreGive(s_mtx);
+}
+
+void dashcdg_platform_hw_note_karaoke_cdg_overlay_tick(uint64_t now_ms)
+{
+    atomic_store_explicit(&s_karaoke_last_overlay_ms, now_ms, memory_order_relaxed);
 }
 
 void dashcdg_platform_hw_touch_click(void)

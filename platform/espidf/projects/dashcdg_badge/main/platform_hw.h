@@ -44,6 +44,12 @@ void dashcdg_platform_hw_set_cdg_stream_ok(bool ok);
 void dashcdg_platform_hw_note_karaoke_mcast_rx(uint64_t rx_now_ms);
 
 /**
+ * LVGL karaoke tick after CDG overlay blit (or ~33 ms cadence): keeps auto sleep from firing while
+ * the UI is actively driving the CDG slot even if the jitter buffer briefly reads empty.
+ */
+void dashcdg_platform_hw_note_karaoke_cdg_overlay_tick(uint64_t now_ms);
+
+/**
  * Short soft tone (single sine-enveloped blip) for slider previews etc.
  * Respects touch-beep pref; bumps idle activity. Safe from LVGL thread.
  */

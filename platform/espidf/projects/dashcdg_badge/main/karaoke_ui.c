@@ -432,10 +432,17 @@ static void on_tick(lv_timer_t *t)
         if (!karaoke_mcast_modal_is_open()) {
             dashcdg_badge_rx_cdg_overlay_tick(s_cdg_slot);
         }
+        /* PM: CDG blit cadence proves the UI is alive even if jitter pending hits 0 between frames. */
+        dashcdg_platform_hw_note_karaoke_cdg_overlay_tick(dashcdg_clock_now_ms());
         {
             dashcdg_badge_rx_stats_t st;
             dashcdg_badge_rx_get_stats(&st);
-            bool ok = (st.have_clock != 0) && (st.jb_pending_slots > 0U) && (st.v4_video_delta_count > 0U);
+            /*
+             * "Stream OK" for RGB + idle policy: do not require jb_pending and video deltas together;
+             * jitter can read empty for a tick while video is still playing, which used to clear ok and
+             * arm backlight sleep.
+             */
+            bool ok = (st.have_clock != 0) && (st.jb_pending_slots > 0U || st.v4_video_delta_count > 0U);
             dashcdg_platform_hw_set_cdg_stream_ok(ok);
             {
                 uint64_t now = dashcdg_clock_now_ms();
