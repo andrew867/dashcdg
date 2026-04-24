@@ -51,6 +51,8 @@ typedef struct {
     uint32_t v4_video_repair_rx_packets;
     uint32_t v4_video_repair_rx_forward;
     uint32_t v4_video_repair_rx_reverse;
+    uint32_t v4_video_repair_recovered;
+    uint32_t v4_video_repair_failed;
 } dashcdg_badge_rx_stats_t;
 
 void dashcdg_badge_rx_start(void);
