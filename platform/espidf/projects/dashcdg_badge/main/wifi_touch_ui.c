@@ -219,7 +219,8 @@ static void build_ui(lv_disp_t *disp)
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_STRETCH, LV_FLEX_ALIGN_START);
+    /* LVGL 9: no LV_FLEX_ALIGN_STRETCH — full-width children use lv_pct(100). */
+    lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(root, 6, 0);
     lv_obj_set_scroll_dir(root, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_AUTO);
