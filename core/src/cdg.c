@@ -532,9 +532,11 @@ int dashcdg_cdg_reader_build_keyframes(struct dashcdg_cdg_reader *reader) {
 
 int dashcdg_cdg_reader_seek(struct dashcdg_cdg_reader *reader, dashcdg_tick_t ts) {
     struct dashcdg_subchannel_packet pkt;
-    int needs_update = 0;
 
     if (reader == NULL) {
+        return 0;
+    }
+    if (reader->buffer == NULL || reader->buffer_size < sizeof(struct dashcdg_subchannel_packet)) {
         return 0;
     }
 
@@ -554,10 +556,16 @@ int dashcdg_cdg_reader_seek(struct dashcdg_cdg_reader *reader, dashcdg_tick_t ts
             break;
         }
 
-        needs_update |= dashcdg_cdg_state_process_packet(&reader->state, &pkt);
+        (void) dashcdg_cdg_state_process_packet(&reader->state, &pkt);
     }
 
-    return needs_update;
+    /*
+     * Return seek success once the timeline cursor has reached ts or the stream ended.
+     * Do not use OR of process_packet() results: many packets advance ts while returning 0
+     * (non-graphics channel, no-op memory preset repeats, etc.). Commercial CDGs can run hundreds
+     * of ticks before the first tile — v4 anchor prep and snapshots must still seek there.
+     */
+    return reader->state.ts >= ts || reader->eof;
 }
 
 static int dashcdg_cdg_parity_bytes_all_zero(const struct dashcdg_subchannel_packet *pkt) {

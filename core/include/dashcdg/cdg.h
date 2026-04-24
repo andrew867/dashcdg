@@ -128,6 +128,7 @@ int dashcdg_cdg_reader_load_memory(struct dashcdg_cdg_reader *reader, const uint
 void dashcdg_cdg_reader_reset(struct dashcdg_cdg_reader *reader);
 int dashcdg_cdg_reader_read_packet(struct dashcdg_cdg_reader *reader, struct dashcdg_subchannel_packet *out_pkt);
 int dashcdg_cdg_reader_build_keyframes(struct dashcdg_cdg_reader *reader);
+/** Advance reader.state.ts to ts (or EOF). Returns 1 on success, 0 if reader has no packet data. */
 int dashcdg_cdg_reader_seek(struct dashcdg_cdg_reader *reader, dashcdg_tick_t ts);
 
 /**

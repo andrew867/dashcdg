@@ -150,6 +150,31 @@ static void test_reader_seek_and_keyframes(void) {
     dashcdg_cdg_reader_free(&reader);
 }
 
+/*
+ * Commercial CDGs often carry hundreds of low-channel or non-graphics packets before the first
+ * visible draw. Seek must succeed once the tick cursor reaches the target even if every
+ * process_packet() along the way returned 0 (v4 anchor and snapshot paths depend on this).
+ */
+static void test_reader_seek_non_graphics_leading_packets(void) {
+    struct dashcdg_cdg_reader reader;
+    struct dashcdg_subchannel_packet stream[40];
+    size_t i;
+
+    dashcdg_cdg_reader_init(&reader);
+    memset(stream, 0, sizeof(stream));
+    for (i = 0; i < 40U; i++) {
+        stream[i] = make_packet(0);
+        stream[i].command = 0x01;
+    }
+
+    assert(dashcdg_cdg_reader_load_memory(&reader, (const uint8_t *) stream, sizeof(stream)) == 1);
+    assert(dashcdg_cdg_reader_build_keyframes(&reader) == 1);
+    assert(dashcdg_cdg_reader_seek(&reader, 25) == 1);
+    assert(reader.state.ts == 25U);
+
+    dashcdg_cdg_reader_free(&reader);
+}
+
 static void test_protocol_roundtrip(void) {
     uint8_t buffer[DASHCDG_MAX_PACKET_SIZE];
     struct dashcdg_packet_header header;
@@ -1308,6 +1333,7 @@ int main(void) {
     test_scroll_preset_and_transparency();
     test_scroll_copy_direction_and_offset_clamp();
     test_reader_seek_and_keyframes();
+    test_reader_seek_non_graphics_leading_packets();
     test_protocol_roundtrip();
     test_protocol_v4_roundtrip();
     test_v4_audio_codec_predicate_helpers();
