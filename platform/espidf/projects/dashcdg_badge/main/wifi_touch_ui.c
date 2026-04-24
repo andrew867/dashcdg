@@ -211,35 +211,41 @@ static void build_ui(lv_disp_t *disp)
 {
     lv_obj_t *scr = lv_display_get_screen_active(disp);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0a0a12), 0);
-    lv_obj_set_style_pad_all(scr, 8, 0);
-    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(scr, 6, 0);
 
-    lv_obj_t *title = lv_label_create(scr);
+    /* Scroll root: default LVGL keyboard is taller than 320px column with other widgets. */
+    lv_obj_t *root = lv_obj_create(scr);
+    lv_obj_set_size(root, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_pad_all(root, 6, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_STRETCH, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(root, 6, 0);
+    lv_obj_set_scroll_dir(root, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_AUTO);
+
+    lv_obj_t *title = lv_label_create(root);
     lv_label_set_text(title, "dashcdg badge · Wi-Fi");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x00ffaa), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xb0ffe8), 0);
 
-    s_lbl_status = lv_label_create(scr);
+    s_lbl_status = lv_label_create(root);
     lv_label_set_long_mode(s_lbl_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_lbl_status, lv_pct(100));
+    lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0xe0e0e8), 0);
     lv_label_set_text(s_lbl_status, "Ready");
 
-    s_dd_ssid = lv_dropdown_create(scr);
+    s_dd_ssid = lv_dropdown_create(root);
     lv_obj_set_width(s_dd_ssid, lv_pct(100));
     lv_dropdown_set_options(s_dd_ssid, "(select SSID)\nTap SCAN");
 
-    s_ta_pass = lv_textarea_create(scr);
+    s_ta_pass = lv_textarea_create(root);
     lv_obj_set_width(s_ta_pass, lv_pct(100));
     lv_textarea_set_one_line(s_ta_pass, true);
     lv_textarea_set_password_mode(s_ta_pass, true);
     lv_textarea_set_placeholder_text(s_ta_pass, "WPA passphrase");
 
-    s_kb = lv_keyboard_create(scr);
-    lv_obj_set_width(s_kb, lv_pct(100));
-    lv_keyboard_set_textarea(s_kb, s_ta_pass);
-
-    lv_obj_t *row = lv_obj_create(scr);
+    /* Buttons before keyboard so Scan/Connect stay reachable on a 320px-tall panel. */
+    lv_obj_t *row = lv_obj_create(root);
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_height(row, 44);
     lv_obj_set_style_pad_all(row, 0, 0);
@@ -268,6 +274,11 @@ static void build_ui(lv_disp_t *disp)
     lv_label_set_text(l3, "Forget");
     lv_obj_center(l3);
     lv_obj_add_event_cb(b_forget, on_forget, LV_EVENT_CLICKED, NULL);
+
+    s_kb = lv_keyboard_create(root);
+    lv_obj_set_width(s_kb, lv_pct(100));
+    lv_obj_set_style_max_height(s_kb, 150, 0);
+    lv_keyboard_set_textarea(s_kb, s_ta_pass);
 }
 
 static esp_err_t try_auto_connect_saved(void)

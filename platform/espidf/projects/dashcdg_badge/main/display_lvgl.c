@@ -59,13 +59,13 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
     esp_lcd_panel_handle_t lcd_panel = NULL;
     esp_lcd_panel_dev_config_t lcd_cfg = {
         .reset_gpio_num = -1,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .rgb_ele_order = CYD_LCD_RGB_ELEMENT_ORDER,
         .bits_per_pixel = 16,
     };
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(lcd_io, &lcd_cfg, &lcd_panel), TAG, "new_panel_st7789");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(lcd_panel), TAG, "panel_reset");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(lcd_panel), TAG, "panel_init");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(lcd_panel, true), TAG, "invert_color");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(lcd_panel, CYD_LCD_PANEL_INVERT), TAG, "invert_color");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(lcd_panel, true, false), TAG, "mirror");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(lcd_panel, true), TAG, "disp_on");
 
@@ -95,7 +95,8 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
             .buff_dma = 1,
             .buff_spiram = 0,
             .sw_rotate = 0,
-            .swap_bytes = 0,
+            /* SPI RGB565: match LVGL flush to panel (see CYD_LCD_SWAP_RGB565_BYTES in board header). */
+            .swap_bytes = CYD_LCD_SWAP_RGB565_BYTES,
             .full_refresh = 0,
             .direct_mode = 0,
         },

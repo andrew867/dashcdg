@@ -26,3 +26,15 @@
 #define CYD_LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)
 
 #define CYD_LVGL_BUF_LINES     40
+
+/*
+ * ST7789 color pipeline (SPI RGB565 + LVGL): if you see wrong hues (e.g. green/red swap,
+ * magenta faces), toggle these — see display_lvgl.c.
+ * - SWAP_RGB565_BYTES: almost always 1 on ESP SPI DMA path so LVGL RGB565 matches panel order.
+ * - RGB_ELEMENT_ORDER: many ST7789 modules want BGR; try RGB if skin tones look wrong.
+ * - PANEL_INVERT: panel inversion command; some batches need false instead of true.
+ */
+#include "esp_lcd_types.h"
+#define CYD_LCD_SWAP_RGB565_BYTES 1
+#define CYD_LCD_RGB_ELEMENT_ORDER   LCD_RGB_ELEMENT_ORDER_BGR
+#define CYD_LCD_PANEL_INVERT        1
