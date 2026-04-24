@@ -8,6 +8,125 @@ static uint16_t dashcdg_be16_to_host(uint16_t value) {
     return (uint16_t) (((value & 0x00FFU) << 8U) | ((value & 0xFF00U) >> 8U));
 }
 
+void dashcdg_cdg_state_raster_dirty_mark_full(struct dashcdg_cdg_state *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->raster_dirty_full = 1;
+    s->raster_dirty_has_partial = 0;
+}
+
+static void dashcdg_dirty_union_screen_rect(struct dashcdg_cdg_state *s, int sx0, int sy0, int sx1, int sy1)
+{
+    int hx;
+    int vo;
+    int vx0;
+    int vy0;
+    int vx1;
+    int vy1;
+
+    if (s == NULL || s->raster_dirty_full) {
+        return;
+    }
+    if (sx0 < 0) {
+        sx0 = 0;
+    }
+    if (sy0 < 0) {
+        sy0 = 0;
+    }
+    if (sx1 > DASHCDG_SCREEN_WIDTH) {
+        sx1 = DASHCDG_SCREEN_WIDTH;
+    }
+    if (sy1 > DASHCDG_SCREEN_HEIGHT) {
+        sy1 = DASHCDG_SCREEN_HEIGHT;
+    }
+    if (sx0 >= sx1 || sy0 >= sy1) {
+        return;
+    }
+
+    hx = (int)s->display_h_offset;
+    if (hx >= DASHCDG_TILE_WIDTH) {
+        hx = DASHCDG_TILE_WIDTH - 1;
+    }
+    vo = (int)s->display_v_offset;
+    if (vo >= DASHCDG_TILE_HEIGHT) {
+        vo = DASHCDG_TILE_HEIGHT - 1;
+    }
+
+    vx0 = sx0 - (int)DASHCDG_VISIBLE_X - hx;
+    vy0 = sy0 - (int)DASHCDG_VISIBLE_Y - vo;
+    vx1 = sx1 - (int)DASHCDG_VISIBLE_X - hx;
+    vy1 = sy1 - (int)DASHCDG_VISIBLE_Y - vo;
+
+    if (vx0 < 0) {
+        vx0 = 0;
+    }
+    if (vy0 < 0) {
+        vy0 = 0;
+    }
+    if (vx1 > DASHCDG_VISIBLE_WIDTH) {
+        vx1 = DASHCDG_VISIBLE_WIDTH;
+    }
+    if (vy1 > DASHCDG_VISIBLE_HEIGHT) {
+        vy1 = DASHCDG_VISIBLE_HEIGHT;
+    }
+    if (vx0 >= vx1 || vy0 >= vy1) {
+        return;
+    }
+
+    if (!s->raster_dirty_has_partial) {
+        s->raster_d_vx0 = vx0;
+        s->raster_d_vy0 = vy0;
+        s->raster_d_vx1 = vx1;
+        s->raster_d_vy1 = vy1;
+        s->raster_dirty_has_partial = 1;
+    } else {
+        if (vx0 < s->raster_d_vx0) {
+            s->raster_d_vx0 = vx0;
+        }
+        if (vy0 < s->raster_d_vy0) {
+            s->raster_d_vy0 = vy0;
+        }
+        if (vx1 > s->raster_d_vx1) {
+            s->raster_d_vx1 = vx1;
+        }
+        if (vy1 > s->raster_d_vy1) {
+            s->raster_d_vy1 = vy1;
+        }
+    }
+}
+
+dashcdg_cdg_raster_dirty_kind_t dashcdg_cdg_state_take_raster_dirty(struct dashcdg_cdg_state *s, int *vx0, int *vy0,
+                                                                  int *vx1, int *vy1)
+{
+    if (s == NULL) {
+        return DASHCDG_CDG_RASTER_DIRTY_NONE;
+    }
+    if (s->raster_dirty_full) {
+        s->raster_dirty_full = 0;
+        s->raster_dirty_has_partial = 0;
+        if (vx0 && vy0 && vx1 && vy1) {
+            *vx0 = 0;
+            *vy0 = 0;
+            *vx1 = DASHCDG_VISIBLE_WIDTH;
+            *vy1 = DASHCDG_VISIBLE_HEIGHT;
+        }
+        return DASHCDG_CDG_RASTER_DIRTY_FULL;
+    }
+    if (s->raster_dirty_has_partial) {
+        if (vx0 && vy0 && vx1 && vy1) {
+            *vx0 = s->raster_d_vx0;
+            *vy0 = s->raster_d_vy0;
+            *vx1 = s->raster_d_vx1;
+            *vy1 = s->raster_d_vy1;
+        }
+        s->raster_dirty_has_partial = 0;
+        return DASHCDG_CDG_RASTER_DIRTY_PARTIAL;
+    }
+    return DASHCDG_CDG_RASTER_DIRTY_NONE;
+}
+
 static int dashcdg_color_to_rgb(uint16_t color) {
     int r = ((color & 0x3C00U) >> 10U) * 16;
     int g = (((color & 0x0300U) >> 6U) | ((color & 0x0030U) >> 4U)) * 16;
@@ -147,6 +266,7 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
                 state->color_table[offset + i] = dashcdg_color_to_rgb(spec);
             }
 
+            dashcdg_cdg_state_raster_dirty_mark_full(state);
             return 1;
         }
 
@@ -155,6 +275,7 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
 
             if ((preset->repeat & 0x0FU) == 0U) {
                 memset(state->framebuffer, preset->color & 0x0FU, sizeof(state->framebuffer));
+                dashcdg_cdg_state_raster_dirty_mark_full(state);
                 return 1;
             }
 
@@ -176,6 +297,7 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
                 }
             }
 
+            dashcdg_cdg_state_raster_dirty_mark_full(state);
             return 1;
         }
 
@@ -208,6 +330,8 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
                 }
             }
 
+            dashcdg_dirty_union_screen_rect(state, start_col, start_row, start_col + DASHCDG_TILE_WIDTH,
+                                            start_row + DASHCDG_TILE_HEIGHT);
             return 1;
         }
 
@@ -253,6 +377,7 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
                 );
             }
 
+            dashcdg_cdg_state_raster_dirty_mark_full(state);
             return 1;
         }
 
@@ -264,6 +389,7 @@ int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const stru
                 state->transparency[i] = transparent->transparent[i] & 0x3FU;
             }
 
+            dashcdg_cdg_state_raster_dirty_mark_full(state);
             return 1;
         }
 

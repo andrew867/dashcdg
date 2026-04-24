@@ -85,6 +85,13 @@ struct dashcdg_cdg_state {
     uint8_t transparency[DASHCDG_COLORS];
     uint8_t display_h_offset;
     uint8_t display_v_offset;
+    /** Raster dirty tracking (visible 288x192 output space, half-open [vx0,vx1)×[vy0,vy1)). */
+    uint8_t raster_dirty_full;
+    uint8_t raster_dirty_has_partial;
+    int raster_d_vx0;
+    int raster_d_vy0;
+    int raster_d_vx1;
+    int raster_d_vy1;
 };
 
 struct dashcdg_cdg_reader {
@@ -98,6 +105,22 @@ struct dashcdg_cdg_reader {
 
 void dashcdg_cdg_state_init(struct dashcdg_cdg_state *state);
 int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const struct dashcdg_subchannel_packet *pkt);
+
+typedef enum {
+    DASHCDG_CDG_RASTER_DIRTY_NONE = 0,
+    DASHCDG_CDG_RASTER_DIRTY_PARTIAL,
+    DASHCDG_CDG_RASTER_DIRTY_FULL,
+} dashcdg_cdg_raster_dirty_kind_t;
+
+/** Whole visible window must be re-rastered (palette, preset, scroll, etc.). */
+void dashcdg_cdg_state_raster_dirty_mark_full(struct dashcdg_cdg_state *state);
+
+/**
+ * Consume accumulated dirty region for incremental RGB565 raster.
+ * On FULL or PARTIAL, writes half-open rect into *vx0..*vy1 (visible coords 0..288, 0..192).
+ */
+dashcdg_cdg_raster_dirty_kind_t dashcdg_cdg_state_take_raster_dirty(struct dashcdg_cdg_state *state, int *vx0, int *vy0,
+                                                                  int *vx1, int *vy1);
 
 void dashcdg_cdg_reader_init(struct dashcdg_cdg_reader *reader);
 void dashcdg_cdg_reader_free(struct dashcdg_cdg_reader *reader);
