@@ -192,6 +192,24 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         }
     }
 
+    /*
+     * Cold join before clock_sync: the drain cursor defaults to packet 0, but the first UDP
+     * datagram may already carry a later contiguous batch (TX already advanced, or reorder).
+     * Without a sender playback timeline we cannot run real-time late-skip logic; jump once
+     * from the initial cursor to the earliest buffered batch so CDG can paint instead of
+     * stalling until a v4 anchor seek realigns the jitter cursor.
+     */
+    if (!in->have_sender_playback) {
+        struct dashcdg_cdg_batch_jitter_frame *oldest_live = dashcdg_cdg_batch_jitter_oldest(jb);
+
+        if (jb->next_packet_index == 0U && oldest_live != NULL &&
+                oldest_live->packet_start_index > jb->next_packet_index) {
+            *out_frame = oldest_live;
+            return DASHCDG_CDG_BATCH_DRAIN_APPLY;
+        }
+        return DASHCDG_CDG_BATCH_DRAIN_STOP;
+    }
+
     if (in->have_sender_playback && in->late_gate != 0 &&
             receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_cdg_batch_jitter_frame *oldest = dashcdg_cdg_batch_jitter_oldest(jb);
@@ -246,4 +264,65 @@ void dashcdg_cdg_batch_jitter_apply_snapshot_seek(struct dashcdg_cdg_batch_jitte
     jb->next_packet_index = packet_index;
     jb->next_playback_ms = dashcdg_packet_count_to_ms(packet_index);
     jb->initialized = 1;
+}
+
+void dashcdg_cdg_batch_jitter_evict_pressure(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t min_free_slots) {
+    if (jb == NULL || min_free_slots == 0U) {
+        return;
+    }
+
+    for (int round = 0; round < (int)DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT + 4; ++round) {
+        size_t occ = dashcdg_cdg_batch_jitter_occupied_count(jb);
+        size_t free_slots = (occ < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT) ? (DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT - occ) : 0U;
+
+        if (free_slots >= min_free_slots) {
+            return;
+        }
+
+        {
+            size_t evict_i = DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT;
+            uint64_t best_ps = 0U;
+            int found_ahead = 0;
+
+            for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+                if (!jb->slots[i].occupied) {
+                    continue;
+                }
+                {
+                    uint64_t ps = jb->slots[i].packet_start_index;
+
+                    if (ps >= jb->next_packet_index) {
+                        if (!found_ahead || ps > best_ps) {
+                            best_ps = ps;
+                            evict_i = i;
+                            found_ahead = 1;
+                        }
+                    }
+                }
+            }
+
+            if (!found_ahead) {
+                for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+                    if (!jb->slots[i].occupied) {
+                        continue;
+                    }
+                    {
+                        uint64_t ps = jb->slots[i].packet_start_index;
+
+                        if (evict_i == DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT || ps > best_ps) {
+                            best_ps = ps;
+                            evict_i = i;
+                        }
+                    }
+                }
+            }
+
+            if (evict_i == DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT) {
+                return;
+            }
+
+            memset(&jb->slots[evict_i], 0, sizeof(jb->slots[evict_i]));
+            jb->pending_drops++;
+        }
+    }
 }

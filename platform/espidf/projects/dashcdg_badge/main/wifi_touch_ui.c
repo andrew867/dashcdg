@@ -15,15 +15,28 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "display_lvgl.h"
+#include "nav.h"
 #include "wifi_touch_ui.h"
 
 static const char *TAG = "wifi_ui";
+static bool s_wifi_driver_ready;
 static const char *NVS_NS = "dashcfg";
 
 static lv_obj_t *s_lbl_status;
 static lv_obj_t *s_dd_ssid;
 static lv_obj_t *s_ta_pass;
 static lv_obj_t *s_kb;
+static lv_obj_t *s_entry_row;
+
+void dashcdg_wifi_drop_lvgl_refs(void)
+{
+    s_lbl_status = NULL;
+    s_dd_ssid = NULL;
+    s_ta_pass = NULL;
+    s_kb = NULL;
+    s_entry_row = NULL;
+}
 
 static void ui_statusf(const char *fmt, ...)
 {
@@ -86,38 +99,40 @@ static esp_err_t nvs_clear_creds(void)
     return err;
 }
 
+/* Scan results + option string are large; event-loop task stack is ~2-3 KiB - keep off stack. */
+static wifi_ap_record_t s_scan_recs[40];
+static char s_scan_opts[2048];
+
 static void rebuild_dropdown_from_scan(void)
 {
-    wifi_ap_record_t recs[40];
-    memset(recs, 0, sizeof(recs));
+    memset(s_scan_recs, 0, sizeof(s_scan_recs));
     uint16_t n = 40;
-    esp_err_t err = esp_wifi_scan_get_ap_records(&n, recs);
+    esp_err_t err = esp_wifi_scan_get_ap_records(&n, s_scan_recs);
     if (err != ESP_OK || n == 0) {
         ui_statusf("Scan: no APs (%s)", esp_err_to_name(err));
         return;
     }
 
-    char opts[2048];
     size_t off = 0;
-    off += snprintf(opts + off, sizeof(opts) - off, "%s", "(select SSID)");
+    off += snprintf(s_scan_opts + off, sizeof(s_scan_opts) - off, "%s", "(select SSID)");
 
-    for (unsigned i = 0; i < n && off < sizeof(opts) - 64; i++) {
+    for (unsigned i = 0; i < n && off < sizeof(s_scan_opts) - 64; i++) {
         char line[40];
-        const uint8_t *s = recs[i].ssid;
-        size_t sl = strnlen((const char *)s, sizeof(recs[i].ssid));
+        const uint8_t *s = s_scan_recs[i].ssid;
+        size_t sl = strnlen((const char *)s, sizeof(s_scan_recs[i].ssid));
         if (sl == 0) {
             continue;
         }
         memcpy(line, s, sl);
         line[sl] = 0;
-        off += snprintf(opts + off, sizeof(opts) - off, "\n%s", line);
+        off += snprintf(s_scan_opts + off, sizeof(s_scan_opts) - off, "\n%s", line);
     }
 
     if (lvgl_port_lock(1000)) {
-        lv_dropdown_set_options(s_dd_ssid, opts);
+        lv_dropdown_set_options(s_dd_ssid, s_scan_opts);
         lvgl_port_unlock();
     }
-    ui_statusf("Scan: found networks — pick SSID");
+    ui_statusf("Scan: found networks - pick SSID");
 }
 
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -145,7 +160,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
 static void on_scan(lv_event_t *e)
 {
     (void)e;
-    ui_statusf("Scanning…");
+    ui_statusf("Scanning...");
     wifi_scan_config_t sc = {
         .ssid = NULL,
         .bssid = NULL,
@@ -186,7 +201,7 @@ static void on_connect(lv_event_t *e)
         ui_statusf("set_config: %s", esp_err_to_name(err));
         return;
     }
-    ui_statusf("Connecting to\n%s …", ssid);
+    ui_statusf("Connecting to\n%s ...", ssid);
     err = esp_wifi_disconnect();
     (void)err;
     err = esp_wifi_connect();
@@ -207,26 +222,104 @@ static void on_forget(lv_event_t *e)
     }
 }
 
+static void hide_passphrase_ui(void)
+{
+    if (!s_kb || !s_entry_row || !s_ta_pass) {
+        return;
+    }
+    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_entry_row, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_state(s_ta_pass, LV_STATE_FOCUSED);
+}
+
+static void on_ta_ready(lv_event_t *e)
+{
+    (void)e;
+    if (lvgl_port_lock(1000)) {
+        hide_passphrase_ui();
+        lvgl_port_unlock();
+    }
+}
+
+static void on_ta_cancel(lv_event_t *e)
+{
+    (void)e;
+    if (lvgl_port_lock(1000)) {
+        hide_passphrase_ui();
+        lvgl_port_unlock();
+    }
+}
+
+static void on_pass(lv_event_t *e)
+{
+    (void)e;
+    if (!lvgl_port_lock(1000)) {
+        return;
+    }
+    lv_obj_remove_flag(s_entry_row, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_keyboard_set_textarea(s_kb, s_ta_pass);
+    lv_obj_add_state(s_ta_pass, LV_STATE_FOCUSED);
+    lvgl_port_unlock();
+}
+
+static void on_nav_home(lv_event_t *e)
+{
+    lv_disp_t *disp = lv_event_get_user_data(e);
+    if (disp) {
+        dashcdg_nav_home(disp);
+    }
+}
+
 static void build_ui(lv_disp_t *disp)
 {
     lv_obj_t *scr = lv_display_get_screen_active(disp);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0a0a12), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
 
-    /* Scroll root: default LVGL keyboard is taller than 320px column with other widgets. */
-    lv_obj_t *root = lv_obj_create(scr);
-    lv_obj_set_size(root, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_pad_all(root, 6, 0);
+    /*
+     * Landscape 320x240: scrollable setup + optional passphrase row + keyboard docked at bottom.
+     * Keyboard stays outside the scroll area (reliable touch). Passphrase line + keyboard are
+     * hidden until Pass is tapped; OK on the keyboard sends READY and hides them.
+     */
+    lv_obj_t *outer = lv_obj_create(scr);
+    lv_obj_set_size(outer, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_pad_all(outer, 4, 0);
+    lv_obj_set_style_border_width(outer, 0, 0);
+    lv_obj_set_style_bg_opa(outer, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(outer, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(outer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *root = lv_obj_create(outer);
+    lv_obj_set_width(root, lv_pct(100));
+    lv_obj_set_flex_grow(root, 1);
+    lv_obj_set_style_min_height(root, 48, 0);
+    lv_obj_set_style_pad_all(root, 0, 0);
+    lv_obj_set_style_pad_bottom(root, 6, 0);
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
-    /* LVGL 9: no LV_FLEX_ALIGN_STRETCH — full-width children use lv_pct(100). */
     lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(root, 6, 0);
+    lv_obj_set_style_pad_row(root, 4, 0);
     lv_obj_set_scroll_dir(root, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_AUTO);
 
+    lv_obj_t *nav_row = lv_obj_create(root);
+    lv_obj_set_width(nav_row, lv_pct(100));
+    lv_obj_set_height(nav_row, 38);
+    lv_obj_set_style_pad_all(nav_row, 0, 0);
+    lv_obj_set_style_border_width(nav_row, 0, 0);
+    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(nav_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(nav_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *b_home = lv_button_create(nav_row);
+    lv_obj_set_width(b_home, 72);
+    lv_obj_t *lh = lv_label_create(b_home);
+    lv_label_set_text(lh, "Home");
+    lv_obj_center(lh);
+    lv_obj_add_event_cb(b_home, on_nav_home, LV_EVENT_CLICKED, disp);
+
     lv_obj_t *title = lv_label_create(root);
-    /* ASCII only — default LVGL font has no U+00B7 middle dot (would show as a box). */
     lv_label_set_text(title, "dashcdg badge - Wi-Fi");
     lv_obj_set_style_text_color(title, lv_color_hex(0xb0ffe8), 0);
 
@@ -240,21 +333,15 @@ static void build_ui(lv_disp_t *disp)
     lv_obj_set_width(s_dd_ssid, lv_pct(100));
     lv_dropdown_set_options(s_dd_ssid, "(select SSID)\nTap SCAN");
 
-    s_ta_pass = lv_textarea_create(root);
-    lv_obj_set_width(s_ta_pass, lv_pct(100));
-    lv_textarea_set_one_line(s_ta_pass, true);
-    lv_textarea_set_password_mode(s_ta_pass, true);
-    lv_textarea_set_placeholder_text(s_ta_pass, "WPA passphrase");
-
-    /* Buttons before keyboard so Scan/Connect stay reachable on a 320px-tall panel. */
     lv_obj_t *row = lv_obj_create(root);
     lv_obj_set_width(row, lv_pct(100));
-    lv_obj_set_height(row, 44);
+    lv_obj_set_height(row, 42);
     lv_obj_set_style_pad_all(row, 0, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 4, 0);
 
     lv_obj_t *b_scan = lv_button_create(row);
     lv_obj_set_flex_grow(b_scan, 1);
@@ -277,10 +364,40 @@ static void build_ui(lv_disp_t *disp)
     lv_obj_center(l3);
     lv_obj_add_event_cb(b_forget, on_forget, LV_EVENT_CLICKED, NULL);
 
-    s_kb = lv_keyboard_create(root);
+    lv_obj_t *b_pass = lv_button_create(row);
+    lv_obj_set_flex_grow(b_pass, 1);
+    lv_obj_t *l4 = lv_label_create(b_pass);
+    lv_label_set_text(l4, "Pass");
+    lv_obj_center(l4);
+    lv_obj_add_event_cb(b_pass, on_pass, LV_EVENT_CLICKED, NULL);
+
+    s_entry_row = lv_obj_create(outer);
+    lv_obj_set_width(s_entry_row, lv_pct(100));
+    lv_obj_set_height(s_entry_row, 36);
+    lv_obj_set_style_pad_all(s_entry_row, 2, 0);
+    lv_obj_set_style_border_width(s_entry_row, 0, 0);
+    lv_obj_set_style_bg_opa(s_entry_row, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(s_entry_row, LV_OBJ_FLAG_HIDDEN);
+
+    s_ta_pass = lv_textarea_create(s_entry_row);
+    lv_obj_set_width(s_ta_pass, lv_pct(100));
+    lv_obj_set_height(s_ta_pass, LV_SIZE_CONTENT);
+    lv_textarea_set_one_line(s_ta_pass, true);
+    lv_textarea_set_password_mode(s_ta_pass, true);
+    lv_textarea_set_placeholder_text(s_ta_pass, "WPA passphrase");
+    lv_textarea_set_cursor_click_pos(s_ta_pass, true);
+    lv_obj_add_event_cb(s_ta_pass, on_ta_ready, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(s_ta_pass, on_ta_cancel, LV_EVENT_CANCEL, NULL);
+
+    s_kb = lv_keyboard_create(outer);
     lv_obj_set_width(s_kb, lv_pct(100));
-    lv_obj_set_style_max_height(s_kb, 150, 0);
+    /* Landscape: use vertical space for wider, taller keys; cap keeps layout stable. */
+    lv_obj_set_style_max_height(s_kb, 158, 0);
+    lv_obj_align(s_kb, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_keyboard_set_textarea(s_kb, s_ta_pass);
+    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_update_layout(outer);
 }
 
 static esp_err_t try_auto_connect_saved(void)
@@ -297,13 +414,21 @@ static esp_err_t try_auto_connect_saved(void)
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wc), TAG, "set saved");
-    ui_statusf("Auto-connect…\n%s", ssid);
+    ui_statusf("Auto-connect...\n%s", ssid);
     return esp_wifi_connect();
 }
 
-esp_err_t dashcdg_wifi_touch_ui_start(lv_disp_t *disp)
+esp_err_t dashcdg_wifi_boot_auto_connect(void)
 {
-    ESP_RETURN_ON_FALSE(disp != NULL, ESP_ERR_INVALID_ARG, TAG, "disp");
+    ESP_RETURN_ON_ERROR(dashcdg_wifi_ensure_init(), TAG, "wifi init");
+    return try_auto_connect_saved();
+}
+
+esp_err_t dashcdg_wifi_ensure_init(void)
+{
+    if (s_wifi_driver_ready) {
+        return ESP_OK;
+    }
 
     (void)esp_netif_create_default_wifi_sta();
 
@@ -316,14 +441,37 @@ esp_err_t dashcdg_wifi_touch_ui_start(lv_disp_t *disp)
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set mode sta");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi_start");
 
-    if (lvgl_port_lock(1000)) {
-        build_ui(disp);
-        lvgl_port_unlock();
-    } else {
+    s_wifi_driver_ready = true;
+    return ESP_OK;
+}
+
+esp_err_t dashcdg_wifi_touch_ui_present(lv_disp_t *disp)
+{
+    ESP_RETURN_ON_FALSE(disp != NULL, ESP_ERR_INVALID_ARG, TAG, "disp");
+    ESP_RETURN_ON_ERROR(dashcdg_wifi_ensure_init(), TAG, "wifi init");
+
+    dashcdg_wifi_drop_lvgl_refs();
+
+    if (!lvgl_port_lock(1000)) {
         return ESP_ERR_TIMEOUT;
     }
+
+    dashcdg_display_clear_top_layer(disp);
+
+    lv_obj_t *scr = lv_display_get_screen_active(disp);
+    lv_obj_clean(scr);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_CLICKABLE);
+
+    build_ui(disp);
+    lv_obj_invalidate(scr);
+    lvgl_port_unlock();
 
     try_auto_connect_saved();
 
     return ESP_OK;
+}
+
+esp_err_t dashcdg_wifi_touch_ui_start(lv_disp_t *disp)
+{
+    return dashcdg_wifi_touch_ui_present(disp);
 }

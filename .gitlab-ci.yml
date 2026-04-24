@@ -52,3 +52,28 @@ desktop_build:
       - build/bin/desktop-player
       - build/bin/desktop-rx
     expire_in: 1 week
+
+# Tranche 1 scaffold: reproducible ESP-IDF build (managed components fetched on first run).
+esp32_badge_build:
+  stage: build
+  image: espressif/idf:release-v5.5
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - platform/espidf/**/*
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes:
+        - platform/espidf/**/*
+        - .gitlab-ci.yml
+  timeout: 45m
+  script:
+    - idf.py --version
+    - idf.py -C platform/espidf/projects/dashcdg_badge set-target esp32
+    - idf.py -C platform/espidf/projects/dashcdg_badge build
+  artifacts:
+    paths:
+      - platform/espidf/projects/dashcdg_badge/build/dashcdg_badge.bin
+      - platform/espidf/projects/dashcdg_badge/build/bootloader/bootloader.bin
+      - platform/espidf/projects/dashcdg_badge/build/partition_table/partition-table.bin
+    expire_in: 1 week

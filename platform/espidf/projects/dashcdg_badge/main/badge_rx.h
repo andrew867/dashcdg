@@ -20,6 +20,7 @@ typedef struct {
     uint32_t v4_clock_count;
     uint32_t v4_video_delta_count;
     uint32_t v4_anchor_chunks;
+    uint32_t v4_loading_screen_count;
     uint64_t last_sequence;
     int32_t skew_ema_ms;
     int skew_ema_inited;

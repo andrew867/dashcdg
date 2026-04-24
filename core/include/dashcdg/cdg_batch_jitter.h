@@ -6,9 +6,13 @@
 
 #include "dashcdg/protocol.h"
 
-enum {
-    DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT = 64
-};
+/*
+ * Desktop RX uses the default (64). Embedded targets may compile dashcdg_core with
+ * -DDASHCDG_CDG_BATCH_JITTER_SLOT_COUNT=24 (or similar) to shrink struct dashcdg_cdg_batch_jitter_buffer.
+ */
+#ifndef DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT
+#define DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT 64
+#endif
 
 #ifndef DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS
 #define DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS 280U
@@ -79,5 +83,12 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
 void dashcdg_cdg_batch_jitter_note_applied(struct dashcdg_cdg_batch_jitter_buffer *jb, struct dashcdg_cdg_batch_jitter_frame *slot);
 
 void dashcdg_cdg_batch_jitter_apply_snapshot_seek(struct dashcdg_cdg_batch_jitter_buffer *jb, uint64_t packet_index);
+
+/**
+ * Drop whole buffered batches until at least `min_free_slots` are empty.
+ * Prefers evicting the highest packet_start_index at or beyond the apply cursor (furthest-ahead work),
+ * then falls back to the globally highest start index. Counts each eviction as pending_drops.
+ */
+void dashcdg_cdg_batch_jitter_evict_pressure(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t min_free_slots);
 
 #endif

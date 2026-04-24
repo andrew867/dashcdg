@@ -41,6 +41,14 @@ The script sources `export.sh` for you. Firmware project: **`platform/espidf/pro
 
 That app targets the **Freenove CYD 3.2"** (ST7789 + XPT2046): **LVGL** status UI, on-screen keyboard, **touch-driven Wi-Fi** scan/connect, credentials in **NVS** — intentionally **no** HTTP captive portal / web config (saves flash and keeps bring-up simple).
 
+### Touch (XPT2046)
+
+Axis mapping and optional invert live in **`platform/espidf/projects/dashcdg_badge/main/display_lvgl.c`**; defaults for the **3.2" IPS CYD** are in **`main/board_cyd_freenove_32.h`** (`CYD_TP_MIRROR_X`, `CYD_TP_TOUCH_INVERT_LVGL_Y`, etc.). After changing those flags, run **touch calibration** once (first boot without NVS cal, or from Settings) so stored min/max match the stack. GitLab CI runs **`idf.py build`** for this project when `platform/espidf/` changes.
+
+### v4 multicast CDG proof (Karaoke tile)
+
+From the home screen open **Karaoke**. The badge joins **`239.255.77.77:24684`** (same defaults as desktop TX/RX), parses **v4** `session_info`, `clock_sync`, and `video_delta` (CDG packet batches), runs the shared **`dashcdg_cdg_batch_jitter`** + **`dashcdg_cdg_state`** path from `core/`, and shows **live CDG** plus a small stats block (datagrams, packet types, skew EMA, song id, jitter cursor). Use **Windows desktop-tx** (or another v4 sender) on the same LAN/Wi‑Fi so the ESP32 receives the stream. **Home** stops the RX task and leaves the multicast group.
+
 The badge project uses a **custom partition table** (`partitions_ota_4mb.csv`) with **two OTA app slots** for future over-the-air updates. If you previously flashed a **different** table on the same chip, erase flash once (`idf.py erase-flash`) before flashing so **otadata** is consistent.
 
 ## Flash (UART, RTS/DTR auto-reset)

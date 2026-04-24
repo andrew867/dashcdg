@@ -50,7 +50,7 @@ static const char *TAG = "badge_rx";
 /** Keep this many jitter slots free; evict furthest-ahead batches when tighter. */
 #define BADGE_RX_JB_HEADROOM 6U
 #define BADGE_RX_CDG_REPAIR_GROUP_SIZE 9U
-#define BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX 160U
+#define BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX 144U
 /*
  * Keep full-height blits for correctness. Partial-height pressure clipping produced visible banding/
  * stale lower scanlines (wrong palette stripes + bottom held color) under current overlay path.
@@ -58,7 +58,7 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_CDG_BLIT_PARTIAL_H DASHCDG_BADGE_RX_VISIBLE_H
 /* SPI write settle gap per band: avoids reusing one scratch band while prior DMA transfer is still active. */
 #define BADGE_RX_PANEL_BAND_SETTLE_US 2200U
-#define BADGE_RX_TRACKED_VIDEO_REPAIR_GROUPS 4U
+#define BADGE_RX_TRACKED_VIDEO_REPAIR_GROUPS 2U
 
 /** RGB565 band scratch (~6.9 KiB): keep off .bss so CDG+jitter static fits in dram0_0_seg. */
 #define BADGE_RX_BLIT_SCRATCH_BYTES \
@@ -267,6 +267,89 @@ static int badge_rx_decode_v4_anchor_rle_into_cdg(struct dashcdg_cdg_state *st, 
     }
     st->ts = (dashcdg_tick_t)packet_index;
     return 1;
+}
+
+static void badge_rx_fill_visible_rect(struct dashcdg_cdg_state *st, int x, int y, int w, int h, uint8_t color_idx)
+{
+    int x0 = x < DASHCDG_VISIBLE_X ? DASHCDG_VISIBLE_X : x;
+    int y0 = y < DASHCDG_VISIBLE_Y ? DASHCDG_VISIBLE_Y : y;
+    int x1 = x + w;
+    int y1 = y + h;
+    uint8_t ci = (uint8_t)(color_idx & 0x0FU);
+
+    if (st == NULL || w <= 0 || h <= 0) {
+        return;
+    }
+    if (x1 > DASHCDG_VISIBLE_RIGHT) {
+        x1 = DASHCDG_VISIBLE_RIGHT;
+    }
+    if (y1 > DASHCDG_VISIBLE_BOTTOM) {
+        y1 = DASHCDG_VISIBLE_BOTTOM;
+    }
+    for (int row = y0; row < y1; ++row) {
+        for (int col = x0; col < x1; ++col) {
+            st->framebuffer[DASHCDG_ARRAY_INDEX(col, row)] = ci;
+        }
+    }
+}
+
+/** Same visual language as desktop `dashcdg_rx_render_connecting_state` (stripes + pulse), no font. */
+static void badge_rx_paint_connecting_pattern(struct dashcdg_cdg_state *st, uint64_t now_ms, int reconnecting)
+{
+    int pulse = (int)((now_ms / 250U) % 4U);
+    int stripe_phase = (int)((now_ms / 400U) % 6U);
+
+    if (st == NULL) {
+        return;
+    }
+    dashcdg_cdg_state_init(st);
+    st->color_table[0] = 0x05070F;
+    st->color_table[1] = 0x101A34;
+    st->color_table[2] = 0x204070;
+    st->color_table[3] = 0x4F8BFF;
+    st->color_table[4] = 0x63E6BE;
+    st->color_table[5] = 0xFFE066;
+    st->color_table[6] = 0xFF8FA3;
+    st->color_table[7] = 0xFFFFFF;
+    memset(st->transparency, 0, sizeof(st->transparency));
+
+    badge_rx_fill_visible_rect(st, DASHCDG_VISIBLE_X, DASHCDG_VISIBLE_Y, DASHCDG_VISIBLE_WIDTH, DASHCDG_VISIBLE_HEIGHT, 1);
+
+    for (int stripe = 0; stripe < 6; ++stripe) {
+        uint8_t c = (uint8_t)(((stripe + stripe_phase) % 3) == 0 ? 2 : (((stripe + stripe_phase) % 3) == 1 ? 3 : 4));
+
+        badge_rx_fill_visible_rect(st, DASHCDG_VISIBLE_X, DASHCDG_VISIBLE_Y + (stripe * 12), DASHCDG_VISIBLE_WIDTH, 5, c);
+        badge_rx_fill_visible_rect(
+                st, DASHCDG_VISIBLE_X, DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12), DASHCDG_VISIBLE_WIDTH, 5, c);
+    }
+
+    badge_rx_fill_visible_rect(st, DASHCDG_VISIBLE_X + 34, DASHCDG_VISIBLE_Y + 132, 212, 12, 2);
+    badge_rx_fill_visible_rect(st, DASHCDG_VISIBLE_X + 40 + (pulse * 48), DASHCDG_VISIBLE_Y + 128, 28, 20,
+                               reconnecting ? 6 : 5);
+    badge_rx_fill_visible_rect(st, DASHCDG_VISIBLE_X + 54, DASHCDG_VISIBLE_Y + 166, 184, 8, 3);
+    badge_rx_fill_visible_rect(st, DASHCDG_VISIBLE_X + 54 + (pulse * 44), DASHCDG_VISIBLE_Y + 160, 22, 20, 7);
+    dashcdg_cdg_state_raster_dirty_mark_full(st);
+}
+
+static void badge_rx_handle_v4_loading_screen(const struct dashcdg_packet_view *view, uint64_t local_now_ms)
+{
+    int reconnecting;
+    const struct dashcdg_v4_loading_screen_payload *ls;
+
+    if (view == NULL || s_cdg == NULL || s_jb == NULL) {
+        return;
+    }
+    if (s_cdg_snapshots_applied > 0U || s_jb->initialized || s_jitter_cdg_primed) {
+        return;
+    }
+
+    ls = &view->v4_loading_screen;
+    reconnecting = (ls->screen_kind == DASHCDG_V4_LOADING_SCREEN_REPAIRING ||
+                      ls->screen_kind == DASHCDG_V4_LOADING_SCREEN_LATE_JOIN)
+                             ? 1
+                             : 0;
+    badge_rx_paint_connecting_pattern(s_cdg, local_now_ms + ((uint64_t)ls->animation_phase * 125U), reconnecting);
+    s_stats.v4_loading_screen_count++;
 }
 
 static int badge_rx_should_apply_v4_anchor(uint64_t anchor_packet_index)
@@ -959,6 +1042,9 @@ static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
         handle_clock_sync(&view, local_now_ms);
         drain_cdg_to_idle(local_now_ms);
         break;
+    case DASHCDG_PACKET_V4_LOADING_SCREEN:
+        badge_rx_handle_v4_loading_screen(&view, local_now_ms);
+        break;
     case DASHCDG_PACKET_V4_VIDEO_DELTA:
         handle_video_delta(&view, local_now_ms);
         break;
@@ -1240,7 +1326,7 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
              "datagrams %llu\n"
              "parse_fail %lu\n"
              "v4 session %lu  clock %lu\n"
-             "delta %lu  anchor %lu\n"
+             "delta %lu  anchor %lu  load %lu\n"
              "rwin %lu  fwd %lu  rev %lu\n"
              "rrec %lu  rfail %lu\n"
              "seq %llu  skew_ema %ld ms\n"
@@ -1258,6 +1344,7 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
              (unsigned long)st.jb_evict_rounds, (unsigned long)st.cdg_delta_insert_fail, (unsigned long long)st.datagrams,
              (unsigned long)st.parse_failures, (unsigned long)st.v4_session_count, (unsigned long)st.v4_clock_count,
              (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks,
+             (unsigned long)st.v4_loading_screen_count,
              (unsigned long)st.v4_video_repair_rx_packets, (unsigned long)st.v4_video_repair_rx_forward,
              (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long)st.v4_video_repair_recovered,
              (unsigned long)st.v4_video_repair_failed, (unsigned long long)st.last_sequence, (long)st.skew_ema_ms,
