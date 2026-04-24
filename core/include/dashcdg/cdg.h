@@ -130,4 +130,32 @@ int dashcdg_cdg_reader_read_packet(struct dashcdg_cdg_reader *reader, struct das
 int dashcdg_cdg_reader_build_keyframes(struct dashcdg_cdg_reader *reader);
 int dashcdg_cdg_reader_seek(struct dashcdg_cdg_reader *reader, dashcdg_tick_t ts);
 
+/**
+ * RS parity over GF(2^6) on one R–W subchannel PACK (24 bytes; low 6 bits per byte).
+ * Returns 1 if Q and P syndromes are both zero (codeword consistent), else 0.
+ */
+int dashcdg_cdg_subchannel_pack_rs_syndrome_ok(const struct dashcdg_subchannel_packet *pkt);
+
+/**
+ * Overwrite parity_q and parity_p from command, instruction, and data (6-bit symbols).
+ * Does not modify the graphics fields beyond masking to 6 bits in the working copy.
+ */
+void dashcdg_cdg_subchannel_pack_rs_fill(struct dashcdg_subchannel_packet *pkt);
+
+/**
+ * Infer 24-byte CD+G subchannel framing from the start of a byte buffer.
+ *
+ * Uses mode-5 command 0x09, the known CD+G instruction set, and instruction-specific
+ * field checks (see docs/specs/cdg-subchannel-alignment.md). Non-zero R–W parity
+ * can be checked separately with `dashcdg_cdg_subchannel_pack_rs_syndrome_ok`;
+ * the trim scorer still treats all-zero parity as neutral for typical rips.
+ *
+ * Scoring uses the first scan_bytes of data (capped by the caller); total_bytes is used
+ * only for the trailing byte remainder (total_bytes - trim_prefix) % 24.
+ *
+ * On ambiguity, writes zeros so callers should leave the asset unchanged.
+ */
+void dashcdg_cdg_compute_subchannel_trims(const uint8_t *data, size_t scan_bytes, size_t total_bytes,
+                                          size_t *out_trim_prefix, size_t *out_trim_suffix);
+
 #endif

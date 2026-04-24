@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "dashcdg/audio_jitter.h"
@@ -1070,6 +1071,22 @@ static void test_cdg_batch_jitter_snapshot_seek_purges_old_slots(void) {
     assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 0U);
 }
 
+static void test_cdg_batch_jitter_evict_pressure_frees_slots(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    size_t i;
+
+    memset(one_pkt, 0x22, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    for (i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+        assert(dashcdg_cdg_batch_jitter_insert(&jb, (uint64_t)i * 4U, 1U, one_pkt, 0) == 1);
+    }
+    assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT);
+    dashcdg_cdg_batch_jitter_evict_pressure(&jb, 2U);
+    assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT - 2U);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 9999U, 1U, one_pkt, 0) == 1);
+}
+
 static void test_cdg_raster_alpha_from_transparency(void) {
     struct dashcdg_cdg_state state;
     struct dashcdg_subchannel_packet pkt = make_packet(DASHCDG_INSN_MEMORY_PRESET);
@@ -1122,6 +1139,110 @@ static void test_v4_audio_codec_predicate_helpers(void) {
     assert(dashcdg_v4_audio_codec_is_bluetooth_sbc(DASHCDG_V4_AUDIO_CODEC_AMR_WB) == 0);
 }
 
+static void test_cdg_subchannel_pack_rs(void) {
+    static const uint8_t k_golden_memory_preset[] = {
+        0x09, 0x01, 0x3c, 0x34,
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x24, 0x11, 0x15, 0x23,
+    };
+    struct dashcdg_subchannel_packet pkt;
+    size_t i;
+
+    assert(sizeof(k_golden_memory_preset) == sizeof(pkt));
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.command = 0x09;
+    pkt.instruction = DASHCDG_INSN_MEMORY_PRESET;
+    pkt.data[0] = 3;
+    pkt.data[1] = 0;
+    dashcdg_cdg_subchannel_pack_rs_fill(&pkt);
+    assert(memcmp(&pkt, k_golden_memory_preset, sizeof(pkt)) == 0);
+    assert(dashcdg_cdg_subchannel_pack_rs_syndrome_ok(&pkt) == 1);
+
+    pkt.parity_p[0] = (uint8_t) (pkt.parity_p[0] ^ 0x01U);
+    assert(dashcdg_cdg_subchannel_pack_rs_syndrome_ok(&pkt) == 0);
+
+    memset(&pkt, 0, sizeof(pkt));
+    assert(dashcdg_cdg_subchannel_pack_rs_syndrome_ok(&pkt) == 1);
+
+    for (i = 0; i < 40U; ++i) {
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.command = (uint8_t) (0x09U + (i % 3U));
+        pkt.instruction = (uint8_t) (1U + (i % 7U));
+        pkt.data[0] = (uint8_t) (i * 7U & 0x3FU);
+        pkt.data[1] = (uint8_t) (i * 11U & 0x3FU);
+        pkt.data[2] = (uint8_t) (i * 13U & 0x3FU);
+        dashcdg_cdg_subchannel_pack_rs_fill(&pkt);
+        assert(dashcdg_cdg_subchannel_pack_rs_syndrome_ok(&pkt) == 1);
+    }
+}
+
+static void test_cdg_subchannel_alignment_trims(void) {
+    enum { k_packets = 220 };
+    uint8_t *buf;
+    size_t buf_len;
+    size_t i;
+    size_t trim_p;
+    size_t trim_s;
+    uint8_t junk_prefix[7];
+
+    memset(junk_prefix, 0xFF, sizeof junk_prefix);
+    buf_len = sizeof junk_prefix + k_packets * sizeof(struct dashcdg_subchannel_packet);
+    buf = (uint8_t *) malloc(buf_len);
+    assert(buf != NULL);
+    memcpy(buf, junk_prefix, sizeof junk_prefix);
+    for (i = 0; i < (size_t) k_packets; ++i) {
+        struct dashcdg_subchannel_packet *pkt =
+                (struct dashcdg_subchannel_packet *) (buf + sizeof junk_prefix + i * sizeof(struct dashcdg_subchannel_packet));
+
+        memset(pkt, 0, sizeof(*pkt));
+        pkt->command = 0x09;
+        pkt->instruction = DASHCDG_INSN_MEMORY_PRESET;
+        pkt->data[0] = 3;
+        pkt->data[1] = 0;
+    }
+    dashcdg_cdg_compute_subchannel_trims(buf, buf_len, buf_len, &trim_p, &trim_s);
+    assert(trim_p == sizeof junk_prefix);
+    assert(trim_s == 0U);
+    free(buf);
+
+    buf_len = (size_t) k_packets * sizeof(struct dashcdg_subchannel_packet);
+    buf = (uint8_t *) malloc(buf_len);
+    assert(buf != NULL);
+    for (i = 0; i < (size_t) k_packets; ++i) {
+        struct dashcdg_subchannel_packet *pkt = (struct dashcdg_subchannel_packet *) (buf + i * sizeof(struct dashcdg_subchannel_packet));
+
+        memset(pkt, 0, sizeof(*pkt));
+        pkt->command = 0x09;
+        pkt->instruction = DASHCDG_INSN_MEMORY_PRESET;
+        pkt->data[0] = 1;
+        pkt->data[1] = 0;
+    }
+    dashcdg_cdg_compute_subchannel_trims(buf, buf_len, buf_len, &trim_p, &trim_s);
+    assert(trim_p == 0U);
+    assert(trim_s == 0U);
+    free(buf);
+
+    buf_len = (size_t) k_packets * sizeof(struct dashcdg_subchannel_packet) + 5U;
+    buf = (uint8_t *) malloc(buf_len);
+    assert(buf != NULL);
+    memset(buf, 0, buf_len);
+    for (i = 0; i < (size_t) k_packets; ++i) {
+        struct dashcdg_subchannel_packet *pkt = (struct dashcdg_subchannel_packet *) (buf + i * sizeof(struct dashcdg_subchannel_packet));
+
+        memset(pkt, 0, sizeof(*pkt));
+        pkt->command = 0x09;
+        pkt->instruction = DASHCDG_INSN_MEMORY_PRESET;
+        pkt->data[0] = 2;
+        pkt->data[1] = 0;
+    }
+    memset(buf + (size_t) k_packets * sizeof(struct dashcdg_subchannel_packet), 0xAB, 5U);
+    dashcdg_cdg_compute_subchannel_trims(buf, buf_len, buf_len, &trim_p, &trim_s);
+    assert(trim_p == 0U);
+    assert(trim_s == 5U);
+    free(buf);
+}
+
 static void test_nb_ima_codec_roundtrip(void) {
     struct dashcdg_nb_ima_state enc;
     struct dashcdg_nb_ima_state dec;
@@ -1152,6 +1273,8 @@ static void test_nb_ima_codec_roundtrip(void) {
 }
 
 int main(void) {
+    test_cdg_subchannel_pack_rs();
+    test_cdg_subchannel_alignment_trims();
     test_memory_and_border();
     test_tile_and_scroll_copy();
     test_scroll_preset_and_transparency();
@@ -1180,6 +1303,7 @@ int main(void) {
     test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start();
     test_cdg_batch_jitter_reorder_applies_lower_index_first();
     test_cdg_batch_jitter_snapshot_seek_purges_old_slots();
+    test_cdg_batch_jitter_evict_pressure_frees_slots();
     test_fec_recovery();
     test_nb_ima_codec_roundtrip();
 

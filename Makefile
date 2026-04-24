@@ -241,9 +241,9 @@ WINDOWS_PACKAGE_ZIP = $(RELEASE_DIR)/dashcdg-windows-$(WINDOWS_ARCH_LABEL)-porta
 WINDOWS_ZIP_X64 := build/amd64/release/dashcdg-windows-x64-portable.zip
 WINDOWS_ZIP_X86 := build/x86/release/dashcdg-windows-x86-portable.zip
 
-CORE_SOURCES := core/src/cdg.c core/src/media_clock.c core/src/cdg_raster.c core/src/audio_jitter.c core/src/cdg_batch_jitter.c core/src/nb_ima_codec.c
+CORE_SOURCES := core/src/cdg.c core/src/cdg_subchannel_rs.c core/src/media_clock.c core/src/cdg_raster.c core/src/audio_jitter.c core/src/cdg_batch_jitter.c core/src/nb_ima_codec.c
 PROTO_SOURCES := proto/src/protocol.c proto/src/fec.c
-CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o $(OBJ_DIR)/core_cdg_batch_jitter.o $(OBJ_DIR)/core_nb_ima_codec.o
+CORE_OBJECTS := $(OBJ_DIR)/core_cdg.o $(OBJ_DIR)/core_cdg_subchannel_rs.o $(OBJ_DIR)/core_media_clock.o $(OBJ_DIR)/core_cdg_raster.o $(OBJ_DIR)/core_audio_jitter.o $(OBJ_DIR)/core_cdg_batch_jitter.o $(OBJ_DIR)/core_nb_ima_codec.o
 PROTO_OBJECTS := $(OBJ_DIR)/proto_protocol.o $(OBJ_DIR)/proto_fec.o
 DESKTOP_COMMON_OBJECTS := $(OBJ_DIR)/desktop_file_io.o $(OBJ_DIR)/desktop_net_compat.o
 CODEC_AMR_NB_OBJS := $(patsubst audio_modules/amr/vendor/codec-amr/src/nb/%.c,$(OBJ_DIR)/amr_nb_%.o,$(wildcard audio_modules/amr/vendor/codec-amr/src/nb/*.c))
@@ -374,6 +374,9 @@ $(DESKTOP_LIB): $(DESKTOP_LIB_OBJECTS) | dashcdg-check-soxr-lib
 	$(AR) rcs $@ $^
 
 $(OBJ_DIR)/core_cdg.o: core/src/cdg.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/core_cdg_subchannel_rs.o: core/src/cdg_subchannel_rs.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/core_media_clock.o: core/src/media_clock.c

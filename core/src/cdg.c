@@ -559,3 +559,244 @@ int dashcdg_cdg_reader_seek(struct dashcdg_cdg_reader *reader, dashcdg_tick_t ts
 
     return needs_update;
 }
+
+static int dashcdg_cdg_parity_bytes_all_zero(const struct dashcdg_subchannel_packet *pkt) {
+    if (pkt == NULL) {
+        return 0;
+    }
+    if (pkt->parity_q[0] != 0U || pkt->parity_q[1] != 0U) {
+        return 0;
+    }
+    if (pkt->parity_p[0] != 0U || pkt->parity_p[1] != 0U || pkt->parity_p[2] != 0U || pkt->parity_p[3] != 0U) {
+        return 0;
+    }
+    return 1;
+}
+
+static int dashcdg_cdg_known_graphics_instruction(uint8_t instruction) {
+    switch (instruction & 0x3FU) {
+        case DASHCDG_INSN_MEMORY_PRESET:
+        case DASHCDG_INSN_BORDER_PRESET:
+        case DASHCDG_INSN_TILE_BLOCK:
+        case DASHCDG_INSN_SCROLL_PRESET:
+        case DASHCDG_INSN_SCROLL_COPY:
+        case DASHCDG_INSN_DEF_TRANSPARENT:
+        case DASHCDG_INSN_LOAD_COLOR_TABLE_00:
+        case DASHCDG_INSN_LOAD_COLOR_TABLE_08:
+        case DASHCDG_INSN_TILE_BLOCK_XOR:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int dashcdg_cdg_packet_fields_plausible(const struct dashcdg_subchannel_packet *pkt) {
+    uint8_t insn = pkt->instruction & 0x3FU;
+    const uint8_t *d = pkt->data;
+
+    switch (insn) {
+        case DASHCDG_INSN_TILE_BLOCK:
+        case DASHCDG_INSN_TILE_BLOCK_XOR: {
+            uint8_t row = d[2] & 0x1FU;
+            uint8_t col = d[3] & 0x3FU;
+
+            if (row > 17U) {
+                return 0;
+            }
+            if (col > 49U) {
+                return 0;
+            }
+            return 1;
+        }
+
+        case DASHCDG_INSN_SCROLL_PRESET:
+        case DASHCDG_INSN_SCROLL_COPY: {
+            uint8_t h = d[1] & 0x3FU;
+            uint8_t v = d[2] & 0x3FU;
+            int h_cmd = (int) ((h & 0x30U) >> 4U);
+            int v_cmd = (int) ((v & 0x30U) >> 4U);
+
+            if (h_cmd > 2 || v_cmd > 2) {
+                return 0;
+            }
+            return 1;
+        }
+
+        default:
+            return 1;
+    }
+}
+
+static int dashcdg_cdg_packet_counts_for_alignment(const uint8_t *data, size_t len, size_t offset, size_t n_scan,
+                                                   size_t *out_good_header, size_t *out_good_fields, size_t *out_parity_zero) {
+    size_t good_h = 0;
+    size_t good_f = 0;
+    size_t pz = 0;
+    size_t i;
+
+    if (data == NULL || len < offset + 24U || out_good_header == NULL || out_good_fields == NULL ||
+            out_parity_zero == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < n_scan; ++i) {
+        const struct dashcdg_subchannel_packet *pkt =
+                (const struct dashcdg_subchannel_packet *) (data + offset + i * sizeof(struct dashcdg_subchannel_packet));
+
+        if (offset + (i + 1U) * sizeof(struct dashcdg_subchannel_packet) > len) {
+            break;
+        }
+
+        if ((pkt->command & 0x3FU) != 0x09U) {
+            continue;
+        }
+        if (!dashcdg_cdg_known_graphics_instruction(pkt->instruction)) {
+            continue;
+        }
+
+        good_h++;
+        if (dashcdg_cdg_parity_bytes_all_zero(pkt)) {
+            pz++;
+        }
+        if (dashcdg_cdg_packet_fields_plausible(pkt)) {
+            good_f++;
+        }
+    }
+
+    *out_good_header = good_h;
+    *out_good_fields = good_f;
+    *out_parity_zero = pz;
+    return 1;
+}
+
+void dashcdg_cdg_compute_subchannel_trims(const uint8_t *data, size_t scan_bytes, size_t total_bytes,
+                                          size_t *out_trim_prefix, size_t *out_trim_suffix) {
+    size_t scan_len;
+    size_t n_scan;
+    size_t good_f[24];
+    size_t good_h[24];
+    size_t parity_z[24];
+    size_t best_o;
+    size_t second_f;
+    size_t o;
+    size_t min_good;
+    size_t win_margin;
+    size_t gf0;
+
+    if (out_trim_prefix != NULL) {
+        *out_trim_prefix = 0U;
+    }
+    if (out_trim_suffix != NULL) {
+        *out_trim_suffix = 0U;
+    }
+    if (data == NULL || out_trim_prefix == NULL || out_trim_suffix == NULL) {
+        return;
+    }
+
+    if (total_bytes < sizeof(struct dashcdg_subchannel_packet)) {
+        *out_trim_suffix = total_bytes % sizeof(struct dashcdg_subchannel_packet);
+        return;
+    }
+
+    scan_len = scan_bytes;
+    if (scan_len > total_bytes) {
+        scan_len = total_bytes;
+    }
+
+    /*
+     * Use the same packet count for every trial offset so high offsets are not
+     * penalized by a shorter remainder at the end of scan_len.
+     */
+    if (scan_len < 23U + 8U * sizeof(struct dashcdg_subchannel_packet)) {
+        *out_trim_suffix = total_bytes % sizeof(struct dashcdg_subchannel_packet);
+        return;
+    }
+    n_scan = (scan_len - 23U) / sizeof(struct dashcdg_subchannel_packet);
+    if (n_scan > 1200U) {
+        n_scan = 1200U;
+    }
+    if (n_scan < 8U) {
+        *out_trim_suffix = total_bytes % sizeof(struct dashcdg_subchannel_packet);
+        return;
+    }
+
+    min_good = 64U;
+    if (n_scan < 128U) {
+        min_good = n_scan * 2U / 5U;
+        if (min_good < 12U) {
+            min_good = 12U;
+        }
+    }
+
+    win_margin = n_scan / 25U;
+    if (win_margin < 16U) {
+        win_margin = 16U;
+    }
+
+    for (o = 0; o < 24U; ++o) {
+        size_t gh;
+        size_t gf;
+        size_t pz;
+
+        if (scan_len < o + sizeof(struct dashcdg_subchannel_packet)) {
+            good_f[o] = 0U;
+            good_h[o] = 0U;
+            parity_z[o] = 0U;
+            continue;
+        }
+
+        if (!dashcdg_cdg_packet_counts_for_alignment(data, scan_len, o, n_scan, &gh, &gf, &pz)) {
+            good_f[o] = 0U;
+            good_h[o] = 0U;
+            parity_z[o] = 0U;
+            continue;
+        }
+
+        good_f[o] = gf;
+        good_h[o] = gh;
+        parity_z[o] = pz;
+    }
+
+    gf0 = good_f[0U];
+
+    best_o = 0U;
+    for (o = 1U; o < 24U; ++o) {
+        if (good_f[o] > good_f[best_o]) {
+            best_o = o;
+        } else if (good_f[o] == good_f[best_o]) {
+            if (good_h[o] > good_h[best_o]) {
+                best_o = o;
+            } else if (good_h[o] == good_h[best_o] && parity_z[o] > parity_z[best_o]) {
+                best_o = o;
+            } else if (good_h[o] == good_h[best_o] && parity_z[o] == parity_z[best_o] && o < best_o) {
+                best_o = o;
+            }
+        }
+    }
+
+    second_f = 0U;
+    for (o = 0U; o < 24U; ++o) {
+        if (o == best_o) {
+            continue;
+        }
+        if (good_f[o] > second_f) {
+            second_f = good_f[o];
+        }
+    }
+
+    if (best_o != 0U && good_f[best_o] >= min_good && good_f[best_o] >= second_f + win_margin && good_f[best_o] > gf0 &&
+            good_f[best_o] >= gf0 + min_good / 4U) {
+        *out_trim_prefix = best_o;
+    } else {
+        *out_trim_prefix = 0U;
+    }
+
+    if (*out_trim_prefix > total_bytes) {
+        *out_trim_prefix = 0U;
+    }
+    {
+        size_t body = total_bytes - *out_trim_prefix;
+
+        *out_trim_suffix = body % sizeof(struct dashcdg_subchannel_packet);
+    }
+}

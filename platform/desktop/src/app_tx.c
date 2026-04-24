@@ -3553,6 +3553,55 @@ static void dashcdg_tx_print_status_locked(void) {
     fflush(stdout);
 }
 
+static int dashcdg_tx_cdg_peek_file_header(const char *path, uint8_t *buf, size_t buf_cap, long *out_file_size, size_t *out_read) {
+    FILE *f;
+    long sz;
+
+    if (path == NULL || buf == NULL || buf_cap == 0U || out_file_size == NULL || out_read == NULL) {
+        return 0;
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 0;
+    }
+    sz = ftell(f);
+    if (sz < 0) {
+        fclose(f);
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    *out_file_size = sz;
+    *out_read = fread(buf, 1, buf_cap, f);
+    fclose(f);
+    return 1;
+}
+
+static void dashcdg_tx_apply_cdg_subchannel_trims(uint8_t *bytes, size_t *inout_size, size_t trim_prefix, size_t trim_suffix) {
+    size_t new_size;
+
+    if (bytes == NULL || inout_size == NULL) {
+        return;
+    }
+    if (trim_prefix == 0U && trim_suffix == 0U) {
+        return;
+    }
+    if (trim_prefix + trim_suffix > *inout_size) {
+        return;
+    }
+    new_size = *inout_size - trim_prefix - trim_suffix;
+    if (trim_prefix > 0U && new_size > 0U) {
+        memmove(bytes, bytes + trim_prefix, new_size);
+    }
+    *inout_size = new_size;
+}
+
 static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     struct dashcdg_tx_track *track;
     struct dashcdg_cdg_source next_source;
@@ -3586,6 +3635,18 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
             fprintf(stderr, "failed to read CDG asset: %s\n", track->cdg_path);
             return 0;
         }
+        {
+            size_t trim_prefix = 0U;
+            size_t trim_suffix = 0U;
+
+            dashcdg_cdg_compute_subchannel_trims(asset_bytes, asset_size, asset_size, &trim_prefix, &trim_suffix);
+            dashcdg_tx_apply_cdg_subchannel_trims(asset_bytes, &asset_size, trim_prefix, trim_suffix);
+            if (asset_size == 0U) {
+                fprintf(stderr, "CDG asset empty after subchannel trim: %s\n", track->cdg_path);
+                free(asset_bytes);
+                return 0;
+            }
+        }
         dashcdg_cdg_reader_free(&g_tx_state.reader);
         dashcdg_cdg_reader_init(&g_tx_state.reader);
         if (!dashcdg_cdg_reader_load_memory(&g_tx_state.reader, asset_bytes, asset_size) ||
@@ -3600,11 +3661,47 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
             return 0;
         }
     } else {
-        if (!dashcdg_cdg_source_open_file(&next_source, track->cdg_path)) {
-            fprintf(stderr, "failed to open file-backed CDG source: %s\n", track->cdg_path);
+        uint8_t peek_buf[24 * 1200 + 23];
+        long file_len_long = 0;
+        size_t peek_read = 0U;
+        size_t trim_prefix = 0U;
+        size_t trim_suffix = 0U;
+        size_t file_total = 0U;
+
+        if (!dashcdg_tx_cdg_peek_file_header(track->cdg_path, peek_buf, sizeof peek_buf, &file_len_long, &peek_read)) {
+            fprintf(stderr, "failed to open CDG asset for alignment probe: %s\n", track->cdg_path);
             return 0;
         }
-        asset_size = dashcdg_cdg_source_size(&next_source);
+        if (file_len_long < 0) {
+            fprintf(stderr, "failed to size CDG asset: %s\n", track->cdg_path);
+            return 0;
+        }
+        file_total = (size_t) file_len_long;
+        dashcdg_cdg_compute_subchannel_trims(peek_buf, peek_read, file_total, &trim_prefix, &trim_suffix);
+
+        if (trim_prefix > 0U || trim_suffix > 0U) {
+            if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
+                fprintf(stderr, "failed to read CDG asset for subchannel trim: %s\n", track->cdg_path);
+                return 0;
+            }
+            dashcdg_tx_apply_cdg_subchannel_trims(asset_bytes, &asset_size, trim_prefix, trim_suffix);
+            if (asset_size == 0U) {
+                fprintf(stderr, "CDG asset empty after subchannel trim: %s\n", track->cdg_path);
+                free(asset_bytes);
+                return 0;
+            }
+            if (!dashcdg_cdg_source_open_memory(&next_source, asset_bytes, asset_size, 1)) {
+                fprintf(stderr, "failed to prepare in-memory CDG source after trim: %s\n", track->cdg_path);
+                free(asset_bytes);
+                return 0;
+            }
+        } else {
+            if (!dashcdg_cdg_source_open_file(&next_source, track->cdg_path)) {
+                fprintf(stderr, "failed to open file-backed CDG source: %s\n", track->cdg_path);
+                return 0;
+            }
+            asset_size = dashcdg_cdg_source_size(&next_source);
+        }
     }
 
     dashcdg_cdg_source_free(&g_tx_state.cdg_source);
