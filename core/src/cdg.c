@@ -654,6 +654,15 @@ static int dashcdg_cdg_packet_counts_for_alignment(const uint8_t *data, size_t l
             continue;
         }
 
+        /*
+         * Rips usually zero the six parity bytes after drive correction. When any
+         * parity byte is present, require a valid R–W PACK RS codeword so misaligned
+         * windows that accidentally match 0x09 + instruction are not over-scored.
+         */
+        if (!dashcdg_cdg_parity_bytes_all_zero(pkt) && !dashcdg_cdg_subchannel_pack_rs_syndrome_ok(pkt)) {
+            continue;
+        }
+
         good_h++;
         if (dashcdg_cdg_parity_bytes_all_zero(pkt)) {
             pz++;

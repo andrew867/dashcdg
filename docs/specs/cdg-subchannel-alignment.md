@@ -77,12 +77,12 @@ reliably reconstruct syndromes from file bytes alone.
 implement GF(2⁶) Q- then P-parity over the 24-byte PACK (6-bit symbols). Golden
 bytes and round-trip cases live in `tests/test_core.c` (`test_cdg_subchannel_pack_rs`).
 
-**Current TX policy** (`dashcdg_cdg_compute_subchannel_trims`)
+**Current policy** (`dashcdg_cdg_compute_subchannel_trims`)
 
-- If parity is **all zero**, treat parity as **neutral** (typical rip).
-- If parity is **non-zero**, alignment scoring does not yet require RS pass;
-  callers can combine instruction scoring with
-  `dashcdg_cdg_subchannel_pack_rs_syndrome_ok` when they want stricter gating.
+- If all six parity bytes are **zero**, RS is not required for that packet (typical rip).
+- If **any** parity byte is non-zero, the packet counts toward alignment scores only
+  when `dashcdg_cdg_subchannel_pack_rs_syndrome_ok` is true, so random misaligned
+  bytes are less likely to fake a long run of “valid” graphics headers.
 
 ## Alignment scoring (implementation)
 
@@ -91,15 +91,16 @@ bytes and round-trip cases live in `tests/test_core.c` (`test_cdg_subchannel_pac
 1. For each candidate start offset **0…23** over the first **N** packets (same
    `N` for every offset so high offsets are not short-changed by tail length),
    parse 24-byte structs.
-2. Count a packet as a **header hit** when `(command & 0x3F) == 0x09` and
-   `instruction` is one of the known CD+G opcodes processed by
-   `dashcdg_cdg_state_process_packet`.
-3. Count a **field hit** when, in addition, instruction-specific low-bit fields
+2. Require `(command & 0x3F) == 0x09` and a known CD+G `instruction`. If any
+   parity byte is non-zero, require `dashcdg_cdg_subchannel_pack_rs_syndrome_ok`
+   (PACK RS); all-zero parity skips RS for that packet.
+3. Count a **header hit** for each packet that passes step 2.
+4. Count a **field hit** when, in addition, instruction-specific low-bit fields
    look plausible (e.g. tile row/column inside the 300×216 grid; scroll command
    subfields in 0…2).
-4. Tie-break with header hits, then with “parity bytes all zero” among
+5. Tie-break with header hits, then with “parity bytes all zero” among
    header-valid packets (weak signal for rips).
-5. Choose a non-zero **prefix trim** only if the best offset beats the runner-up
+6. Choose a non-zero **prefix trim** only if the best offset beats the runner-up
    by a margin **and** beats offset 0 by enough field-hits to avoid ambiguous
    picks.
 

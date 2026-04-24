@@ -1243,6 +1243,33 @@ static void test_cdg_subchannel_alignment_trims(void) {
     free(buf);
 }
 
+static void test_cdg_subchannel_alignment_with_rs_filled_packets(void) {
+    enum { k_packets = 120 };
+    uint8_t *buf;
+    size_t buf_len;
+    size_t i;
+    size_t trim_p;
+    size_t trim_s;
+
+    buf_len = (size_t) k_packets * sizeof(struct dashcdg_subchannel_packet);
+    buf = (uint8_t *) malloc(buf_len);
+    assert(buf != NULL);
+    for (i = 0; i < (size_t) k_packets; ++i) {
+        struct dashcdg_subchannel_packet *pkt = (struct dashcdg_subchannel_packet *) (buf + i * sizeof(struct dashcdg_subchannel_packet));
+
+        memset(pkt, 0, sizeof(*pkt));
+        pkt->command = 0x09;
+        pkt->instruction = DASHCDG_INSN_MEMORY_PRESET;
+        pkt->data[0] = 1;
+        pkt->data[1] = 0;
+        dashcdg_cdg_subchannel_pack_rs_fill(pkt);
+    }
+    dashcdg_cdg_compute_subchannel_trims(buf, buf_len, buf_len, &trim_p, &trim_s);
+    assert(trim_p == 0U);
+    assert(trim_s == 0U);
+    free(buf);
+}
+
 static void test_nb_ima_codec_roundtrip(void) {
     struct dashcdg_nb_ima_state enc;
     struct dashcdg_nb_ima_state dec;
@@ -1275,6 +1302,7 @@ static void test_nb_ima_codec_roundtrip(void) {
 int main(void) {
     test_cdg_subchannel_pack_rs();
     test_cdg_subchannel_alignment_trims();
+    test_cdg_subchannel_alignment_with_rs_filled_packets();
     test_memory_and_border();
     test_tile_and_scroll_copy();
     test_scroll_preset_and_transparency();

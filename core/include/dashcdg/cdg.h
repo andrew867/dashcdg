@@ -146,9 +146,9 @@ void dashcdg_cdg_subchannel_pack_rs_fill(struct dashcdg_subchannel_packet *pkt);
  * Infer 24-byte CD+G subchannel framing from the start of a byte buffer.
  *
  * Uses mode-5 command 0x09, the known CD+G instruction set, and instruction-specific
- * field checks (see docs/specs/cdg-subchannel-alignment.md). Non-zero R–W parity
- * can be checked separately with `dashcdg_cdg_subchannel_pack_rs_syndrome_ok`;
- * the trim scorer still treats all-zero parity as neutral for typical rips.
+ * field checks (see docs/specs/cdg-subchannel-alignment.md). When any R–W parity
+ * byte is non-zero, each candidate packet must pass `dashcdg_cdg_subchannel_pack_rs_syndrome_ok`;
+ * all-zero parity skips RS (typical rips).
  *
  * Scoring uses the first scan_bytes of data (capped by the caller); total_bytes is used
  * only for the trailing byte remainder (total_bytes - trim_prefix) % 24.
