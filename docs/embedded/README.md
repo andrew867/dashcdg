@@ -19,10 +19,12 @@ Related existing documents:
 | [`../specs/v4-audio-codecs.md`](../specs/v4-audio-codecs.md) | Canonical v4 codec IDs and desktop codec mappings. |
 | [`../specs/v4-codec-switching-contract.md`](../specs/v4-codec-switching-contract.md) | Runtime codec switching behavior and receiver obligations. |
 | [`../specs/v4-live-video-playout.md`](../specs/v4-live-video-playout.md) | Live CD+G anchor/delta playout behavior. |
+| [`../specs/v4-video-repair-window-design.md`](../specs/v4-video-repair-window-design.md) | Planned forward/reverse/interleaved video repair windows + anchor epoch rules. |
 | [`../specs/v4-display-audio-sync.md`](../specs/v4-display-audio-sync.md) | Audio/display sync policy. |
 | [`../specs/audio-jitter-playout-boundary.md`](../specs/audio-jitter-playout-boundary.md) | Core audio jitter buffer contract. |
 | [`../specs/cdg-batch-jitter-playout-boundary.md`](../specs/cdg-batch-jitter-playout-boundary.md) | CDG jitter and skip behavior. |
 | [`../hardware/esp32-receiver-architecture.md`](../hardware/esp32-receiver-architecture.md) | Earlier ESP-IDF architecture notes. |
+| [`../ops/v4-video-repair-implementation-checklist.md`](../ops/v4-video-repair-implementation-checklist.md) | Implementation slices and validation gates before coding repair windows. |
 
 ## Porting rule
 

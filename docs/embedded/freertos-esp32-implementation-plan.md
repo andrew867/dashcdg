@@ -76,6 +76,24 @@ Rules:
 
 ## Milestones
 
+## Pre-implementation checklist for on-the-fly video repair
+
+Complete this before writing implementation code for forward/reverse/interleaved
+video repair:
+
+1. **Wire contract freeze**: define additive fields/packet usage for repair
+   windows without breaking existing v4 consumers.
+2. **Window math**: choose `k` (window radius), symbol cadence, and max decode
+   wait so recovery gain does not violate karaoke latency budget.
+3. **Memory budget**: reserve static/pooled storage for repair metadata and
+   symbols; no unbounded heap growth on ESP32.
+4. **Ownership model**: keep one apply path into live CDG state; repaired
+   packets must enter through the same jitter ordering rules as native deltas.
+5. **Counters/logging**: define recovered/unsolved/expired metrics and where
+   they surface (telemetry modal + TX observability if enabled).
+6. **Validation hooks**: add deterministic packet-loss injection toggles for
+   embedded test runs (single-loss and burst profiles).
+
 ### Phase 0: protocol skeleton
 
 Deliverables:
@@ -141,10 +159,14 @@ Deliverables:
 - Track FEC groups.
 - Recover single missing audio or video group member with XOR repair.
 - Add counters for continuity skip, reorder, gaps, underruns.
+- Add bounded forward/reverse/interleaved video repair windows (embedded-first),
+  with strict deadlines and monotonic playout cursor convergence.
 
 Exit criteria:
 
 - Controlled packet-loss tests show fewer audible/visible drops than no-FEC mode.
+- For solvable one-miss windows, visible video loss drops without increasing
+  long-run black-frame/freeze incidents.
 
 ### Phase 5: codec expansion
 

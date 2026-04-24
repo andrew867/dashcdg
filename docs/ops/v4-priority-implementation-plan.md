@@ -199,6 +199,29 @@ Exit criteria:
 
 - resilient mode is demonstrably better than quality mode on impaired links
 
+### Phase C.4: on-the-fly video repair windows (embedded priority)
+
+Scope:
+
+- implement additive forward/reverse/interleaved repair windows for
+  `v4_video_delta`
+- keep recovery bounded by strict window deadlines
+- preserve anchor epoch determinism:
+  - anchor establishes known-good baseline semantics
+  - repair windows do not cross epoch boundaries
+- validate long paint-sequence palette-dependent intros under induced loss
+
+Execution/checklist:
+
+- [v4-video-repair-implementation-checklist.md](v4-video-repair-implementation-checklist.md)
+
+Exit criteria:
+
+- single-loss windows recover on-the-fly in controlled profiles
+- unsolved bursts fall back cleanly (no wedge, no rewind)
+- palette-dependent intros converge after late join/loss without persistent
+  wrong-palette state
+
 ## Tranche D: quality and product follow-through
 
 Goal:
@@ -275,5 +298,6 @@ The next implementation tranche should be:
 3. **Phase A.1** baseline convergence capture
 4. **Phase A.2** RX observability completion
 5. **Phase A.3** TX-as-controller measurement mode
+6. **Phase C.4** contract/checklist freeze (docs/tests) before implementation
 
 Do not start real group-target playout until those items are complete.

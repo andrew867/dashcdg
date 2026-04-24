@@ -21,6 +21,7 @@ Run **before** and **after** each merge that touches `cdg_source`, `asset_bytes`
 | **LJ-4** | Pause / resume TX | Pause ≥ 10 s; resume | RX shows pause screen then live; audio resumes |
 | **LJ-5** | Asset replay completeness | RX-only capture: compare reconstructed asset size/hash to TX source file | Deterministic match per protocol |
 | **LJ-6** | FEC path | Optional: mild impairment relay during LJ-1 | Repair counters plausible; no infinite stall |
+| **LJ-7** | Palette-dependent intro resilience | Use a long paint-sequence intro track (e.g. Dreamcatcher/DC Karaoke naming pattern); start RX late and inject early loss near first palette updates | Intro background/text colors converge to expected palette; no persistent "wrong palette until next anchor" state |
 
 ## Stage-specific gates (from tx-cdg-source-model)
 
@@ -28,6 +29,8 @@ When implementing **Stage B+** (random-access source, reduced duplication):
 
 - **Preview mode** whole-memory fallback: run **LJ-1–LJ-4** with preview **on** and **off**.
 - **Wire path** default: **LJ-1–LJ-5** must pass without preview-only code paths.
+- Palette-dependent content gate: **LJ-7** must pass in both clean and impaired
+  runs before declaring video-repair changes stable.
 
 ## Evidence
 

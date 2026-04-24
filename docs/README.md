@@ -34,6 +34,7 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`specs/tx-cdg-source-model.md`](specs/tx-cdg-source-model.md) | TX CDG source / memory model |
 | [`specs/remaining-tranches-roadmap.md`](specs/remaining-tranches-roadmap.md) | **Remaining work index** (soak, track stress, bad-network phases, CD+G regression, observability) |
 | [`specs/bad-network-transport-next-phases.md`](specs/bad-network-transport-next-phases.md) | Bad-network transport **implementation phases** (companion) |
+| [`specs/v4-video-repair-window-design.md`](specs/v4-video-repair-window-design.md) | On-the-fly video repair window math, budgets, and anchor-epoch rules (pre-implementation) |
 | [`specs/operator-observability-and-sync-future-work.md`](specs/operator-observability-and-sync-future-work.md) | PTP / operator UI / metrics UI **future work** |
 | [`specs/narrowband-low-bitrate-audio-quality.md`](specs/narrowband-low-bitrate-audio-quality.md) | NB quality hypotheses, acceptance, test plan (draft) |
 | [`specs/tx-pause-screen.md`](specs/tx-pause-screen.md) | Pause screen packets |
@@ -63,3 +64,4 @@ and **`specs/windows-legacy-mingw-build.md`**.
 - [`hardware/`](hardware/) — ESP32 / BOM / bringup notes (desktop **v4** A/V + codec switching is the reference contract for firmware — see [`AGENTS.md`](../AGENTS.md), [`specs/embedded-rx-audio-profile.md`](specs/embedded-rx-audio-profile.md))  
 - [`ops/quality-gates.md`](ops/quality-gates.md) — Release criteria  
 - [`ops/audio-codec-direction-notes.md`](ops/audio-codec-direction-notes.md) — operator/runtime codec decisions, including the EVRC retirement note and weird-codec backlog
+- [`ops/v4-video-repair-implementation-checklist.md`](ops/v4-video-repair-implementation-checklist.md) — TX/RX/proto/test execution slices for Tranche C.4

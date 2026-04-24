@@ -4,6 +4,8 @@
 
 Validate **codec hot-swap** without TX restart, **recovery** when **`v4_session_info` is dropped** but **`v4_audio_chunk`** continues, **audio continuity** under host CPU/disk load, and **pause/unpause** without wedging.
 
+Also validate upcoming **on-the-fly video repair windows** (forward/reverse/interleaved parity for `v4_video_delta`) once implemented.
+
 ## Preconditions
 
 - Two hosts or loopback; **v4** session; non-retro TX/RX builds with multiple codecs (e.g. AMR-WB ↔ Opus ↔ SBC-like).
@@ -13,6 +15,11 @@ Validate **codec hot-swap** without TX restart, **recovery** when **`v4_session_
 
 - `make test` — existing protocol and core tests must pass after changes.
 - FEC xor recovery remains covered by existing `proto`/FEC tests where applicable.
+- Add/extend unit coverage for video repair windows:
+  - single missing member in forward window recovers
+  - single missing member in reverse window recovers
+  - >1 missing member in a window does not produce false recovery
+  - expired window is dropped and counted.
 
 ## Manual QA
 
@@ -43,13 +50,27 @@ Validate **codec hot-swap** without TX restart, **recovery** when **`v4_session_
 1. Run **retro RX** against modern TX (supported codecs only).
 2. **Expect**: CPU remains low; video sync holds per existing retro baselines.
 
+### 6. Video repair window matrix (new)
+
+1. Run impairment with controlled packet drops on `v4_video_delta`:
+   - isolated single-loss
+   - 2-4 packet burst
+   - periodic burst (e.g. every 500 ms).
+2. **Expect**:
+   - solvable one-miss windows recover without waiting for the next anchor
+   - unsolved windows degrade via normal skip/anchor recovery (no wedge)
+   - `next_packet_index` convergence remains monotonic/aligned.
+3. Record counters: recovered_forward, recovered_reverse, expired_window, unsolved_window.
+
 ## Exit criteria
 
 - Manual cases **1** and **3** pass on a **Windows** reference machine.
 - No known **silent-until-restart** path from codec hot-swap alone.
+- Video-repair case **6** passes for single-loss and short-burst profiles on at least one desktop TX and one embedded RX run.
 
 ## References
 
 - [`../specs/v4-codec-switching-contract.md`](../specs/v4-codec-switching-contract.md)
 - [`../specs/v4-transport-stability-and-timing.md`](../specs/v4-transport-stability-and-timing.md)
 - [`../specs/v4-audio-fec-advanced.md`](../specs/v4-audio-fec-advanced.md)
+- [`../specs/v4-live-video-playout.md`](../specs/v4-live-video-playout.md)
