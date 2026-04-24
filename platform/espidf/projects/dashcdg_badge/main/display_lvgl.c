@@ -119,9 +119,9 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
         /* Interrupt optional; polling works for bring-up. Set to CYD_GPIO_TP_IRQ after tuning. */
         .int_gpio_num = -1,
         .flags = {
-            .swap_xy = 0,
-            .mirror_x = 0,
-            .mirror_y = 0,
+            .swap_xy = CYD_TP_SWAP_XY,
+            .mirror_x = CYD_TP_MIRROR_X,
+            .mirror_y = CYD_TP_MIRROR_Y,
         },
     };
 

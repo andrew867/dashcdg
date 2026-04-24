@@ -38,3 +38,11 @@
 #define CYD_LCD_SWAP_RGB565_BYTES 1
 #define CYD_LCD_RGB_ELEMENT_ORDER   LCD_RGB_ELEMENT_ORDER_BGR
 #define CYD_LCD_PANEL_INVERT        1
+
+/*
+ * XPT2046 → LVGL: corner inversion (e.g. physical top-left hits bottom-right) is fixed by
+ * mirroring axes. Tune only if your revision differs.
+ */
+#define CYD_TP_SWAP_XY   0
+#define CYD_TP_MIRROR_X  1
+#define CYD_TP_MIRROR_Y  1
