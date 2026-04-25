@@ -317,12 +317,13 @@ struct dashcdg_v4_clock_sync_payload {
  * v3 adds presentation / latency / recovery / bootstrap state for tranche-A
  * controller measurement mode.
  *
- * Parsers accept v1/v2/v3; emitters use v3 (DASHCDG_V4_RX_STATS_PAYLOAD_SIZE).
+ * Parsers accept v1/v2/v3/v4; emitters use v4 (DASHCDG_V4_RX_STATS_PAYLOAD_SIZE).
  */
 #define DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE 52U
 #define DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE 88U
 #define DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE 124U
-#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE
+#define DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE 160U
+#define DASHCDG_V4_RX_STATS_PAYLOAD_SIZE DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE
 
 enum dashcdg_v4_rx_startup_stage {
     DASHCDG_V4_RX_STARTUP_UNKNOWN = 0,
@@ -388,6 +389,17 @@ struct dashcdg_v4_rx_stats_payload {
     uint32_t recovery_silent_stall_count;
     uint32_t source_idle_park_count;
     uint32_t startup_flags;
+    /* v4 extension: video/clock/sync/device telemetry. */
+    uint32_t video_jb_pending_slots;
+    uint64_t video_jb_next_packet_index;
+    uint32_t v4_clock_rx_count;
+    int32_t clock_skew_ema_ms;
+    int32_t ptp_offset_ema_us;
+    uint32_t heap_free_min_bytes;
+    int16_t wifi_rssi_dbm;
+    uint8_t ptp_mode;
+    uint8_t stats_generation;
+    uint32_t device_flags;
 };
 #pragma pack(pop)
 

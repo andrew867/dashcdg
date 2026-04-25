@@ -863,6 +863,24 @@ size_t dashcdg_protocol_serialize_v4_rx_stats(
     offset += 4U;
     dashcdg_write_u32(buffer + offset, payload->startup_flags);
     offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->video_jb_pending_slots);
+    offset += 4U;
+    dashcdg_write_u64(buffer + offset, payload->video_jb_next_packet_index);
+    offset += 8U;
+    dashcdg_write_u32(buffer + offset, payload->v4_clock_rx_count);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, (uint32_t) payload->clock_skew_ema_ms);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, (uint32_t) payload->ptp_offset_ema_us);
+    offset += 4U;
+    dashcdg_write_u32(buffer + offset, payload->heap_free_min_bytes);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, (uint16_t) payload->wifi_rssi_dbm);
+    offset += 2U;
+    buffer[offset++] = payload->ptp_mode;
+    buffer[offset++] = payload->stats_generation;
+    dashcdg_write_u32(buffer + offset, payload->device_flags);
+    offset += 4U;
     return offset;
 }
 
@@ -1273,7 +1291,8 @@ int dashcdg_protocol_parse_packet(
             if (view->header.version != DASHCDG_PROTOCOL_VERSION_V4 ||
                     (payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V1_SIZE &&
                             payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE &&
-                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE)) {
+                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V3_SIZE &&
+                            payload_length != DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE)) {
                 return 0;
             }
             view->v4_rx_stats.report_seq = dashcdg_read_u32(buffer + offset);
@@ -1350,6 +1369,26 @@ int dashcdg_protocol_parse_packet(
                 view->v4_rx_stats.source_idle_park_count = dashcdg_read_u32(buffer + offset);
                 offset += 4U;
                 view->v4_rx_stats.startup_flags = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+            }
+            if (payload_length >= DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE) {
+                view->v4_rx_stats.video_jb_pending_slots = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.video_jb_next_packet_index = dashcdg_read_u64(buffer + offset);
+                offset += 8U;
+                view->v4_rx_stats.v4_clock_rx_count = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.clock_skew_ema_ms = dashcdg_read_s32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.ptp_offset_ema_us = dashcdg_read_s32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.heap_free_min_bytes = dashcdg_read_u32(buffer + offset);
+                offset += 4U;
+                view->v4_rx_stats.wifi_rssi_dbm = (int16_t) dashcdg_read_u16(buffer + offset);
+                offset += 2U;
+                view->v4_rx_stats.ptp_mode = buffer[offset++];
+                view->v4_rx_stats.stats_generation = buffer[offset++];
+                view->v4_rx_stats.device_flags = dashcdg_read_u32(buffer + offset);
                 offset += 4U;
             }
             return 1;

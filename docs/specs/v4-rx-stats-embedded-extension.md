@@ -1,4 +1,4 @@
-# v4 RX stats — embedded / telemetry extension (planned)
+# v4 RX stats — embedded / telemetry extension
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Normative v3 layout today: [`proto/include/dashcdg/protocol.h`](../../proto/incl
 1. **Backward compatible:** parsers already accept **v1 / v2 / v3** lengths; a future **v4** body is a **longer** fixed size **or** a TLV appendix gated by a **version / flags** field in the header or first dword (decide before implementation).
 2. **Low rate:** same cadence as today (~1–5 Hz); no per-frame stats on the badge.
 3. **Optional path:** TX continues to operate if embedded stats are absent; embedded may send **v3-only** until v4 is implemented end-to-end.
-4. **Unicast return:** badge code already targets **last TX IPv4** for stats (`badge_rx.c`); keep that model for embedded-only fields so multicast is not flooded.
+4. **Multicast telemetry bus:** receivers publish stats to the session multicast group on a dedicated stats port (`24685` default) so peers and TX can observe the same stream.
 
 ## Proposed v4 payload fields (draft)
 
@@ -33,12 +33,12 @@ All multi-byte integers **big-endian on the wire** (match existing v4 stats). Na
 
 **Total v4 size:** TBD after packing + alignment; must fit **UDP MTU** with header and any future signing.
 
-## Wire evolution checklist (implementation order)
+## Implemented wire evolution (v4)
 
-1. Add **`DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE`** and **`struct dashcdg_v4_rx_stats_payload_v4`** (or extend `dashcdg_v4_rx_stats_payload` with a `union` tail) in `protocol.h`.
-2. Extend **`dashcdg_protocol_parse_packet`** / serialize paths in `proto/src/protocol.c` (accept v3 **and** v4 lengths).
-3. **Desktop TX / logging:** tolerate v4 length in the PTP / stats listener (`app_rx.c` or dedicated ingest).
-4. **Embedded:** fill new fields in `badge_rx_maybe_send_v4_stats` when `BADGE_RX_ENABLE_TX_V4_STATS` is enabled (currently off on badge to save airtime).
+1. Added **`DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE`** and extended `struct dashcdg_v4_rx_stats_payload` in `protocol.h`.
+2. Extended serialize/parse in `proto/src/protocol.c` to emit v4 and accept v1/v2/v3/v4.
+3. Desktop TX ingests v4 receiver stats in the existing stats/PTP listener.
+4. Desktop RX + ESP32 badge now fill/report the v4 extension fields.
 
 ## Related docs
 
