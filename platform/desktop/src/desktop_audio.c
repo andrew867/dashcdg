@@ -740,13 +740,13 @@ static void *dashcdg_winmm_thread_main(void *arg) {
         mr = waveOutPrepareHeader(ctx->hwo, &ctx->hdr[i], sizeof(WAVEHDR));
         if (mr != MMSYSERR_NOERROR) {
             ctx->stop = 1;
-            return NULL;
+            goto winmm_shutdown;
         }
         dashcdg_winmm_fill_block(audio, (int16_t *) ctx->hdr[i].lpData, cf, ctx);
         mr = waveOutWrite(ctx->hwo, &ctx->hdr[i], sizeof(WAVEHDR));
         if (mr != MMSYSERR_NOERROR) {
             ctx->stop = 1;
-            return NULL;
+            goto winmm_shutdown;
         }
     }
 
@@ -782,6 +782,7 @@ static void *dashcdg_winmm_thread_main(void *arg) {
         }
     }
 
+winmm_shutdown:
     (void) waveOutReset(ctx->hwo);
     for (i = 0U; i < nbuf; ++i) {
         (void) waveOutUnprepareHeader(ctx->hwo, &ctx->hdr[i], sizeof(WAVEHDR));
@@ -1326,6 +1327,9 @@ int dashcdg_desktop_audio_start_stream(struct dashcdg_desktop_audio *audio) {
         return 0;
     }
 #elif DASHCDG_DESKTOP_WIN32_WAVEOUT && defined(_WIN32)
+    if (audio->audio_io_ctx != NULL) {
+        dashcdg_winmm_destroy_stream(audio);
+    }
     if (!dashcdg_winmm_create_stream(audio)) {
         DASHCDG_ATOMIC_SET(audio->playback_running, 0);
         return 0;
@@ -1372,6 +1376,13 @@ int dashcdg_desktop_audio_output_device_ready(const struct dashcdg_desktop_audio
 #endif
 #if defined(DASHCDG_DESKTOP_WIN32_WAVEOUT) && (DASHCDG_DESKTOP_WIN32_WAVEOUT) && defined(_WIN32)
     if (audio->audio_io_ctx != NULL) {
+        const struct dashcdg_winmm_ctx *ctx = (const struct dashcdg_winmm_ctx *) audio->audio_io_ctx;
+
+        if (ctx->hwo != NULL) {
+            return 1;
+        }
+    }
+    if (DASHCDG_ATOMIC_GET(audio->playback_running)) {
         return 1;
     }
 #endif

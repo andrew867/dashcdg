@@ -76,6 +76,12 @@
 #error "DASHCDG_DESKTOP_RETRO_WINDOWS is only supported on Windows desktop builds"
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define DASHCDG_TX_MAYBE_UNUSED __attribute__((unused))
+#else
+#define DASHCDG_TX_MAYBE_UNUSED
+#endif
+
 #define DASHCDG_AUDIO_SAMPLE_RATE 48000U
 #define DASHCDG_AUDIO_CHANNELS 1U
 #define DASHCDG_AUDIO_FRAME_MS 20U
@@ -89,8 +95,8 @@
 #define DASHCDG_CDG_SNAPSHOT_STATE_BYTES (2U + DASHCDG_COLORS + (DASHCDG_COLORS * 4U) + \
         (DASHCDG_SCREEN_WIDTH * DASHCDG_SCREEN_HEIGHT))
 #define DASHCDG_DEFAULT_LIBRARY_DIR "cdg"
-#define DASHCDG_TX_AUDIO_QUEUE_CAPACITY 128U
-#define DASHCDG_TX_AUDIO_QUEUE_PREFILL_HIGH_WATER_FRAMES (DASHCDG_TX_AUDIO_QUEUE_CAPACITY - 4U)
+#define DASHCDG_TX_AUDIO_QUEUE_CAPACITY 192U
+#define DASHCDG_TX_AUDIO_QUEUE_PREFILL_HIGH_WATER_FRAMES (DASHCDG_TX_AUDIO_QUEUE_CAPACITY - 8U)
 #define DASHCDG_TX_AUDIO_CHUNK_FRAMES 4096U
 #define DASHCDG_TX_PCM_FIFO_FRAMES (DASHCDG_AUDIO_FRAME_SAMPLES * 32U)
 #define DASHCDG_RENDER_FRAME_INTERVAL_MS 20U
@@ -106,11 +112,12 @@
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 80U
-#define DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS 4U
+#define DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS 12U
 #define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 8U
-#define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 32U
+#define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 64U
 #define DASHCDG_TX_AUDIO_LATE_FILL_THRESHOLD_MS (DASHCDG_AUDIO_FRAME_MS * 2U)
-#define DASHCDG_TX_SOCKET_SNDBUF_BYTES (1024 * 1024)
+#define DASHCDG_TX_SOCKET_SNDBUF_BYTES (4 * 1024 * 1024)
+#define DASHCDG_TX_SOCKET_SNDTIMEO_MS 12U
 /*
  * Anchor chunks used to ship one ~1 KiB fragment every TX tick (~100–1000 Hz) → multi‑Mbit/s bursts.
  * Cap payload per datagram and enforce a minimum spacing between chunks. First full anchor uses a
@@ -124,7 +131,7 @@
 #error "DASHCDG_V4_VIDEO_ANCHOR_CHUNK_PAYLOAD_BYTES exceeds DASHCDG_MAX_V4_VIDEO_ANCHOR_BYTES"
 #endif
 #define DASHCDG_V4_MAX_AUDIO_PER_PASS 2U
-#define DASHCDG_V4_MAX_VIDEO_PER_PASS 2U
+#define DASHCDG_V4_MAX_VIDEO_PER_PASS 1U
 #define DASHCDG_V4_ANCHOR_FORMAT_RLE_SNAPSHOT 1U
 #define DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS 2U
 /* Slice 0/1 freeze: first-pass video repair window radius and alternating parity cadence metadata. */
@@ -139,7 +146,7 @@
 #define DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS 4000
 #define DASHCDG_TX_RX_SUMMARY_INTERVAL_MS 2000U
 
-static void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
+static DASHCDG_TX_MAYBE_UNUSED void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
     uint64_t now_ms;
 
     if (next_deadline_ms == NULL || frame_interval_ms == 0U) {
@@ -1936,25 +1943,25 @@ static int dashcdg_tx_select_v4_audio_codec_locked(uint8_t codec_id) {
 static void dashcdg_tx_print_usage(const char *argv0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     TX_ERR(
-            "usage: %s [--help] [--v3] [--audio-profile=resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--v3] [--audio-profile=resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  (retro: v4 wire format by default; --v3 for legacy v3 only; SBC-like audio)\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
     TX_ERR(
-            "usage: %s [--help] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)\n");
 #elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
     TX_ERR(
-            "usage: %s [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  v4 by default; --v3 for legacy v3. GDI preview on by default; --headless hides the window.\n");
 #else
     TX_ERR(
-            "usage: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  v4 by default; --v3 for legacy v3. OpenGL preview for desktop-player tx; --headless sends without a window.\n");
@@ -1980,14 +1987,14 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     TX_OUT( "%s — desktop transmitter (v4 by default)\n\n", prog);
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     TX_OUT(
-            "Synopsis: %s [--help] [--v3] [--audio-profile=resilience] [--v4-audio-codec=...] "
+            "Synopsis: %s [--help] [--v3] [--audio-profile=resilience] [--tx-rx-stats-port <port>] [--v4-audio-codec=...] "
             "[endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
     TX_OUT( "Defaults: v4 wire, resilience profile, audio codec sbc-like (NB-IMA); no Opus in this build.\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
     TX_OUT(
-            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] "
+            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] "
             "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
@@ -1997,7 +2004,7 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     );
 #else
     TX_OUT(
-            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] "
+            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] "
             "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
@@ -2032,7 +2039,8 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
             "Default draws CDG from the same network playback timeline as audio chunks (matches receivers using "
             "--rx-graphics-clock sender). "
             "Use auto or a positive ms to lag the local preview vs wire tags; "
-            "the transmitter PTP listener also counts v4 rx-stats packets from receivers (same UDP port).\n"
+            "the transmitter PTP listener also counts v4 rx-stats packets from receivers "
+            "(default port 24685, override with --tx-rx-stats-port).\n"
     );
 }
 
@@ -2618,13 +2626,15 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
 
     receipt_age_ms = now_ms > slot->last_local_ms ? now_ms - slot->last_local_ms : 0U;
     /*
-     * presented_audio_timestamp_ms on RX is derived from v4 frame playback_ms tags (encoder
-     * timeline) plus DAC progression — not the TX session wall clock. Comparing against
-     * dashcdg_tx_current_playback_ms_locked() mixes timelines; when the encoder falls behind or
-     * catches up relative to wall playback, remotes that track tags can look "ahead" and v4-rx-peer
-     * latency goes negative (bad-lat / no-latency) even though playout is fine.
+     * presented_audio_timestamp_ms is receiver playout timeline (playback_ms-domain), not sender wall clock.
+     * Compare against sender playback timeline and project by receipt age.
      */
-    sender_playback_now_ms = dashcdg_tx_network_playback_ms_locked(now_ms);
+    {
+        uint64_t net_playback_ms = dashcdg_tx_network_playback_ms_locked(now_ms);
+        uint64_t wall_playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+
+        sender_playback_now_ms = net_playback_ms <= wall_playback_ms ? net_playback_ms : wall_playback_ms;
+    }
     projected_presented_ms = (uint64_t) stats->presented_audio_timestamp_ms + receipt_age_ms;
     projected_latency_ms = (int64_t) sender_playback_now_ms - (int64_t) projected_presented_ms;
 
@@ -2686,6 +2696,18 @@ static void dashcdg_tx_format_ipv4_be(uint32_t ipv4_be, char *buffer, size_t buf
 static const char *dashcdg_tx_rx_stats_generation_label(const struct dashcdg_v4_rx_stats_payload *stats) {
     if (stats == NULL) {
         return "?";
+    }
+    if (stats->stats_generation >= 4U ||
+            stats->video_jb_pending_slots != 0U ||
+            stats->video_jb_next_packet_index != 0U ||
+            stats->v4_clock_rx_count != 0U ||
+            stats->clock_skew_ema_ms != 0 ||
+            stats->ptp_offset_ema_us != 0 ||
+            stats->heap_free_min_bytes != 0U ||
+            stats->wifi_rssi_dbm != 0 ||
+            stats->ptp_mode != 0U ||
+            stats->device_flags != 0U) {
+        return "v4";
     }
     if (stats->presented_audio_timestamp_ms != 0U ||
             stats->target_total_latency_ms != 0U ||
@@ -5942,7 +5964,7 @@ static void dashcdg_tx_format_status_bar_locked(char *buffer, size_t buffer_size
     }
 }
 
-static void dashcdg_tx_draw_status_bar_locked(void) {
+static DASHCDG_TX_MAYBE_UNUSED void dashcdg_tx_draw_status_bar_locked(void) {
     char status_line[512];
     size_t rows = 0U;
     size_t cols = 0U;
@@ -7303,6 +7325,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     const char *source_path = DASHCDG_DEFAULT_LIBRARY_DIR;
     const char *warmup_value = NULL;
     int port = DASHCDG_DEFAULT_NETWORK_PORT;
+    int rx_stats_port = DASHCDG_DEFAULT_NETWORK_STATS_PORT;
     int positional_index = 0;
     int ttl = 1;
     unsigned char loopback = 1;
@@ -7489,6 +7512,24 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             g_tx_state.transport_v4_enabled = 0;
             continue;
         }
+        if (strcmp(argv[i], "--tx-rx-stats-port") == 0) {
+            unsigned long parsed = 0UL;
+
+            if (i + 1 >= argc || !dashcdg_tx_is_number(argv[i + 1])) {
+                TX_ERR("%s: --tx-rx-stats-port requires <1..65535>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            ++i;
+            parsed = strtoul(argv[i], NULL, 10);
+            if (parsed == 0UL || parsed > 65535UL) {
+                TX_ERR("%s: --tx-rx-stats-port requires <1..65535>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            rx_stats_port = (int)parsed;
+            continue;
+        }
         if (strcmp(argv[i], "--audio-profile=quality") == 0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
             TX_ERR( "%s: --audio-profile=quality (Opus) is not available in retro build\n", argv[0]);
@@ -7574,6 +7615,9 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         dashcdg_tx_cleanup();
         return 1;
     }
+    if (rx_stats_port <= 0) {
+        rx_stats_port = DASHCDG_DEFAULT_NETWORK_STATS_PORT;
+    }
 
     is_multicast = dashcdg_tx_ipv4_is_multicast(&destination_addr);
     is_broadcast = dashcdg_tx_ipv4_is_broadcast(&destination_addr);
@@ -7642,6 +7686,31 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
                 (const char *) &send_buffer_bytes,
                 sizeof(send_buffer_bytes)
         );
+#ifdef _WIN32
+        {
+            DWORD send_timeout_ms = (DWORD)DASHCDG_TX_SOCKET_SNDTIMEO_MS;
+            setsockopt(
+                    g_tx_state.sockfd,
+                    SOL_SOCKET,
+                    SO_SNDTIMEO,
+                    (const char *)&send_timeout_ms,
+                    sizeof(send_timeout_ms)
+            );
+        }
+#else
+        {
+            struct timeval send_timeout;
+            send_timeout.tv_sec = 0;
+            send_timeout.tv_usec = (int)(DASHCDG_TX_SOCKET_SNDTIMEO_MS * 1000U);
+            setsockopt(
+                    g_tx_state.sockfd,
+                    SOL_SOCKET,
+                    SO_SNDTIMEO,
+                    (const char *)&send_timeout,
+                    sizeof(send_timeout)
+            );
+        }
+#endif
     }
     if (!dashcdg_net_set_dscp(g_tx_state.sockfd, DASHCDG_NET_DSCP_DASHCDG_DEFAULT)) {
         perror("[tx] IP_TOS");
@@ -7691,6 +7760,29 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         struct sockaddr_in local_addr;
 
         setsockopt(g_tx_state.ptp_sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+        {
+#ifdef _WIN32
+            DWORD send_timeout_ms = (DWORD)DASHCDG_TX_SOCKET_SNDTIMEO_MS;
+            setsockopt(
+                    g_tx_state.ptp_sockfd,
+                    SOL_SOCKET,
+                    SO_SNDTIMEO,
+                    (const char *)&send_timeout_ms,
+                    sizeof(send_timeout_ms)
+            );
+#else
+            struct timeval send_timeout;
+            send_timeout.tv_sec = 0;
+            send_timeout.tv_usec = (int)(DASHCDG_TX_SOCKET_SNDTIMEO_MS * 1000U);
+            setsockopt(
+                    g_tx_state.ptp_sockfd,
+                    SOL_SOCKET,
+                    SO_SNDTIMEO,
+                    (const char *)&send_timeout,
+                    sizeof(send_timeout)
+            );
+#endif
+        }
         if (!dashcdg_net_set_dscp(g_tx_state.ptp_sockfd, DASHCDG_NET_DSCP_DASHCDG_DEFAULT)) {
             perror("[tx] ptp IP_TOS");
         }
@@ -7707,7 +7799,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
         memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
-        local_addr.sin_port = htons((uint16_t) port);
+        local_addr.sin_port = htons((uint16_t) rx_stats_port);
         local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
         if (bind(g_tx_state.ptp_sockfd, (struct sockaddr *) &local_addr, sizeof(local_addr)) != 0) {
             perror("bind");
@@ -7745,6 +7837,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     pthread_mutex_unlock(&g_tx_state.mutex);
 
     TX_OUT( "[tx] broadcasting to %s:%d\n", endpoint_address, port);
+    TX_OUT("[tx] rx-stats/PTP listen port: %d\n", rx_stats_port);
     TX_OUT( "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "v4 (default)" : "v3 (--v3)");
     if (g_tx_state.playlist_scan_running) {
         TX_OUT(

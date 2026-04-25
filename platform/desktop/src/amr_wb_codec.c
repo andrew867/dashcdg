@@ -5,7 +5,7 @@
 
 #include "typedef.h"
 #include "enc_if.h"
-#include "dec_if.h"
+#include "dec_if.h" /* NB_SERIAL_MAX, _lost_frame */
 
 #include "dashcdg/pcm_rate_convert.h"
 
@@ -131,6 +131,35 @@ int dashcdg_amr_wb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, i
         memcpy(bits, in, in_len);
         D_IF_decode(ctx->codec, bits, pcm16k, _good_frame);
     }
+    dashcdg_pcm_mono_resample_overlap(
+            ctx->tail,
+            &ctx->tail_valid,
+            ctx->stream_samples,
+            pcm16k,
+            DASHCDG_AMR_WB_PCM16K,
+            16000U,
+            pcm48_960,
+            DASHCDG_AMR_WB_PCM48K,
+            48000U,
+            ctx->work_in,
+            ctx->work_out,
+            DASHCDG_AMR_WB_RESAMPLE_WORK
+    );
+    ctx->stream_samples += DASHCDG_AMR_WB_PCM16K;
+    return (int) DASHCDG_AMR_WB_PCM48K;
+}
+
+int dashcdg_amr_wb_decoder_run_lost(void *opaque, int16_t *pcm48_960, size_t pcm_cap_samples)
+{
+    struct dashcdg_amr_wb_codec_ctx *ctx = (struct dashcdg_amr_wb_codec_ctx *) opaque;
+    Word16 pcm16k[DASHCDG_AMR_WB_PCM16K];
+    UWord8 bits[NB_SERIAL_MAX];
+
+    if (ctx == NULL || ctx->codec == NULL || pcm48_960 == NULL || pcm_cap_samples < DASHCDG_AMR_WB_PCM48K) {
+        return 0;
+    }
+    memset(bits, 0, sizeof(bits));
+    D_IF_decode(ctx->codec, bits, pcm16k, (Word32) _lost_frame);
     dashcdg_pcm_mono_resample_overlap(
             ctx->tail,
             &ctx->tail_valid,

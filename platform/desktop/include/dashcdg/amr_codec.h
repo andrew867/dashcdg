@@ -17,6 +17,8 @@ int dashcdg_amr_wb_encoder_run(void *opaque, const int16_t *pcm48_960, uint8_t *
 void dashcdg_amr_wb_decoder_create(void **opaque);
 void dashcdg_amr_wb_decoder_destroy(void *opaque);
 int dashcdg_amr_wb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, int16_t *pcm48_960, size_t pcm_cap_samples);
+/** Jitter advanced without a wire frame; run WB PLC so `D_IF` state matches the timeline (IF2 `bfi=_lost_frame`). */
+int dashcdg_amr_wb_decoder_run_lost(void *opaque, int16_t *pcm48_960, size_t pcm_cap_samples);
 
 void dashcdg_amr_nb_encoder_create(void **opaque);
 void dashcdg_amr_nb_encoder_destroy(void *opaque);
