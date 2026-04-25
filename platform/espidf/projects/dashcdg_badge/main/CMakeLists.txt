@@ -10,6 +10,8 @@ idf_component_register(
         "badge_ui_flair.c"
         "display_ui.c"
         "audio_lab_ui.c"
+        "audio_settings_ui.c"
+        "karaoke_settings_ui.c"
         "badge_lab_ym.c"
         "touch_cal_store.c"
         "touch_cal_ui.c"
@@ -17,6 +19,7 @@ idf_component_register(
         "badge_rx.c"
         "badge_cdg_rgb565.c"
         "vbat_sense.c"
+        "battery_label.c"
         "badge_prefs.c"
         "platform_hw.c"
     INCLUDE_DIRS "."
@@ -25,6 +28,7 @@ idf_component_register(
         esp_hw_support
         esp_app_format
         driver
+        esp_driver_dac
         esp_adc
         esp_lcd
         esp_timer
@@ -36,8 +40,9 @@ idf_component_register(
         esp_lcd_touch_xpt2046
         dashcdg_core
         dashcdg_proto
+        dashcdg_rx_audio
         lwip
 )
 
 # Match dashcdg_core jitter slot count so sizeof(*s_jb) in this component == core library.
-target_compile_definitions(${COMPONENT_LIB} PRIVATE DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT=16)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT=14)
