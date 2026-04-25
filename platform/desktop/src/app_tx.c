@@ -453,7 +453,38 @@ static void dashcdg_tx_sidecar_write_line(const char *line) {
     }
 }
 
-static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
+/* Format in a stack buffer then enqueue — keeps hot paths off blocking stdio. */
+#define TX_OUT(...) \
+    do { \
+        char _dashcdg_tx_log_buf[DASHCDG_ASYNC_LOG_LINE_MAX]; \
+        snprintf(_dashcdg_tx_log_buf, sizeof(_dashcdg_tx_log_buf), __VA_ARGS__); \
+        _dashcdg_tx_log_buf[sizeof(_dashcdg_tx_log_buf) - 1U] = '\0'; \
+        if (g_tx_logger_enabled) { \
+            dashcdg_async_logger_log_line(&g_tx_logger, DASHCDG_ASYNC_LOG_STDOUT, _dashcdg_tx_log_buf); \
+        } else { \
+            (void) fputs(_dashcdg_tx_log_buf, stdout); \
+            (void) fflush(stdout); \
+        } \
+    } while (0)
+
+#define TX_ERR(...) \
+    do { \
+        char _dashcdg_tx_log_buf[DASHCDG_ASYNC_LOG_LINE_MAX]; \
+        snprintf(_dashcdg_tx_log_buf, sizeof(_dashcdg_tx_log_buf), __VA_ARGS__); \
+        _dashcdg_tx_log_buf[sizeof(_dashcdg_tx_log_buf) - 1U] = '\0'; \
+        if (g_tx_logger_enabled) { \
+            dashcdg_async_logger_log_line(&g_tx_logger, DASHCDG_ASYNC_LOG_STDERR, _dashcdg_tx_log_buf); \
+        } else { \
+            (void) fputs(_dashcdg_tx_log_buf, stderr); \
+            (void) fflush(stderr); \
+        } \
+    } while (0)
+
+/*
+ * Boot async console + optional sidecar logging as early as possible so TX hot paths never block
+ * on stdio. Windows also opens a timestamped log next to the executable.
+ */
+static void dashcdg_tx_logger_boot(const char *argv0) {
 #ifdef _WIN32
     char exe_path[MAX_PATH];
     char dir_path[MAX_PATH];
@@ -467,6 +498,10 @@ static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
+        if (!dashcdg_async_logger_init(&g_tx_logger, NULL)) {
+            return;
+        }
+        g_tx_logger_enabled = 1;
         return;
     }
     strncpy(dir_path, exe_path, sizeof(dir_path) - 1U);
@@ -476,6 +511,10 @@ static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
         base = strrchr(dir_path, '/');
     }
     if (base == NULL) {
+        if (!dashcdg_async_logger_init(&g_tx_logger, NULL)) {
+            return;
+        }
+        g_tx_logger_enabled = 1;
         return;
     }
     *base++ = '\0';
@@ -510,6 +549,10 @@ static void dashcdg_tx_maybe_enable_sidecar_log(const char *argv0) {
     dashcdg_tx_async_stdout_line(line);
 #else
     (void) argv0;
+    if (!dashcdg_async_logger_init(&g_tx_logger, NULL)) {
+        return;
+    }
+    g_tx_logger_enabled = 1;
 #endif
 }
 
@@ -1541,8 +1584,7 @@ static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
 
                 scanned_tracks++;
                 if (scanned_tracks >= next_progress_log || (total_tracks > 0U && scanned_tracks >= total_tracks)) {
-                    fprintf(
-                            stdout,
+                    TX_OUT(
                             "[tx] scan: examined %zu/%zu .cdg files on disk, playlist %zu paired track%s (%zu new)\n",
                             scanned_tracks,
                             total_tracks,
@@ -1550,7 +1592,6 @@ static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
                             playlist_total == 1U ? "" : "s",
                             appended
                     );
-                    fflush(stdout);
                     next_progress_log += DASHCDG_TX_PLAYLIST_SCAN_PROGRESS_EVERY;
                 }
 
@@ -1571,8 +1612,7 @@ static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
         g_tx_state.playlist_scan_running = 0;
         pthread_mutex_unlock(&g_tx_state.mutex);
 
-        fprintf(
-                stdout,
+        TX_OUT(
                 "[tx] background scan complete: appended %zu paired track%s, playlist %zu/%zu .cdg on disk%s\n",
                 appended,
                 appended == 1U ? "" : "s",
@@ -1580,7 +1620,6 @@ static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
                 total_tracks,
                 did_shuffle ? " (includes periodic or final queue shuffle)" : ""
         );
-        fflush(stdout);
     }
 
     free(directory);
@@ -1726,12 +1765,12 @@ static int dashcdg_tx_apply_v4_audio_codec_name(const char *name, const char *ar
     const char *prog = argv0 != NULL ? argv0 : "desktop-tx";
 
     if (name == NULL || name[0] == '\0') {
-        fprintf(stderr, "%s: --v4-audio-codec requires a codec name\n", prog);
+        TX_ERR( "%s: --v4-audio-codec requires a codec name\n", prog);
         return 0;
     }
     if (strcmp(name, "opus") == 0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
-        fprintf(stderr, "%s: opus is not available in the retro build\n", prog);
+        TX_ERR( "%s: opus is not available in the retro build\n", prog);
         return 0;
 #else
         g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
@@ -1769,8 +1808,7 @@ static int dashcdg_tx_apply_v4_audio_codec_name(const char *name, const char *ar
         g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC;
         return 1;
     }
-    fprintf(
-            stderr,
+    TX_ERR(
             "%s: unknown v4 audio codec %s (try opus|sbc-like|celp13k|qcelp8k|amr-nb|amr-wb|bluetooth-sbc)\n",
             prog,
             name
@@ -1897,116 +1935,99 @@ static int dashcdg_tx_select_v4_audio_codec_locked(uint8_t codec_id) {
 
 static void dashcdg_tx_print_usage(const char *argv0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
-    fprintf(
-            stderr,
+    TX_ERR(
             "usage: %s [--help] [--v3] [--audio-profile=resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
-    fprintf(stderr, "  (retro: v4 wire format by default; --v3 for legacy v3 only; SBC-like audio)\n");
+    TX_ERR( "  (retro: v4 wire format by default; --v3 for legacy v3 only; SBC-like audio)\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
-    fprintf(
-            stderr,
+    TX_ERR(
             "usage: %s [--help] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
-    fprintf(stderr, "  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)\n");
+    TX_ERR( "  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)\n");
 #elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
-    fprintf(
-            stderr,
+    TX_ERR(
             "usage: %s [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
-    fprintf(stderr, "  v4 by default; --v3 for legacy v3. GDI preview on by default; --headless hides the window.\n");
+    TX_ERR( "  v4 by default; --v3 for legacy v3. GDI preview on by default; --headless hides the window.\n");
 #else
-    fprintf(
-            stderr,
+    TX_ERR(
             "usage: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
-    fprintf(stderr, "  v4 by default; --v3 for legacy v3. OpenGL preview for desktop-player tx; --headless sends without a window.\n");
+    TX_ERR( "  v4 by default; --v3 for legacy v3. OpenGL preview for desktop-player tx; --headless sends without a window.\n");
 #endif
-    fprintf(
-            stderr,
+    TX_ERR(
             "defaults: endpoint-address=%s port=%d\n",
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT
     );
-    fprintf(stderr, "default TX library: %s (reshuffled each time the playlist wraps)\n", DASHCDG_DEFAULT_LIBRARY_DIR);
-    fprintf(
-            stderr,
+    TX_ERR( "default TX library: %s (reshuffled each time the playlist wraps)\n", DASHCDG_DEFAULT_LIBRARY_DIR);
+    TX_ERR(
             "v4 audio: --v4-audio-codec=opus|sbc-like|celp13k|qcelp8k|amr-nb|amr-wb|bluetooth-sbc\n"
     );
-    fprintf(
-            stderr,
+    TX_ERR(
             "          --badnet-v4 (resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-qcelp8k\n"
     );
-    fprintf(stderr, "use --help or -h for full options, defaults, and TTY hotkeys.\n");
+    TX_ERR( "use --help or -h for full options, defaults, and TTY hotkeys.\n");
 }
 
 static void dashcdg_tx_cli_print_help(const char *argv0) {
     const char *prog = argv0 != NULL ? argv0 : "desktop-tx";
 
-    fprintf(stdout, "%s — desktop transmitter (v4 by default)\n\n", prog);
+    TX_OUT( "%s — desktop transmitter (v4 by default)\n\n", prog);
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
-    fprintf(
-            stdout,
+    TX_OUT(
             "Synopsis: %s [--help] [--v3] [--audio-profile=resilience] [--v4-audio-codec=...] "
             "[endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
-    fprintf(stdout, "Defaults: v4 wire, resilience profile, audio codec sbc-like (NB-IMA); no Opus in this build.\n");
+    TX_OUT( "Defaults: v4 wire, resilience profile, audio codec sbc-like (NB-IMA); no Opus in this build.\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
-    fprintf(
-            stdout,
+    TX_OUT(
             "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] "
             "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
-    fprintf(
-            stdout,
+    TX_OUT(
             "Defaults: v4, resilience profile, audio codec amr-wb (3GPP wideband @ 48 kHz session). "
             "Use --audio-profile=quality for Opus.\n"
     );
 #else
-    fprintf(
-            stdout,
+    TX_OUT(
             "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] "
             "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
-    fprintf(
-            stdout,
+    TX_OUT(
             "Defaults: v4, resilience profile, audio codec amr-wb (3GPP wideband @ 48 kHz session). "
             "Use --audio-profile=quality for Opus.\n"
     );
 #endif
-    fprintf(
-            stdout,
+    TX_OUT(
             "\n--audio-profile=resilience sets the v4 resilience/FEC profile only; it does not change the "
             "audio codec (default stays amr-wb unless you pass --v4-audio-codec).\n"
             "--audio-profile=quality selects the quality profile and switches the codec to Opus (non-retro builds).\n\n"
     );
-    fprintf(
-            stdout,
+    TX_OUT(
             "v4 audio codec (override): --v4-audio-codec=opus|sbc-like|celp13k|qcelp8k|amr-nb|amr-wb|bluetooth-sbc "
             "or two-arg --v4-audio-codec <name>.\n"
             "Shorthand: --badnet-v4 (same as resilience + amr-wb), --badnet-v4-sbc, --badnet-v4-qcelp8k.\n\n"
     );
-    fprintf(
-            stdout,
+    TX_OUT(
             "Network defaults: %s:%d  Library folder default: %s\n\n",
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT,
             DASHCDG_DEFAULT_LIBRARY_DIR
     );
-    fprintf(
-            stdout,
+    TX_OUT(
             "When stdin is a TTY, interactive keys apply (see startup banner). "
             "Press c to cycle the v4 audio codec in order; the sender re-issues session_info so receivers "
             "reconfigure decoders on the fly.\n"
     );
-    fprintf(
-            stdout,
+    TX_OUT(
             "\nPreview sync: --tx-preview-delay-ms <ms>|auto (default 0). "
             "Default draws CDG from the same network playback timeline as audio chunks (matches receivers using "
             "--rx-graphics-clock sender). "
@@ -2891,7 +2912,7 @@ static void dashcdg_tx_emit_rx_summary_locked(void) {
             (unsigned int) g_tx_state.v4_rx_best_buffer_ms,
             (unsigned int) g_tx_state.v4_rx_worst_buffer_ms
     );
-    fprintf(stdout, "%s\n", line);
+    TX_OUT( "%s\n", line);
     dashcdg_tx_sidecar_write_line(line);
 
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
@@ -2925,7 +2946,7 @@ static void dashcdg_tx_emit_rx_summary_locked(void) {
                 (unsigned int) slot->stats.target_total_latency_ms,
                 (int) slot->stats.drift_trim_ppm
         );
-        fprintf(stdout, "%s\n", line);
+        TX_OUT( "%s\n", line);
         dashcdg_tx_sidecar_write_line(line);
     }
 }
@@ -2945,8 +2966,7 @@ static void dashcdg_tx_log_v4_event_locked(const char *event_name, uint64_t now_
     if (event_name == NULL) {
         return;
     }
-    fprintf(
-            stdout,
+    TX_OUT(
             "[tx] event=%s mode=v4 now=%llu playback=%llu profile=%u codec=%u (%s) peak_window=%uB\n",
             event_name,
             (unsigned long long) now_ms,
@@ -2956,7 +2976,6 @@ static void dashcdg_tx_log_v4_event_locked(const char *event_name, uint64_t now_
             dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
             (unsigned int) g_tx_state.v4_peak_window_bytes
     );
-    fflush(stdout);
 }
 
 static void dashcdg_tx_copy_song_id_locked(char *output, size_t output_size) {
@@ -3472,7 +3491,7 @@ static void dashcdg_tx_print_status_locked(void) {
             (unsigned long long) playback_ms,
             (unsigned long long) g_tx_state.duration_ms
     );
-    fprintf(stdout, "%s\n", line);
+    TX_OUT( "%s\n", line);
     dashcdg_tx_sidecar_write_line(line);
     snprintf(
             line,
@@ -3529,7 +3548,7 @@ static void dashcdg_tx_print_status_locked(void) {
             g_tx_state.next_asset_offset,
             g_tx_state.cdg_snapshot_offset
     );
-    fprintf(stdout, "%s\n", line);
+    TX_OUT( "%s\n", line);
     dashcdg_tx_sidecar_write_line(line);
     if (g_tx_state.transport_v4_enabled) {
         snprintf(
@@ -3554,11 +3573,10 @@ static void dashcdg_tx_print_status_locked(void) {
                 g_tx_state.v4_video_anchor_size,
                 (unsigned int) dashcdg_tx_v4_startup_state_locked(now_ms)
         );
-        fprintf(stdout, "%s\n", line);
+        TX_OUT( "%s\n", line);
         dashcdg_tx_sidecar_write_line(line);
         dashcdg_tx_emit_rx_summary_locked();
     }
-    fflush(stdout);
 }
 
 static int dashcdg_tx_cdg_peek_file_header(const char *path, uint8_t *buf, size_t buf_cap, long *out_file_size, size_t *out_read) {
@@ -3627,20 +3645,18 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     dashcdg_cdg_state_init(&g_tx_state.live_cdg_state);
 
     track = &g_tx_state.playlist.tracks[index];
-    fprintf(
-            stdout,
+    TX_OUT(
             "[tx] preparing %s%s\n",
             track->title,
             apply_warmup ? " (queued with warmup)" : ""
     );
-    fflush(stdout);
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     if (1) {
 #else
     if (g_tx_state.display_requested || !g_tx_state.transport_v4_enabled) {
 #endif
         if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
-            fprintf(stderr, "failed to read CDG asset: %s\n", track->cdg_path);
+            TX_ERR( "failed to read CDG asset: %s\n", track->cdg_path);
             return 0;
         }
         {
@@ -3650,7 +3666,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
             dashcdg_cdg_compute_subchannel_trims(asset_bytes, asset_size, asset_size, &trim_prefix, &trim_suffix);
             dashcdg_tx_apply_cdg_subchannel_trims(asset_bytes, &asset_size, trim_prefix, trim_suffix);
             if (asset_size == 0U) {
-                fprintf(stderr, "CDG asset empty after subchannel trim: %s\n", track->cdg_path);
+                TX_ERR( "CDG asset empty after subchannel trim: %s\n", track->cdg_path);
                 free(asset_bytes);
                 return 0;
             }
@@ -3659,12 +3675,12 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
         dashcdg_cdg_reader_init(&g_tx_state.reader);
         if (!dashcdg_cdg_reader_load_memory(&g_tx_state.reader, asset_bytes, asset_size) ||
                 !dashcdg_cdg_reader_build_keyframes(&g_tx_state.reader)) {
-            fprintf(stderr, "failed to prepare TX preview/reader state for: %s\n", track->cdg_path);
+            TX_ERR( "failed to prepare TX preview/reader state for: %s\n", track->cdg_path);
             free(asset_bytes);
             return 0;
         }
         if (!dashcdg_cdg_source_open_memory(&next_source, asset_bytes, asset_size, 1)) {
-            fprintf(stderr, "failed to prepare in-memory CDG source: %s\n", track->cdg_path);
+            TX_ERR( "failed to prepare in-memory CDG source: %s\n", track->cdg_path);
             free(asset_bytes);
             return 0;
         }
@@ -3677,11 +3693,11 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
         size_t file_total = 0U;
 
         if (!dashcdg_tx_cdg_peek_file_header(track->cdg_path, peek_buf, sizeof peek_buf, &file_len_long, &peek_read)) {
-            fprintf(stderr, "failed to open CDG asset for alignment probe: %s\n", track->cdg_path);
+            TX_ERR( "failed to open CDG asset for alignment probe: %s\n", track->cdg_path);
             return 0;
         }
         if (file_len_long < 0) {
-            fprintf(stderr, "failed to size CDG asset: %s\n", track->cdg_path);
+            TX_ERR( "failed to size CDG asset: %s\n", track->cdg_path);
             return 0;
         }
         file_total = (size_t) file_len_long;
@@ -3689,23 +3705,23 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
 
         if (trim_prefix > 0U || trim_suffix > 0U) {
             if (!dashcdg_read_binary_file(track->cdg_path, &asset_bytes, &asset_size)) {
-                fprintf(stderr, "failed to read CDG asset for subchannel trim: %s\n", track->cdg_path);
+                TX_ERR( "failed to read CDG asset for subchannel trim: %s\n", track->cdg_path);
                 return 0;
             }
             dashcdg_tx_apply_cdg_subchannel_trims(asset_bytes, &asset_size, trim_prefix, trim_suffix);
             if (asset_size == 0U) {
-                fprintf(stderr, "CDG asset empty after subchannel trim: %s\n", track->cdg_path);
+                TX_ERR( "CDG asset empty after subchannel trim: %s\n", track->cdg_path);
                 free(asset_bytes);
                 return 0;
             }
             if (!dashcdg_cdg_source_open_memory(&next_source, asset_bytes, asset_size, 1)) {
-                fprintf(stderr, "failed to prepare in-memory CDG source after trim: %s\n", track->cdg_path);
+                TX_ERR( "failed to prepare in-memory CDG source after trim: %s\n", track->cdg_path);
                 free(asset_bytes);
                 return 0;
             }
         } else {
             if (!dashcdg_cdg_source_open_file(&next_source, track->cdg_path)) {
-                fprintf(stderr, "failed to open file-backed CDG source: %s\n", track->cdg_path);
+                TX_ERR( "failed to open file-backed CDG source: %s\n", track->cdg_path);
                 return 0;
             }
             asset_size = dashcdg_cdg_source_size(&next_source);
@@ -3723,7 +3739,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     if (g_tx_state.chunk_count > 0U) {
         g_tx_state.chunk_seen = (uint8_t *) calloc(g_tx_state.chunk_count, 1);
         if (g_tx_state.chunk_seen == NULL) {
-            fprintf(stderr, "failed to allocate TX chunk coverage bitmap\n");
+            TX_ERR( "failed to allocate TX chunk coverage bitmap\n");
             dashcdg_cdg_source_free(&g_tx_state.cdg_source);
             g_tx_state.asset_bytes = NULL;
             g_tx_state.asset_size = 0;
@@ -3864,11 +3880,11 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.beacon.available_asset_bytes = 0;
 
     if (!dashcdg_tx_build_cdg_batches_locked()) {
-        fprintf(stderr, "failed to build TX CDG batches\n");
+        TX_ERR( "failed to build TX CDG batches\n");
         return 0;
     }
     if (!dashcdg_tx_build_audio_frames_locked(track)) {
-        fprintf(stderr, "failed to build TX audio frames\n");
+        TX_ERR( "failed to build TX audio frames\n");
         return 0;
     }
 
@@ -3889,8 +3905,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
     dashcdg_tx_send_v4_track_bootstrap_locked(now_ms);
 
-    fprintf(
-            stdout,
+    TX_OUT(
             "[tx] loaded %s as %s broadcast%s\n",
             track->title,
             track->mp3_path != NULL ? "MP3+G" : "CDG-only",
@@ -3906,7 +3921,7 @@ static int dashcdg_tx_load_track_with_history_locked(size_t index, int apply_war
     }
 
     if (record_history && !dashcdg_tx_history_push_locked(index)) {
-        fprintf(stderr, "failed to record TX track history\n");
+        TX_ERR( "failed to record TX track history\n");
     }
 
     return 1;
@@ -5034,8 +5049,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                             &sbc_encoder
                     );
                     if (!codec_ready) {
-                        fprintf(
-                                stderr,
+                        TX_ERR(
                                 "[tx] audio: failed to initialize encoder for codec=%u; waiting for next codec/track change\n",
                                 (unsigned int) current_codec_id
                         );
@@ -5095,8 +5109,7 @@ static void *dashcdg_tx_audio_thread_main(void *unused) {
                         pthread_mutex_lock(&g_tx_state.mutex);
                         g_tx_state.audio_source_seek_failures++;
                         pthread_mutex_unlock(&g_tx_state.mutex);
-                        fprintf(
-                                stderr,
+                        TX_ERR(
                                 "[tx] warning: MP3 seek to %llu ms after codec/pipeline change failed\n",
                                 (unsigned long long) resume_ms
                         );
@@ -5699,8 +5712,7 @@ static void dashcdg_tx_console_sync_scroll_layout(size_t rows) {
     }
     if (rows < 2U) {
         if (g_tx_console.status_scroll_layout != 0) {
-            fprintf(stdout, "\033[r");
-            fflush(stdout);
+            TX_OUT( "\033[r");
             g_tx_console.status_scroll_layout = 0;
             g_tx_console.status_bar_valid = 0;
         }
@@ -5708,8 +5720,7 @@ static void dashcdg_tx_console_sync_scroll_layout(size_t rows) {
         return;
     }
     if (g_tx_console.status_scroll_layout == 0 || g_tx_console.layout_rows != rows) {
-        fprintf(stdout, "\033[r\033[1;%zur", rows - 1U);
-        fflush(stdout);
+        TX_OUT( "\033[r\033[1;%zur", rows - 1U);
         g_tx_console.status_scroll_layout = 1;
         g_tx_console.layout_rows = rows;
         g_tx_console.status_bar_valid = 0;
@@ -5736,8 +5747,7 @@ static void dashcdg_tx_console_scroll_log_past_status_row(void) {
     if (rows < 2U) {
         return;
     }
-    fprintf(stdout, "\033[%zu;1H\n", rows - 1U);
-    fflush(stdout);
+    TX_OUT( "\033[%zu;1H\n", rows - 1U);
 }
 
 static int dashcdg_tx_console_init(void) {
@@ -5960,7 +5970,7 @@ static void dashcdg_tx_draw_status_bar_locked(void) {
     if (!g_tx_console.status_bar_valid ||
             g_tx_console.last_status_row != rows ||
             g_tx_console.last_status_cols != cols) {
-        fprintf(stdout, "\033[s\033[%zu;1H\033[2K%s\033[u", rows, status_line);
+        TX_OUT( "\033[s\033[%zu;1H\033[2K%s\033[u", rows, status_line);
     } else {
         size_t first_diff = 0U;
         size_t old_length = g_tx_console.last_status_length;
@@ -5973,15 +5983,24 @@ static void dashcdg_tx_draw_status_bar_locked(void) {
 
         if (first_diff < old_length || first_diff < new_length) {
             size_t pad_spaces = old_length > new_length ? old_length - new_length : 0U;
+            char tty_buf[DASHCDG_ASYNC_LOG_LINE_MAX];
+            int n;
 
-            fprintf(stdout, "\033[s\033[%zu;%zuH%s", rows, first_diff + 1U, status_line + first_diff);
-            if (pad_spaces > 0U) {
-                fprintf(stdout, "%*s", (int) pad_spaces, "");
+            n = snprintf(
+                    tty_buf,
+                    sizeof(tty_buf),
+                    "\033[s\033[%zu;%zuH%s%*s\033[u",
+                    rows,
+                    first_diff + 1U,
+                    status_line + first_diff,
+                    (int) pad_spaces,
+                    "");
+            if (n < 0 || (size_t) n >= sizeof(tty_buf)) {
+                tty_buf[0] = '\0';
             }
-            fprintf(stdout, "\033[u");
+            dashcdg_tx_async_stdout_line(tty_buf);
         }
     }
-    fflush(stdout);
 
     strncpy(g_tx_console.last_status_line, status_line, sizeof(g_tx_console.last_status_line) - 1U);
     g_tx_console.last_status_line[sizeof(g_tx_console.last_status_line) - 1U] = '\0';
@@ -6025,7 +6044,7 @@ static void dashcdg_tx_draw_status_bar_unlocked(void) {
     if (!g_tx_console.status_bar_valid ||
             g_tx_console.last_status_row != rows ||
             g_tx_console.last_status_cols != cols) {
-        fprintf(stdout, "\033[s\033[%zu;1H\033[2K%s\033[u", rows, status_line);
+        TX_OUT( "\033[s\033[%zu;1H\033[2K%s\033[u", rows, status_line);
     } else {
         size_t first_diff = 0U;
         size_t old_length = g_tx_console.last_status_length;
@@ -6038,15 +6057,24 @@ static void dashcdg_tx_draw_status_bar_unlocked(void) {
 
         if (first_diff < old_length || first_diff < new_length) {
             size_t pad_spaces = old_length > new_length ? old_length - new_length : 0U;
+            char tty_buf[DASHCDG_ASYNC_LOG_LINE_MAX];
+            int n;
 
-            fprintf(stdout, "\033[s\033[%zu;%zuH%s", rows, first_diff + 1U, status_line + first_diff);
-            if (pad_spaces > 0U) {
-                fprintf(stdout, "%*s", (int) pad_spaces, "");
+            n = snprintf(
+                    tty_buf,
+                    sizeof(tty_buf),
+                    "\033[s\033[%zu;%zuH%s%*s\033[u",
+                    rows,
+                    first_diff + 1U,
+                    status_line + first_diff,
+                    (int) pad_spaces,
+                    "");
+            if (n < 0 || (size_t) n >= sizeof(tty_buf)) {
+                tty_buf[0] = '\0';
             }
-            fprintf(stdout, "\033[u");
+            dashcdg_tx_async_stdout_line(tty_buf);
         }
     }
-    fflush(stdout);
 
     strncpy(g_tx_console.last_status_line, status_line, sizeof(g_tx_console.last_status_line) - 1U);
     g_tx_console.last_status_line[sizeof(g_tx_console.last_status_line) - 1U] = '\0';
@@ -6057,13 +6085,11 @@ static void dashcdg_tx_draw_status_bar_unlocked(void) {
 }
 
 static void dashcdg_tx_print_controls_help(void) {
-    fprintf(
-            stdout,
+    TX_OUT(
             "[tx] controls: Space or p=play/pause, n or ]=next, b or [=back(history), u=reshuffle queue, r=restart, "
             "f=force-broadcast, c=cycle v4 audio codec, 1=opus, 2=amr-nb, 3=qcelp8k, 4=celp13k, 5=bluetooth-sbc, 6=amr-wb, "
             "s=status, i=toggle HUD, v=toggle preview, h=help, q=quit\n"
     );
-    fflush(stdout);
 }
 
 static int dashcdg_tx_handle_command(int command) {
@@ -6078,30 +6104,30 @@ static int dashcdg_tx_handle_command(int command) {
         case 'n':
         case ']':
             if (!dashcdg_tx_load_history_delta_locked(1)) {
-                fprintf(stdout, "[tx] no next track available\n");
+                TX_OUT( "[tx] no next track available\n");
             }
             break;
         case 'b':
         case '[':
             if (!dashcdg_tx_load_history_delta_locked(-1)) {
-                fprintf(stdout, "[tx] no previous history track available\n");
+                TX_OUT( "[tx] no previous history track available\n");
             }
             break;
         case 'u':
             if (dashcdg_tx_shuffle_pending_tracks_locked()) {
-                fprintf(stdout, "[tx] reshuffled pending playlist queue\n");
+                TX_OUT( "[tx] reshuffled pending playlist queue\n");
             } else {
-                fprintf(stdout, "[tx] no pending playlist tail available to reshuffle\n");
+                TX_OUT( "[tx] no pending playlist tail available to reshuffle\n");
             }
             break;
         case 'r':
             if (!dashcdg_tx_load_track_locked(g_tx_state.playlist.current_index, 1)) {
-                fprintf(stdout, "[tx] failed to restart current track\n");
+                TX_OUT( "[tx] failed to restart current track\n");
             }
             break;
         case 'f':
             dashcdg_tx_force_rebroadcast_locked();
-            fprintf(stdout, "[tx] force rebroadcast requested\n");
+            TX_OUT( "[tx] force rebroadcast requested\n");
             break;
         case 's':
             dashcdg_tx_print_status_locked();
@@ -6109,16 +6135,16 @@ static int dashcdg_tx_handle_command(int command) {
         case 'i':
             if (g_tx_state.display_requested) {
                 g_tx_state.preview_hud_visible = !g_tx_state.preview_hud_visible;
-                fprintf(stdout, "[tx] HUD %s\n", g_tx_state.preview_hud_visible ? "enabled" : "hidden");
+                TX_OUT( "[tx] HUD %s\n", g_tx_state.preview_hud_visible ? "enabled" : "hidden");
             } else {
-                fprintf(stdout, "[tx] HUD toggle requires a preview window (omit --headless or use desktop-gdi-tx.exe)\n");
+                TX_OUT( "[tx] HUD toggle requires a preview window (omit --headless or use desktop-gdi-tx.exe)\n");
             }
             break;
         case 'v':
             if (g_tx_state.display_requested) {
                 g_tx_state.preview_enabled = !g_tx_state.preview_enabled;
             } else {
-                fprintf(stdout, "[tx] preview toggle requires a preview window (omit --headless or use desktop-gdi-tx.exe)\n");
+                TX_OUT( "[tx] preview toggle requires a preview window (omit --headless or use desktop-gdi-tx.exe)\n");
             }
             break;
         case 'q':
@@ -6132,13 +6158,11 @@ static int dashcdg_tx_handle_command(int command) {
             if (g_tx_state.transport_v4_enabled) {
                 (void) dashcdg_tx_send_v4_session_info_locked(now_ms, session_packet, sizeof(session_packet));
             }
-            fprintf(
-                    stdout,
+            TX_OUT(
                     "[tx] v4 audio codec -> %s (id %u); session_info sent for receivers\n",
                     dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
                     (unsigned int) g_tx_state.v4_audio_codec_id
             );
-            fflush(stdout);
             break;
         }
         case '1':
@@ -6170,14 +6194,12 @@ static int dashcdg_tx_handle_command(int command) {
             if (g_tx_state.transport_v4_enabled && changed) {
                 (void) dashcdg_tx_send_v4_session_info_locked(now_ms, session_packet, sizeof(session_packet));
             }
-            fprintf(
-                    stdout,
+            TX_OUT(
                     "[tx] v4 audio codec -> %s (id %u)%s\n",
                     dashcdg_tx_v4_codec_cli_name(g_tx_state.v4_audio_codec_id),
                     (unsigned int) g_tx_state.v4_audio_codec_id,
                     changed ? "; session_info sent for receivers" : "; unchanged"
             );
-            fflush(stdout);
             break;
         }
         case 'h':
@@ -6228,8 +6250,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
         }
         if (command != 0) {
             if (!dashcdg_tx_handle_command(command)) {
-                fprintf(
-                        stdout,
+                TX_OUT(
                         "[tx] unknown command '%c'\n",
                         isprint(command) ? command : '?'
                 );
@@ -6241,8 +6262,7 @@ static void *dashcdg_tx_control_thread_main(void *unused) {
     }
 
     if (g_tx_console.status_bar_enabled) {
-        fprintf(stdout, "\033[r");
-        fflush(stdout);
+        TX_OUT( "\033[r");
     }
     dashcdg_tx_console_shutdown();
     return NULL;
@@ -7026,9 +7046,9 @@ static void *dashcdg_tx_render_thread_main(void *user_data) {
     glewInit();
 
     if (!dashcdg_gl_renderer_init(&g_tx_state.renderer)) {
-        fprintf(stderr, "failed to initialize TX preview renderer\n");
+        TX_ERR( "failed to initialize TX preview renderer\n");
 #ifdef _WIN32
-        fprintf(stderr, "[tx] falling back to Win32 GDI preview\n");
+        TX_ERR( "[tx] falling back to Win32 GDI preview\n");
         glutDestroyWindow(glutGetWindow());
         dashcdg_tx_run_win32_gdi_preview_loop(argc, argv);
         goto dashcdg_tx_render_thread_done;
@@ -7115,7 +7135,7 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
                 dashcdg_tx_win32_gdi_on_key,
                 (void *) &view
         )) {
-        fprintf(stderr, "[tx] failed to create Win32 GDI preview window\n");
+        TX_ERR( "[tx] failed to create Win32 GDI preview window\n");
         g_tx_state.shutdown_requested = 1;
         return;
     }
@@ -7304,16 +7324,31 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     size_t startup_seed_start = 0U;
     int help_i;
 
+    dashcdg_tx_logger_boot(argv[0] != NULL ? argv[0] : "desktop-tx");
+
     for (help_i = 1; help_i < argc; ++help_i) {
         if (strcmp(argv[help_i], "--help") == 0 || strcmp(argv[help_i], "-h") == 0 || strcmp(argv[help_i], "-?") == 0) {
             dashcdg_tx_cli_print_help(argv[0] != NULL ? argv[0] : "desktop-tx");
+            if (g_tx_logger_enabled) {
+                dashcdg_async_logger_shutdown(&g_tx_logger);
+                g_tx_logger_enabled = 0;
+            }
             return 0;
         }
     }
 
-    dashcdg_tx_maybe_enable_sidecar_log(argv[0]);
-    fprintf(stdout, "[tx] build: %s\n", DASHCDG_BUILD_VERSION);
-    fflush(stdout);
+    {
+        char build_line[256];
+
+        snprintf(build_line, sizeof(build_line), "[tx] build: %s\n", DASHCDG_BUILD_VERSION);
+        build_line[sizeof(build_line) - 1U] = '\0';
+        if (g_tx_logger_enabled) {
+            dashcdg_async_logger_log_line(&g_tx_logger, DASHCDG_ASYNC_LOG_STDOUT, build_line);
+        } else {
+            (void) fputs(build_line, stdout);
+            (void) fflush(stdout);
+        }
+    }
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
@@ -7363,7 +7398,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
                 sizeof(struct dashcdg_tx_audio_frame),
                 DASHCDG_TX_AUDIO_QUEUE_CAPACITY
         )) {
-        fprintf(stderr, "failed to initialize TX audio queue\n");
+        TX_ERR( "failed to initialize TX audio queue\n");
         pthread_mutex_destroy(&g_tx_state.mutex);
         return 1;
     }
@@ -7380,8 +7415,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
             continue;
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
-            fprintf(
-                    stderr,
+            TX_ERR(
                     "%s: this build is headless-only; use desktop-gdi-tx.exe or `desktop-player tx` for a preview window\n",
                     argv[0]
             );
@@ -7414,7 +7448,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--tx-preview-delay-ms") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s: --tx-preview-delay-ms requires auto|<milliseconds>\n", argv[0]);
+                TX_ERR( "%s: --tx-preview-delay-ms requires auto|<milliseconds>\n", argv[0]);
                 dashcdg_tx_cleanup();
                 return 1;
             }
@@ -7423,7 +7457,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
                 g_tx_state.tx_preview_delay_ms = UINT32_MAX;
             } else {
                 if (!dashcdg_tx_is_number(argv[i])) {
-                    fprintf(stderr, "%s: --tx-preview-delay-ms expects auto or a non-negative integer\n", argv[0]);
+                    TX_ERR( "%s: --tx-preview-delay-ms expects auto or a non-negative integer\n", argv[0]);
                     dashcdg_tx_cleanup();
                     return 1;
                 }
@@ -7440,7 +7474,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--v4-audio-codec") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s: --v4-audio-codec requires a value\n", argv[0]);
+                TX_ERR( "%s: --v4-audio-codec requires a value\n", argv[0]);
                 dashcdg_tx_cleanup();
                 return 1;
             }
@@ -7457,7 +7491,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--audio-profile=quality") == 0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
-            fprintf(stderr, "%s: --audio-profile=quality (Opus) is not available in retro build\n", argv[0]);
+            TX_ERR( "%s: --audio-profile=quality (Opus) is not available in retro build\n", argv[0]);
             dashcdg_tx_cleanup();
             return 1;
 #else
@@ -7500,7 +7534,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     if (!dashcdg_tx_parse_ipv4_address(endpoint_address, &destination_addr)) {
-        fprintf(stderr, "invalid endpoint address: %s\n", endpoint_address);
+        TX_ERR( "invalid endpoint address: %s\n", endpoint_address);
         dashcdg_tx_cleanup();
         return 1;
     }
@@ -7551,11 +7585,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     if (dashcdg_path_is_directory(source_path)) {
-        fprintf(stdout, "[tx] scanning folder for random startup window: %s\n", source_path);
-        fflush(stdout);
+        TX_OUT( "[tx] scanning folder for random startup window: %s\n", source_path);
         startup_track_total = dashcdg_tx_count_directory_tracks(source_path);
         if (startup_track_total == 0U) {
-            fprintf(stderr, "failed to find any CDG tracks in folder: %s\n", source_path);
+            TX_ERR( "failed to find any CDG tracks in folder: %s\n", source_path);
             dashcdg_tx_cleanup();
             return 1;
         }
@@ -7570,7 +7603,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
                     startup_seed_start,
                     DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT
             )) {
-            fprintf(stderr, "failed to build transmitter playlist from folder: %s\n", source_path);
+            TX_ERR( "failed to build transmitter playlist from folder: %s\n", source_path);
             dashcdg_tx_cleanup();
             return 1;
         }
@@ -7582,13 +7615,13 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         g_tx_state.playlist_scan_running =
                 g_tx_state.playlist_scan_directory != NULL && g_tx_state.playlist.count < g_tx_state.playlist_scan_total_tracks;
     } else if (!dashcdg_tx_playlist_add_auto_paired_track(&g_tx_state.playlist, source_path)) {
-        fprintf(stderr, "failed to resolve transmitter source path: %s\n", source_path);
+        TX_ERR( "failed to resolve transmitter source path: %s\n", source_path);
         dashcdg_tx_cleanup();
         return 1;
     }
 
     if (!dashcdg_net_init()) {
-        fprintf(stderr, "failed to initialize network stack\n");
+        TX_ERR( "failed to initialize network stack\n");
         dashcdg_tx_cleanup();
         return 1;
     }
@@ -7711,11 +7744,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
-    fprintf(stdout, "[tx] broadcasting to %s:%d\n", endpoint_address, port);
-    fprintf(stdout, "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "v4 (default)" : "v3 (--v3)");
+    TX_OUT( "[tx] broadcasting to %s:%d\n", endpoint_address, port);
+    TX_OUT( "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "v4 (default)" : "v3 (--v3)");
     if (g_tx_state.playlist_scan_running) {
-        fprintf(
-                stdout,
+        TX_OUT(
                 "[tx] startup seed: %zu paired tracks loaded / %zu .cdg files on disk (window start index %zu); background scan continues\n",
                 g_tx_state.playlist.count,
                 g_tx_state.playlist_scan_total_tracks,
@@ -7723,46 +7755,44 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         );
     }
     if (g_tx_state.display_requested) {
-        fprintf(stdout, "[tx] preview enabled; HUD hidden by default, press I to toggle it\n");
+        TX_OUT( "[tx] preview enabled; HUD hidden by default, press I to toggle it\n");
     }
     if (is_multicast && multicast_interface_count > 0U) {
         char preferred_interface[192];
 
         dashcdg_tx_format_multicast_interface(&multicast_interfaces[0], preferred_interface, sizeof(preferred_interface));
-        fprintf(
-                stdout,
+        TX_OUT(
                 "[tx] multicast preferred interface: %s (joined PTP listener on %u interface%s)\n",
                 preferred_interface,
                 (unsigned int) joined_interface_count,
                 joined_interface_count == 1U ? "" : "s"
         );
     }
-    fflush(stdout);
 
     pthread_create(&g_tx_state.audio_thread, NULL, dashcdg_tx_audio_thread_main, NULL);
     g_tx_state.tx_audio_send_thread_created =
             pthread_create(&g_tx_state.tx_audio_send_thread, NULL, dashcdg_tx_audio_send_thread_main, NULL) == 0;
     if (!g_tx_state.tx_audio_send_thread_created) {
-        fprintf(stderr, "failed to start TX audio send thread\n");
+        TX_ERR( "failed to start TX audio send thread\n");
     }
     pthread_create(&g_tx_state.tx_thread, NULL, dashcdg_tx_thread_main, NULL);
     pthread_create(&g_tx_state.ptp_thread, NULL, dashcdg_tx_ptp_thread_main, NULL);
     g_tx_state.control_thread_created =
             pthread_create(&g_tx_state.control_thread, NULL, dashcdg_tx_control_thread_main, NULL) == 0;
     if (!g_tx_state.control_thread_created) {
-        fprintf(stderr, "failed to start TX control thread\n");
+        TX_ERR( "failed to start TX control thread\n");
     }
     g_tx_state.status_thread_created =
             pthread_create(&g_tx_state.status_thread, NULL, dashcdg_tx_status_thread_main, NULL) == 0;
     if (!g_tx_state.status_thread_created) {
-        fprintf(stderr, "failed to start TX status thread\n");
+        TX_ERR( "failed to start TX status thread\n");
     }
     if (g_tx_state.playlist_scan_running) {
         g_tx_state.playlist_scan_thread_created =
                 pthread_create(&g_tx_state.playlist_scan_thread, NULL, dashcdg_tx_playlist_scan_thread_main, NULL) == 0;
         if (!g_tx_state.playlist_scan_thread_created) {
             g_tx_state.playlist_scan_running = 0;
-            fprintf(stderr, "failed to start background playlist scan thread\n");
+            TX_ERR( "failed to start background playlist scan thread\n");
         }
     }
 
@@ -7822,7 +7852,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     dashcdg_tx_cleanup();
     return 0;
 #elif defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
-    fprintf(stderr, "[tx] internal error: display path disabled in retro build\n");
+    TX_ERR( "[tx] internal error: display path disabled in retro build\n");
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
     if (g_tx_state.tx_audio_send_thread_created) {
@@ -7838,7 +7868,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     dashcdg_tx_cleanup();
     return 1;
 #else
-    fprintf(stderr, "[tx] internal error: preview window requested but not available in this build\n");
+    TX_ERR( "[tx] internal error: preview window requested but not available in this build\n");
     g_tx_state.shutdown_requested = 1;
     pthread_join(g_tx_state.tx_thread, NULL);
     if (g_tx_state.tx_audio_send_thread_created) {

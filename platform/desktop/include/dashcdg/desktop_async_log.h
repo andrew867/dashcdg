@@ -13,7 +13,8 @@ enum dashcdg_async_log_stream {
 };
 
 #define DASHCDG_ASYNC_LOG_QUEUE_CAPACITY 1024U
-#define DASHCDG_ASYNC_LOG_LINE_MAX 512U
+/* Large enough for TTY status-bar redraws (ANSI + padded remainder of a ~512-char line). */
+#define DASHCDG_ASYNC_LOG_LINE_MAX 1536U
 
 struct dashcdg_async_log_item {
     uint8_t stream;

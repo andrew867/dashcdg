@@ -10,7 +10,6 @@ DASHCDG_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 
 DASHCDG_GIT_HASH ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || printf 'unknown')
 DASHCDG_BUILD_VERSION ?= dev-$(DASHCDG_GIT_BRANCH)-g$(DASHCDG_GIT_HASH)
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
-CFLAGS += -DDASHCDG_BUILD_VERSION=\"$(DASHCDG_BUILD_VERSION)\"
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 # Opus / PortAudio link flags (expanded after MINGW_ARCH is known on Windows). Linux: set DASHCDG_OPUS_VENDOR=1 and prefixes if needed.
@@ -287,6 +286,20 @@ DESKTOP_TX_RETRO_OBJECT := $(OBJ_DIR)/desktop_app_tx_retro.o
 DESKTOP_RX_GL_OBJECT := $(OBJ_DIR)/desktop_app_rx.o
 DESKTOP_RX_GDI_OBJECT := $(OBJ_DIR)/desktop_app_rx_gdi.o
 DESKTOP_RX_RETRO_GDI_OBJECT := $(OBJ_DIR)/desktop_app_rx_retro_gdi.o
+
+# Generated header avoids fragile -DDASHCDG_BUILD_VERSION=... quoting (hyphenated git branch names on MSYS/MinGW).
+$(BUILD_DIR)/dashcdg_build_version_gen.h: Makefile
+	@mkdir -p '$(BUILD_DIR)'
+	@echo '#define DASHCDG_BUILD_VERSION "$(DASHCDG_BUILD_VERSION)"' > '$@'
+
+CFLAGS += -include $(BUILD_DIR)/dashcdg_build_version_gen.h
+
+# Eager create: parallel -j can compile desktop_async_log.o (etc.) before any desktop_app_*.o rule runs;
+# avoid '#...' in $(shell) (make treats # as a comment). Sed turns the leading X into #.
+$(shell mkdir -p '$(BUILD_DIR)' 2>/dev/null && printf '%s\n' 'Xdefine DASHCDG_BUILD_VERSION "$(DASHCDG_BUILD_VERSION)"' | sed '1s/^X/#/' > '$(BUILD_DIR)/dashcdg_build_version_gen.h')
+
+# Merge prerequisite into every object rule under $(OBJ_DIR) (empty recipe = prerequisite only).
+$(OBJ_DIR)/%.o: $(BUILD_DIR)/dashcdg_build_version_gen.h ;
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a

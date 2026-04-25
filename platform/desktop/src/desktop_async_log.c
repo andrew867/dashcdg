@@ -33,6 +33,7 @@ static void *dashcdg_async_logger_thread_main(void *userdata) {
     struct dashcdg_async_logger *logger = (struct dashcdg_async_logger *) userdata;
     uint64_t dropped_to_report = 0U;
     time_t last_flush_time = time(NULL);
+    unsigned int tty_writes_since_flush = 0U;
 
 #ifdef _WIN32
     (void) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -93,11 +94,26 @@ static void *dashcdg_async_logger_thread_main(void *userdata) {
         {
             if (item.stream != DASHCDG_ASYNC_LOG_SIDECAR_ONLY) {
                 FILE *stream = item.stream == DASHCDG_ASYNC_LOG_STDERR ? stderr : stdout;
-                fprintf(stream, "%s\n", item.line);
-                fflush(stream);
+
+                (void) fputs(item.line, stream);
+                if (memchr(item.line, '\033', strlen(item.line)) != NULL) {
+                    (void) fflush(stream);
+                    tty_writes_since_flush = 0U;
+                } else {
+                    tty_writes_since_flush++;
+                    if (tty_writes_since_flush >= 32U) {
+                        (void) fflush(stream);
+                        tty_writes_since_flush = 0U;
+                    }
+                }
             }
-            if (logger->sidecar_file != NULL) {
-                fprintf(logger->sidecar_file, "%s\n", item.line);
+            /*
+             * Skip ANSI cursor / scroll-region control strings in the sidecar text log — they are
+             * not human-readable and would clutter the file.
+             */
+            if (logger->sidecar_file != NULL && memchr(item.line, '\033', strlen(item.line)) == NULL) {
+                (void) fputs(item.line, logger->sidecar_file);
+                (void) fputc('\n', logger->sidecar_file);
             }
         }
         if (logger->sidecar_file != NULL) {
@@ -113,6 +129,8 @@ static void *dashcdg_async_logger_thread_main(void *userdata) {
     if (logger->sidecar_file != NULL) {
         fflush(logger->sidecar_file);
     }
+    (void) fflush(stdout);
+    (void) fflush(stderr);
     return NULL;
 }
 
@@ -129,8 +147,8 @@ int dashcdg_async_logger_init(struct dashcdg_async_logger *logger, const char *s
     }
     logger->sync_fallback = dashcdg_async_logger_should_use_sync_fallback();
     if (logger->sync_fallback) {
-    logger->started = 1;
-    return 1;
+        logger->started = 1;
+        return 1;
     }
     pthread_mutex_init(&logger->mutex, NULL);
     pthread_cond_init(&logger->cond, NULL);
@@ -159,7 +177,7 @@ void dashcdg_async_logger_shutdown(struct dashcdg_async_logger *logger) {
         pthread_join(logger->thread, NULL);
         logger->started = 0;
     } else {
-    logger->started = 0;
+        logger->started = 0;
     }
     if (logger->sidecar_file != NULL) {
         fflush(logger->sidecar_file);
@@ -179,21 +197,41 @@ void dashcdg_async_logger_log_line(
 ) {
     size_t len;
     struct dashcdg_async_log_item *item;
+    char normalized[DASHCDG_ASYNC_LOG_LINE_MAX];
 
     if (logger == NULL || !logger->started || line == NULL || line[0] == '\0') {
         return;
     }
 
+    len = strlen(line);
+    if (len >= sizeof(normalized)) {
+        len = sizeof(normalized) - 1U;
+    }
+    memcpy(normalized, line, len);
+    normalized[len] = '\0';
+    /*
+     * Plain log lines expect a trailing newline for TTY readability. ANSI control bursts (status
+     * bar, scroll setup) embed ESC and must not get an extra newline appended.
+     */
+    if (memchr(normalized, '\033', len) == NULL && (len == 0U || normalized[len - 1U] != '\n') &&
+            len + 1U < sizeof(normalized)) {
+        normalized[len] = '\n';
+        len++;
+        normalized[len] = '\0';
+    }
+    line = normalized;
+
     if (logger->sync_fallback) {
         if (stream != DASHCDG_ASYNC_LOG_SIDECAR_ONLY) {
-        FILE *out = stream == DASHCDG_ASYNC_LOG_STDERR ? stderr : stdout;
+            FILE *out = stream == DASHCDG_ASYNC_LOG_STDERR ? stderr : stdout;
 
-        fprintf(out, "%s\n", line);
-        fflush(out);
+            (void) fputs(line, out);
+            (void) fflush(out);
         }
-        if (logger->sidecar_file != NULL) {
-            fprintf(logger->sidecar_file, "%s\n", line);
-            fflush(logger->sidecar_file);
+        if (logger->sidecar_file != NULL && memchr(line, '\033', strlen(line)) == NULL) {
+            (void) fputs(line, logger->sidecar_file);
+            (void) fputc('\n', logger->sidecar_file);
+            (void) fflush(logger->sidecar_file);
         }
         return;
     }

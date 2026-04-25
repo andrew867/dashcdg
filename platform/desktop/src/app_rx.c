@@ -549,6 +549,39 @@ static void dashcdg_rx_sidecar_write_line(const char *line) {
     }
 }
 
+#define RX_OUT(...) \
+    do { \
+        char _dashcdg_rx_log_buf[DASHCDG_ASYNC_LOG_LINE_MAX]; \
+        snprintf(_dashcdg_rx_log_buf, sizeof(_dashcdg_rx_log_buf), __VA_ARGS__); \
+        _dashcdg_rx_log_buf[sizeof(_dashcdg_rx_log_buf) - 1U] = '\0'; \
+        if (g_rx_logger_enabled) { \
+            dashcdg_async_logger_log_line(&g_rx_logger, DASHCDG_ASYNC_LOG_STDOUT, _dashcdg_rx_log_buf); \
+        } else { \
+            (void) fputs(_dashcdg_rx_log_buf, stdout); \
+            (void) fflush(stdout); \
+        } \
+    } while (0)
+
+#define RX_ERR(...) \
+    do { \
+        char _dashcdg_rx_log_buf[DASHCDG_ASYNC_LOG_LINE_MAX]; \
+        snprintf(_dashcdg_rx_log_buf, sizeof(_dashcdg_rx_log_buf), __VA_ARGS__); \
+        _dashcdg_rx_log_buf[sizeof(_dashcdg_rx_log_buf) - 1U] = '\0'; \
+        if (g_rx_logger_enabled) { \
+            dashcdg_async_logger_log_line(&g_rx_logger, DASHCDG_ASYNC_LOG_STDERR, _dashcdg_rx_log_buf); \
+        } else { \
+            (void) fputs(_dashcdg_rx_log_buf, stderr); \
+            (void) fflush(stderr); \
+        } \
+    } while (0)
+
+static void dashcdg_rx_logger_shutdown_if_needed(void) {
+    if (g_rx_logger_enabled) {
+        dashcdg_async_logger_shutdown(&g_rx_logger);
+        g_rx_logger_enabled = 0;
+    }
+}
+
 static void dashcdg_rx_init_receiver_instance_id(void) {
     uint64_t seed = (uint64_t) dashcdg_clock_now_ms();
 
@@ -564,7 +597,7 @@ static void dashcdg_rx_init_receiver_instance_id(void) {
     }
 }
 
-static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
+static void dashcdg_rx_logger_boot(const char *argv0) {
 #ifdef _WIN32
     char exe_path[MAX_PATH];
     char dir_path[MAX_PATH];
@@ -578,6 +611,10 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
+        if (!dashcdg_async_logger_init(&g_rx_logger, NULL)) {
+            return;
+        }
+        g_rx_logger_enabled = 1;
         return;
     }
     strncpy(dir_path, exe_path, sizeof(dir_path) - 1U);
@@ -587,6 +624,10 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
         base = strrchr(dir_path, '/');
     }
     if (base == NULL) {
+        if (!dashcdg_async_logger_init(&g_rx_logger, NULL)) {
+            return;
+        }
+        g_rx_logger_enabled = 1;
         return;
     }
     *base++ = '\0';
@@ -621,6 +662,10 @@ static void dashcdg_rx_maybe_enable_sidecar_log(const char *argv0) {
     dashcdg_rx_async_stdout_line(line);
 #else
     (void) argv0;
+    if (!dashcdg_async_logger_init(&g_rx_logger, NULL)) {
+        return;
+    }
+    g_rx_logger_enabled = 1;
 #endif
 }
 
@@ -1055,70 +1100,61 @@ static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
 
 static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
-    fprintf(
-            stderr,
+    RX_ERR(
             "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
             "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
             argv0
     );
-    fprintf(stderr, "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
-    fprintf(stderr, "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
+    RX_ERR( "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
+    RX_ERR( "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
 #else
-    fprintf(
-            stderr,
+    RX_ERR(
             "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-av-sync-log-ms <ms>]\n"
             "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [endpoint-address] [port]\n",
             argv0
     );
 #endif
-    fprintf(
-            stderr,
+    RX_ERR(
             "defaults: endpoint-address=%s port=%d\n",
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT
     );
-    fprintf(stderr, "use --help or -h for receiver behaviour and v4 session notes.\n");
+    RX_ERR( "use --help or -h for receiver behaviour and v4 session notes.\n");
 }
 
 static void dashcdg_rx_cli_print_help(const char *argv0) {
     const char *prog = argv0 != NULL ? argv0 : "desktop-rx";
 
-    fprintf(stdout, "%s — desktop receiver (v4 + v3)\n\n", prog);
+    RX_OUT( "%s — desktop receiver (v4 + v3)\n\n", prog);
 #if DASHCDG_RX_HAVE_GLUT
-    fprintf(
-            stdout,
+    RX_OUT(
             "Synopsis: %s [--help] [--headless] [--rx-drop-audio] [--rx-av-sync-log-ms <ms>] [--rx-graphics-clock dac|sender] "
             "[--win-gdi|--gdi] [endpoint-address] [port]\n\n",
             prog
     );
-    fprintf(
-            stdout,
+    RX_OUT(
             "Listens for UDP multicast/broadcast on the given endpoint. Windowed mode shows CD+G; "
             "HUD is hidden by default (press I). M toggles mute; D toggles audio decode/drop; S prints a stats line.\n\n"
     );
 #else
-    fprintf(stdout, "Synopsis: %s [--help] [--headless] [endpoint-address] [port]\n\n", prog);
+    RX_OUT( "Synopsis: %s [--help] [--headless] [endpoint-address] [port]\n\n", prog);
 #endif
-    fprintf(
-            stdout,
+    RX_OUT(
             "V4 audio: decoders follow each v4_session_info packet. When the transmitter changes "
             "audio_codec_id (CLI --v4-audio-codec or the c hotkey on TX), the receiver tears down "
             "the old decoder, re-opens PortAudio if needed, and continues with the new codec.\n\n"
     );
-    fprintf(
-            stdout,
+    RX_OUT(
             "Network defaults: %s:%d\n",
             DASHCDG_DEFAULT_NETWORK_ADDRESS,
             DASHCDG_DEFAULT_NETWORK_PORT
     );
-    fprintf(
-            stdout,
+    RX_OUT(
             "\n--rx-stats-ms <ms>: v4 only; send periodic observability to the session endpoint "
             "(default %u ms; 0 disables). Transmitters listen on the same UDP port (PTP path) and count them.\n",
             (unsigned) DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS
     );
-    fprintf(
-            stdout,
+    RX_OUT(
             "\n--rx-av-sync-log-ms <ms>: stderr timeline line every N ms (0 = off) — dac vs sender vs snapshot.\n"
             "--rx-graphics-clock dac|sender: dac = align raster to locally heard audio; "
             "sender = network lyrics timeline (default).\n"
@@ -1366,8 +1402,7 @@ static void receiver_state_try_finalize(struct receiver_state *state) {
 
     state->reader_ready = 1;
     state->last_progress_local_ms = dashcdg_clock_now_ms();
-    fprintf(stdout, "[rx] asset ready for %s\n", state->song_id[0] == '\0' ? "<unknown>" : state->song_id);
-    fflush(stdout);
+    RX_OUT( "[rx] asset ready for %s\n", state->song_id[0] == '\0' ? "<unknown>" : state->song_id);
 }
 
 static uint64_t dashcdg_rx_deadline_after_ms(uint64_t local_now_ms, uint32_t delta_ms) {
@@ -3056,8 +3091,7 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat"
 #endif
-            fprintf(
-                    stderr,
+            RX_ERR(
                     "[rx-av-sync] dac=%d:%" DASHCDG_RX_PRIu64 " sender=%d:%" DASHCDG_RX_PRIu64
                     " snap=%d q=%ums tgt=%u host=%u trim=%dppm clock=%s\n",
                     have_dac,
@@ -4224,8 +4258,7 @@ static void dashcdg_rx_print_status_locked(void) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat"
 #endif
-    fprintf(
-            stdout,
+    RX_OUT(
             "[rx] net: dg=%" DASHCDG_RX_PRIu64 " bytes=%" DASHCDG_RX_PRIu64 " parse_fail=%" DASHCDG_RX_PRIu64
             " | pkt ann=%" DASHCDG_RX_PRIu64 " ch=%" DASHCDG_RX_PRIu64 " bc=%" DASHCDG_RX_PRIu64 " aud=%" DASHCDG_RX_PRIu64
             " live=%" DASHCDG_RX_PRIu64 " snap=%" DASHCDG_RX_PRIu64 "/%" DASHCDG_RX_PRIu64 " fec=%" DASHCDG_RX_PRIu64
@@ -4334,7 +4367,6 @@ static void dashcdg_rx_print_status_locked(void) {
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
-    fflush(stdout);
     dashcdg_rx_sidecar_write_line("[rx] status emitted; see console for full live line");
 }
 
@@ -4493,8 +4525,7 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
                         dashcdg_rx_portaudio_output_channels(view->announce.audio_channels),
                         dashcdg_rx_network_stream_ring_ms(view->announce.playout_delay_ms, DASHCDG_V4_AUDIO_CODEC_OPUS)
                 )) {
-                fprintf(stderr, "[rx] announce: desktop_audio_init_stream failed\n");
-                fflush(stderr);
+                RX_ERR( "[rx] announce: desktop_audio_init_stream failed\n");
                 g_audio_stream_started = 0;
                 g_audio_start_inflight = 0;
                 state->rx_audio_applied_valid = 0;
@@ -4527,8 +4558,7 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
     }
 
     if (song_changed || session_changed || asset_changed) {
-        fprintf(stdout, "[rx] announced %s (%u bytes)\n", state->song_id, view->announce.asset_size);
-        fflush(stdout);
+        RX_OUT( "[rx] announced %s (%u bytes)\n", state->song_id, view->announce.asset_size);
     }
 }
 
@@ -4589,14 +4619,12 @@ static void dashcdg_rx_configure_audio_locked(
                 host_ch,
                 buffer_ms
         )) {
-        fprintf(
-                stderr,
+        RX_ERR(
                 "[rx] audio: init_stream failed (sr=%u host_ch=%u buf_ms=%u)\n",
                 (unsigned int) sample_rate,
                 (unsigned int) host_ch,
                 (unsigned int) buffer_ms
         );
-        fflush(stderr);
         state->rx_audio_applied_valid = 0;
         return;
     }
@@ -4616,8 +4644,7 @@ static void dashcdg_rx_configure_audio_locked(
     dashcdg_opus_decoder_free(&g_opus_decoder);
     dashcdg_rx_amr_decoders_release();
     if (!dashcdg_rx_init_audio_decoder_for_codec(codec_id, sample_rate, channels, frame_ms)) {
-        fprintf(
-                stderr,
+        RX_ERR(
                 "[rx] audio: failed to initialize decoder for codec=%u sr=%u ch=%u frame_ms=%u\n",
                 (unsigned int) codec_id,
                 (unsigned int) sample_rate,
@@ -4633,8 +4660,7 @@ static void dashcdg_rx_configure_audio_locked(
             dashcdg_rx_startup_skip_hold_ms(playout_delay_ms, state->rx_audio_applied_valid)
     );
 
-    fprintf(
-            stdout,
+    RX_OUT(
             "[rx] audio: output ring (session_sr=%u pa_open_request_hz=%u wire_ch=%u host_ch=%u frame_ms=%u preroll=%u"
             " target_total=%u host=%u target_buf=%u ring=%u prof=%u codec=%u)\n",
             (unsigned int) sample_rate,
@@ -4650,7 +4676,6 @@ static void dashcdg_rx_configure_audio_locked(
             (unsigned int) audio_profile_id,
             (unsigned int) codec_id
     );
-    fflush(stdout);
 
     state->rx_audio_applied_wire_sr = sample_rate;
     state->rx_audio_applied_wire_ch = channels;
@@ -4681,8 +4706,7 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
         return;
     }
 
-    fprintf(
-            stdout,
+    RX_OUT(
             "[rx] v4 audio reconcile: codec %u→%u profile %u→%u frame_ms %u→%u (full audio reconfigure)\n",
             (unsigned int) state->announced_audio_codec_id,
             (unsigned int) wire_codec_id,
@@ -4691,7 +4715,6 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
             (unsigned int) state->announced_audio_frame_ms,
             (unsigned int) wire_frame_ms
     );
-    fflush(stdout);
 
     if (g_audio == NULL) {
         g_audio = dashcdg_desktop_audio_new();
@@ -4801,8 +4824,7 @@ static void dashcdg_rx_reset_live_media_after_resume_locked(struct receiver_stat
                 state->announced_audio_channels,
                 state->announced_audio_frame_ms
         )) {
-        fprintf(
-                stderr,
+        RX_ERR(
                 "[rx] audio: failed to reinitialize decoder after resume for codec=%u sr=%u ch=%u frame_ms=%u\n",
                 (unsigned int) state->announced_audio_codec_id,
                 (unsigned int) state->announced_audio_sample_rate,
@@ -5416,14 +5438,12 @@ static void *network_thread(void *user_data) {
             char preferred_interface[192];
 
             dashcdg_rx_format_multicast_interface(&multicast_interfaces[0], preferred_interface, sizeof(preferred_interface));
-            fprintf(
-                    stdout,
+            RX_OUT(
                     "[rx] multicast preferred interface: %s (joined on %u interface%s)\n",
                     preferred_interface,
                     (unsigned int) joined_interface_count,
                     joined_interface_count == 1U ? "" : "s"
             );
-            fflush(stdout);
         }
     }
 
@@ -5659,15 +5679,13 @@ static void dashcdg_rx_start_audio_async(void) {
         g_audio_stream_started = 0;
         if (g_rx_audio_start_fail_log_ms == 0U || now_ms - g_rx_audio_start_fail_log_ms >= 5000U) {
             if (pa_detail != NULL && pa_detail[0] != '\0') {
-                fprintf(stderr, "[rx] audio: output device start failed: %s\n", pa_detail);
+                RX_ERR( "[rx] audio: output device start failed: %s\n", pa_detail);
             } else {
-                fprintf(
-                        stderr,
+                RX_ERR(
                         "[rx] audio: output device start failed (no driver detail — "
                         "WinMM build, stderr fully buffered, or early return before Pa_OpenStream)\n"
                 );
             }
-            fflush(stderr);
             g_rx_audio_start_fail_log_ms = now_ms;
         }
     }
@@ -6078,8 +6096,7 @@ static void rx_keyboard(unsigned char key, int x, int y) {
     if (key == 'i' || key == 'I') {
         pthread_mutex_lock(&g_receiver.mutex);
         g_hud_visible = !g_hud_visible;
-        fprintf(stdout, "[rx] HUD %s\n", g_hud_visible ? "enabled" : "hidden");
-        fflush(stdout);
+        RX_OUT( "[rx] HUD %s\n", g_hud_visible ? "enabled" : "hidden");
         pthread_mutex_unlock(&g_receiver.mutex);
     } else if (key == 'm' || key == 'M') {
         pthread_mutex_lock(&g_receiver.mutex);
@@ -6087,8 +6104,7 @@ static void rx_keyboard(unsigned char key, int x, int y) {
         if (g_audio != NULL) {
             dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
         }
-        fprintf(stdout, "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
-        fflush(stdout);
+        RX_OUT( "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
         pthread_mutex_unlock(&g_receiver.mutex);
     } else if (key == 'd' || key == 'D') {
         dashcdg_rx_toggle_audio_decode_drop();
@@ -6120,8 +6136,7 @@ static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
     if (vk == 'I' || vk == 'i' || vk == 0x49) {
         pthread_mutex_lock(&g_receiver.mutex);
         g_hud_visible = !g_hud_visible;
-        fprintf(stdout, "[rx] HUD %s\n", g_hud_visible ? "enabled" : "hidden");
-        fflush(stdout);
+        RX_OUT( "[rx] HUD %s\n", g_hud_visible ? "enabled" : "hidden");
         pthread_mutex_unlock(&g_receiver.mutex);
     } else if (vk == 'M' || vk == 'm' || vk == 0x4D) {
         pthread_mutex_lock(&g_receiver.mutex);
@@ -6129,8 +6144,7 @@ static void dashcdg_rx_win32_gdi_on_key(void *user, unsigned vk, int down) {
         if (g_audio != NULL) {
             dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
         }
-        fprintf(stdout, "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
-        fflush(stdout);
+        RX_OUT( "[rx] audio %s\n", g_audio_muted ? "muted" : "unmuted");
         pthread_mutex_unlock(&g_receiver.mutex);
     } else if (vk == 'D' || vk == 'd' || vk == 0x44) {
         dashcdg_rx_toggle_audio_decode_drop();
@@ -6162,7 +6176,7 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
                 dashcdg_rx_win32_gdi_on_key,
                 NULL
         )) {
-        fprintf(stderr, "[rx] failed to create Win32 GDI window\n");
+        RX_ERR( "[rx] failed to create Win32 GDI window\n");
         return;
     }
     while (dashcdg_win32_gdi_view_poll(view)) {
@@ -6237,9 +6251,9 @@ static int dashcdg_rx_run_glut_visual_loop(int *argc_ptr, char ***argv_ptr) {
     glewInit();
 
     if (!dashcdg_gl_renderer_init(&g_renderer)) {
-        fprintf(stderr, "failed to initialize OpenGL renderer\n");
+        RX_ERR( "failed to initialize OpenGL renderer\n");
 #ifdef _WIN32
-        fprintf(stderr, "[rx] falling back to Win32 GDI window\n");
+        RX_ERR( "[rx] falling back to Win32 GDI window\n");
         glutDestroyWindow(glutGetWindow());
         dashcdg_rx_run_win32_gdi_main(argc, argv);
         return 0;
@@ -6275,7 +6289,7 @@ static int dashcdg_rx_run_windowed_ui(int argc, char **argv) {
 #else
     (void) argc;
     (void) argv;
-    fprintf(stderr, "windowed RX requires Windows or an OpenGL/GLUT build\n");
+    RX_ERR( "windowed RX requires Windows or an OpenGL/GLUT build\n");
     return 1;
 #endif
 }
@@ -6290,16 +6304,28 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     int port = DASHCDG_DEFAULT_NETWORK_PORT;
     int help_i;
 
+    dashcdg_rx_logger_boot(argv[0] != NULL ? argv[0] : "desktop-rx");
+
     for (help_i = 1; help_i < argc; ++help_i) {
         if (strcmp(argv[help_i], "--help") == 0 || strcmp(argv[help_i], "-h") == 0 || strcmp(argv[help_i], "-?") == 0) {
             dashcdg_rx_cli_print_help(argv[0] != NULL ? argv[0] : "desktop-rx");
+            dashcdg_rx_logger_shutdown_if_needed();
             return 0;
         }
     }
 
-    dashcdg_rx_maybe_enable_sidecar_log(argv[0]);
-    fprintf(stdout, "[rx] build: %s\n", DASHCDG_BUILD_VERSION);
-    fflush(stdout);
+    {
+        char build_line[256];
+
+        snprintf(build_line, sizeof(build_line), "[rx] build: %s\n", DASHCDG_BUILD_VERSION);
+        build_line[sizeof(build_line) - 1U] = '\0';
+        if (g_rx_logger_enabled) {
+            dashcdg_async_logger_log_line(&g_rx_logger, DASHCDG_ASYNC_LOG_STDOUT, build_line);
+        } else {
+            (void) fputs(build_line, stdout);
+            (void) fflush(stdout);
+        }
+    }
     dashcdg_rx_init_receiver_instance_id();
 
     g_endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
@@ -6310,12 +6336,14 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--rx-stats-ms") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s: --rx-stats-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                RX_ERR( "%s: --rx-stats-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             ++i;
             if (!dashcdg_rx_is_number(argv[i])) {
-                fprintf(stderr, "%s: --rx-stats-ms expects a non-negative integer\n", argv[0]);
+                RX_ERR( "%s: --rx-stats-ms expects a non-negative integer\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             g_rx_stats_interval_ms = (uint32_t) strtoul(argv[i], NULL, 10);
@@ -6323,12 +6351,14 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--rx-av-sync-log-ms") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s: --rx-av-sync-log-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                RX_ERR( "%s: --rx-av-sync-log-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             ++i;
             if (!dashcdg_rx_is_number(argv[i])) {
-                fprintf(stderr, "%s: --rx-av-sync-log-ms expects a non-negative integer\n", argv[0]);
+                RX_ERR( "%s: --rx-av-sync-log-ms expects a non-negative integer\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             g_rx_av_sync_log_ms = (uint32_t) strtoul(argv[i], NULL, 10);
@@ -6336,7 +6366,8 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--rx-graphics-clock") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s: --rx-graphics-clock requires dac or sender\n", argv[0]);
+                RX_ERR( "%s: --rx-graphics-clock requires dac or sender\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             ++i;
@@ -6345,14 +6376,16 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             } else if (strcmp(argv[i], "sender") == 0) {
                 g_rx_graphics_clock_sender = 1;
             } else {
-                fprintf(stderr, "%s: --rx-graphics-clock: expected dac or sender\n", argv[0]);
+                RX_ERR( "%s: --rx-graphics-clock: expected dac or sender\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             continue;
         }
         if (strcmp(argv[i], "--rx-graphics-trim-ms") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s: --rx-graphics-trim-ms requires an integer\n", argv[0]);
+                RX_ERR( "%s: --rx-graphics-trim-ms requires an integer\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
                 return 1;
             }
             ++i;
@@ -6370,7 +6403,8 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 #if DASHCDG_RX_HAVE_GLUT
 #ifndef _WIN32
         if (strcmp(argv[i], "--win-gdi") == 0 || strcmp(argv[i], "--gdi") == 0) {
-            fprintf(stderr, "%s: --win-gdi / --gdi is only supported on Windows desktop builds\n", argv[0]);
+            RX_ERR( "%s: --win-gdi / --gdi is only supported on Windows desktop builds\n", argv[0]);
+            dashcdg_rx_logger_shutdown_if_needed();
             return 1;
         }
 #else
@@ -6387,6 +6421,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
         if (positional_index >= 2) {
             dashcdg_rx_print_usage(argv[0]);
+            dashcdg_rx_logger_shutdown_if_needed();
             return 1;
         }
 
@@ -6405,46 +6440,50 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
     if (positionals_consumed != positional_index || port <= 0) {
         dashcdg_rx_print_usage(argv[0]);
+        dashcdg_rx_logger_shutdown_if_needed();
         return 1;
     }
 
 #if DASHCDG_RX_HAVE_GLUT
     if (g_headless && g_rx_use_win_gdi) {
-        fprintf(stderr, "%s: cannot combine --headless and --win-gdi\n", argv[0]);
+        RX_ERR( "%s: cannot combine --headless and --win-gdi\n", argv[0]);
+        dashcdg_rx_logger_shutdown_if_needed();
         return 1;
     }
 #endif
 
     if (!dashcdg_rx_parse_ipv4_address(g_endpoint_address, &g_endpoint_in_addr)) {
-        fprintf(stderr, "invalid endpoint address: %s\n", g_endpoint_address);
+        RX_ERR( "invalid endpoint address: %s\n", g_endpoint_address);
+        dashcdg_rx_logger_shutdown_if_needed();
         return 1;
     }
 
     g_endpoint_is_multicast = dashcdg_rx_ipv4_is_multicast(&g_endpoint_in_addr);
     g_endpoint_is_broadcast = dashcdg_rx_ipv4_is_broadcast(&g_endpoint_in_addr);
 
-    fprintf(
-            stdout,
-            "[rx] listening on %s:%d%s\n",
-            g_endpoint_address,
-            port,
-            g_headless ? " (headless stdout stats mode)" :
+    {
+        const char *listen_suffix;
+
+        if (g_headless) {
+            listen_suffix = " (headless stdout stats mode)";
+        } else {
 #if DASHCDG_RX_HAVE_GLUT
-                    (g_rx_use_win_gdi ?
-                            " (GDI window; HUD hidden by default, press I/M/D/S as in GL mode)" :
-                            " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, D to drop audio decode, S for stats line to stdout)")
+            listen_suffix = g_rx_use_win_gdi ?
+                    " (GDI window; HUD hidden by default, press I/M/D/S as in GL mode)" :
+                    " (windowed; HUD hidden by default, press I to toggle HUD, M to mute/unmute, D to drop audio decode, S for stats line to stdout)";
 #else
-                    " (GDI window; HUD hidden by default, press I/M/D/S as in GL mode)"
+            listen_suffix = " (GDI window; HUD hidden by default, press I/M/D/S as in GL mode)";
 #endif
-    );
-    fflush(stdout);
+        }
+        RX_OUT("[rx] listening on %s:%d%s\n", g_endpoint_address, port, listen_suffix);
+    }
     if (g_audio_decode_disabled) {
-        fprintf(stdout, "[rx] audio decode disabled at startup (dropping incoming audio packets)\n");
-        fflush(stdout);
+        RX_OUT( "[rx] audio decode disabled at startup (dropping incoming audio packets)\n");
     }
 
     if (!dashcdg_net_init()) {
-        fprintf(stderr, "failed to initialize network stack\n");
+        RX_ERR( "failed to initialize network stack\n");
+        dashcdg_rx_logger_shutdown_if_needed();
         return 1;
     }
     dashcdg_win32_process_timing_enable();
@@ -6466,10 +6505,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
 
     if (g_headless) {
         pthread_join(media_thread, NULL);
-        if (g_rx_logger_enabled) {
-            dashcdg_async_logger_shutdown(&g_rx_logger);
-            g_rx_logger_enabled = 0;
-        }
+        dashcdg_rx_logger_shutdown_if_needed();
         return 0;
     }
 
@@ -6488,14 +6524,11 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         pthread_mutex_destroy(&g_render_mutex);
         pthread_mutex_destroy(&g_receiver.mutex);
         receiver_state_reset(&g_receiver);
-        if (g_rx_logger_enabled) {
-            dashcdg_async_logger_shutdown(&g_rx_logger);
-            g_rx_logger_enabled = 0;
-        }
+        dashcdg_rx_logger_shutdown_if_needed();
         return 1;
     }
 #else
-    fprintf(stderr, "windowed RX requires a Win32 GDI-only build or OpenGL/GLUT\n");
+    RX_ERR( "windowed RX requires a Win32 GDI-only build or OpenGL/GLUT\n");
     dashcdg_rx_request_shutdown();
     pthread_join(rx_thread, NULL);
     pthread_join(media_thread, NULL);
@@ -6509,10 +6542,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_mutex_destroy(&g_render_mutex);
     pthread_mutex_destroy(&g_receiver.mutex);
     receiver_state_reset(&g_receiver);
-    if (g_rx_logger_enabled) {
-        dashcdg_async_logger_shutdown(&g_rx_logger);
-        g_rx_logger_enabled = 0;
-    }
+    dashcdg_rx_logger_shutdown_if_needed();
     return 1;
 #endif
 
@@ -6529,9 +6559,6 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     pthread_mutex_destroy(&g_render_mutex);
     pthread_mutex_destroy(&g_receiver.mutex);
     receiver_state_reset(&g_receiver);
-    if (g_rx_logger_enabled) {
-        dashcdg_async_logger_shutdown(&g_rx_logger);
-        g_rx_logger_enabled = 0;
-    }
+    dashcdg_rx_logger_shutdown_if_needed();
     return 0;
 }
