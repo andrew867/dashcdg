@@ -567,7 +567,7 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_clock_sync.playback_ms == 1234);
     assert(view.v4_clock_sync.startup_state == 2);
 
-    assert(sizeof(struct dashcdg_v4_rx_stats_payload) == DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE);
+    assert(sizeof(struct dashcdg_v4_rx_stats_payload) == DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE);
 
     memset(&rx_stats, 0, sizeof(rx_stats));
     rx_stats.report_seq = 3;
@@ -592,11 +592,21 @@ static void test_protocol_v4_roundtrip(void) {
     rx_stats.reorder_events = 5;
     rx_stats.receiver_instance_id = 0xDEADBEEFU;
     rx_stats.fec_group_size_observed = 8;
+    rx_stats.video_jb_pending_slots = 4;
+    rx_stats.video_jb_next_packet_index = 777;
+    rx_stats.v4_clock_rx_count = 12;
+    rx_stats.clock_skew_ema_ms = -9;
+    rx_stats.ptp_offset_ema_us = 320;
+    rx_stats.heap_free_min_bytes = 131072;
+    rx_stats.wifi_rssi_dbm = -62;
+    rx_stats.ptp_mode = 1;
+    rx_stats.stats_generation = 4;
+    rx_stats.device_flags = 0xA5;
     size = dashcdg_protocol_serialize_v4_rx_stats(buffer, sizeof(buffer), &header, &rx_stats);
-    assert(size == DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE);
+    assert(size == DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE);
     assert(dashcdg_protocol_parse_packet(&view, buffer, size) == 1);
     assert(view.header.type == DASHCDG_PACKET_V4_RX_STATS);
-    assert(view.header.payload_length == DASHCDG_V4_RX_STATS_PAYLOAD_V2_SIZE);
+    assert(view.header.payload_length == DASHCDG_V4_RX_STATS_PAYLOAD_V4_SIZE);
     assert(view.v4_rx_stats.report_seq == 3);
     assert(view.v4_rx_stats.wall_now_ms == 10002);
     assert(view.v4_rx_stats.sender_time_observed_ms == 10050);
@@ -619,6 +629,16 @@ static void test_protocol_v4_roundtrip(void) {
     assert(view.v4_rx_stats.reorder_events == 5);
     assert(view.v4_rx_stats.receiver_instance_id == 0xDEADBEEFU);
     assert(view.v4_rx_stats.fec_group_size_observed == 8);
+    assert(view.v4_rx_stats.video_jb_pending_slots == 4);
+    assert(view.v4_rx_stats.video_jb_next_packet_index == 777);
+    assert(view.v4_rx_stats.v4_clock_rx_count == 12);
+    assert(view.v4_rx_stats.clock_skew_ema_ms == -9);
+    assert(view.v4_rx_stats.ptp_offset_ema_us == 320);
+    assert(view.v4_rx_stats.heap_free_min_bytes == 131072);
+    assert(view.v4_rx_stats.wifi_rssi_dbm == -62);
+    assert(view.v4_rx_stats.ptp_mode == 1);
+    assert(view.v4_rx_stats.stats_generation == 4);
+    assert(view.v4_rx_stats.device_flags == 0xA5);
 
     /* v1 wire (52-byte body): truncate v2 packet and fix header payload_length. */
     {
@@ -954,6 +974,37 @@ static void test_audio_jitter_skip_blocked_while_device_buffer_is_healthy(void) 
     din.ms_since_prior_audio_apply = 500U;
     assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_STOP);
     assert(miss == 0U);
+    assert(jb.next_media_sequence == 11U);
+}
+
+static void test_audio_jitter_long_stall_bypasses_starvation_gate(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    struct dashcdg_audio_jitter_frame *frame = NULL;
+    struct dashcdg_audio_jitter_drain_input din;
+    uint64_t miss = 0U;
+    const uint8_t one[] = {0x31};
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 10U, 2000U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.sender_playback_now_ms = 9000U;
+    din.announced_audio_frame_ms = 20U;
+    din.announced_playout_delay_ms = 240U;
+    din.late_grace_ms = 0U;
+    din.audio_stream_started = 1;
+    din.audio_buffered_ms = 120U;
+
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_APPLY);
+    dashcdg_audio_jitter_note_applied(&jb, frame, 20U);
+
+    miss = 0U;
+    frame = NULL;
+    din.primed_decode = 1;
+    din.ms_since_prior_audio_apply = 950U;
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_SKIP);
+    assert(miss == 1U);
     assert(jb.next_media_sequence == 11U);
 }
 
@@ -1418,6 +1469,7 @@ int main(void) {
     test_audio_jitter_empty_skip_blocked_until_primed_decode();
     test_audio_jitter_does_not_jump_to_oldest_without_real_wait();
     test_audio_jitter_skip_blocked_while_device_buffer_is_healthy();
+    test_audio_jitter_long_stall_bypasses_starvation_gate();
     test_cdg_raster_rgba_matches_memory_preset();
     test_cdg_raster_alpha_from_transparency();
     test_cdg_batch_jitter_duplicate_drop();
