@@ -58,6 +58,11 @@ v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from T
 
 Firmware should inherit this **stabilized desktop v4 contract** — see **`docs/hardware/esp32-receiver-architecture.md`**, **`docs/specs/embedded-rx-audio-profile.md`**, and **`.cursor/plans/esp32_embedded_enterprise_plan_b3bda7b3.plan.md`** (desktop prerequisite **tr0a** satisfied for ongoing soak).
 
+### ESP32 badge LVGL (`platform/espidf/projects/dashcdg_badge/main/`)
+
+- **User-visible strings must be 7-bit ASCII** in C string literals passed to LVGL labels, buttons, `snprintf` text, and modal copy. Do **not** use Unicode punctuation or symbols (middle dot, em dash, smart quotes, Unicode ellipsis, non-breaking space, etc.): the default **Montserrat** subset often has **no glyphs** for those code points, so text renders as **missing tofu** or blank gaps.
+- **Icons and pictograms** must come from **`LV_SYMBOL_*`** (LVGL symbol font), **`lv_image`** assets, or other **explicit** graphics paths — not from Unicode emoji or arbitrary Unicode code points in strings.
+
 ## User preferences (from rules)
 
 High-quality prose; minimal drive-by refactors; prefer code citations with fenced `startLine:endLine:filepath` blocks in chat; execute commands locally rather than only suggesting them.
