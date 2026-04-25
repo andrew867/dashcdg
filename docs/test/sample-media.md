@@ -32,6 +32,13 @@ If you redistribute them outside a private lab, you are responsible for **licens
 rights** in your jurisdiction. The project does not grant you a public performance,
 sync, or distribution license for the underlying compositions or recordings.
 
+## PACK parity bytes in `.cdg` files
+
+Most rips **zero** the six **R–W PACK** parity bytes in every 24-byte packet; a few
+library tracks retain non-zero **Q/P** fields useful for RS checks. See
+[`docs/specs/cdg-library-pack-parity-inventory.md`](../specs/cdg-library-pack-parity-inventory.md)
+and run **`python scripts/scan_cdg_pack_parity.py`** from the repo root after adding tracks.
+
 ## Adding or replacing tracks
 
 Keep the **same stem** for each pair (`Song.cdg` + `Song.mp3`). Avoid spaces in new

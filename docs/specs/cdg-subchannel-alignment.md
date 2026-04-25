@@ -84,6 +84,8 @@ bytes and round-trip cases live in `tests/test_core.c` (`test_cdg_subchannel_pac
   when `dashcdg_cdg_subchannel_pack_rs_syndrome_ok` is true, so random misaligned
   bytes are less likely to fake a long run of “valid” graphics headers.
 
+**Sample inventory:** which `.cdg` files under **`cdg/`** and **`docs/specs/`** actually carry non-zero parity bytes in the file (vs typical all-zero rips) — [`cdg-library-pack-parity-inventory.md`](cdg-library-pack-parity-inventory.md). Re-run the scan with **`python scripts/scan_cdg_pack_parity.py`**.
+
 ## Alignment scoring (implementation)
 
 `dashcdg_cdg_compute_subchannel_trims` in `core/src/cdg.c`:

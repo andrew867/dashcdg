@@ -68,4 +68,4 @@ After a **long send gap**, the producer can **refill the queue in a tight loop**
 ## Related comments in tree
 
 - `app_tx.c` — **`dashcdg_tx_network_playback_ms_locked`** rationale (encoder vs wall for beacons / tags).
-- `app_tx.c` — **`dashcdg_tx_compute_rx_latency_ms_locked`** (timeline note for RX **`presented_audio_timestamp_ms`**).
+- `app_tx.c` — **`dashcdg_tx_compute_rx_latency_ms_locked`** (RX stats latency for **`v4-rx-peer`** health): sender reference uses **`min(network_playback_ms, wall_playback_ms)`** so a post-gap encoder tail cannot spuriously trip **`bad-lat`** against **`presented_audio_timestamp_ms + receipt_age_ms`**.
