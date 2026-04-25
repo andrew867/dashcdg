@@ -1,0 +1,15 @@
+---
+description: Badge speaker + touch NVS in Setup; Mary demo only in Applications -> Audio lab.
+globs: platform/espidf/projects/dashcdg_badge/main/settings_ui.c,platform/espidf/projects/dashcdg_badge/main/audio_settings_ui.c,platform/espidf/projects/dashcdg_badge/main/audio_lab_ui.c,platform/espidf/projects/dashcdg_badge/main/badge_lab_ym.c,platform/espidf/projects/dashcdg_badge/main/platform_hw.c
+alwaysApply: false
+---
+
+# ESP32 badge: audio prefs vs Mary demo (no regressions)
+
+1. **Setup hub** (`settings_ui.c`) must include a tile to **`dashcdg_nav_audio_settings`** (screen `audio_settings_ui.c`): **speaker level** + **touch chirp on/off**, NVS save, boot restore still in `dashcdg_platform_hw_init`.
+
+2. **Applications -> Audio lab** (`audio_lab_ui.c` + `dashcdg_nav_audio_lab`): **Mary demo only** (play/pause, status strip). Do not move NVS speaker/touch sliders here; point users to Setup instead.
+
+3. **Mary demo** (`badge_lab_ym.c` + `platform_hw_lab_pcm_*`): only treat the stream as live after `dashcdg_platform_hw_lab_pcm_stream_begin()` succeeds; retry on mutex fail.
+
+4. **Gain**: SC8002B path is loud; cap PWM lab swing; demo follows saved speaker level from NVS.

@@ -1,0 +1,17 @@
+---
+description: ESP32 dashcdg_badge LVGL UI text must be ASCII; icons via LV_SYMBOL_* only.
+globs: platform/espidf/projects/dashcdg_badge/main/**/*.c
+alwaysApply: false
+---
+
+# ESP32 badge LVGL: ASCII-only UI copy
+
+When editing `platform/espidf/projects/dashcdg_badge/main/**/*.c` (LVGL screens, labels, modals):
+
+1. **All user-visible string literals** shown in LVGL (`lv_label_set_text`, `lv_button` labels, `snprintf` into UI buffers, modal bodies) must be **7-bit ASCII** only. Do not use Unicode punctuation (e.g. middle dot U+00B7, em dash, smart quotes, ellipsis character U+2026, NBSP).
+
+2. **Icons** must use **`LV_SYMBOL_*`** from LVGL (symbol font), or images/widgets — not Unicode emoji or dingbats in plain strings.
+
+3. **Separators** in prose: use ASCII hyphen `-`, slash `/`, pipe `|`, or comma — not typographic bullets from Unicode.
+
+See also root **`AGENTS.md`** (Embedded / ESP32 / badge LVGL).
