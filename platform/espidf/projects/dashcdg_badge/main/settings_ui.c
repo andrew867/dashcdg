@@ -62,6 +62,22 @@ static void on_display(lv_event_t *e)
     }
 }
 
+static void on_audio_settings(lv_event_t *e)
+{
+    lv_disp_t *disp = lv_event_get_user_data(e);
+    if (disp) {
+        dashcdg_nav_audio_settings(disp);
+    }
+}
+
+static void on_karaoke_settings(lv_event_t *e)
+{
+    lv_disp_t *disp = lv_event_get_user_data(e);
+    if (disp) {
+        dashcdg_nav_karaoke_settings(disp);
+    }
+}
+
 /** Full-width tile: title line + dim flair subtitle (wrap). Fixed height for every row. */
 static lv_obj_t *settings_make_tile(lv_obj_t *parent, const char *title, const char *flair, lv_event_cb_t cb,
                                     lv_disp_t *disp)
@@ -181,6 +197,12 @@ esp_err_t dashcdg_settings_ui_present(lv_disp_t *disp)
     lv_obj_set_style_text_color(sub, lv_color_hex(0x557766), 0);
 
     settings_make_tile(scroll, LV_SYMBOL_TINT "  Display & power", dashcdg_ui_flair_display_sub(), on_display, disp);
+
+    settings_make_tile(scroll, LV_SYMBOL_AUDIO "  Audio & touch beeps",
+                        "Speaker + touch chirp NVS. Mary demo: Apps -> Audio lab.", on_audio_settings, disp);
+
+    settings_make_tile(scroll, LV_SYMBOL_VIDEO "  Karaoke decode",
+                        "Toggle CDG/video decode and audio decode for isolation tests.", on_karaoke_settings, disp);
 
     settings_make_tile(scroll, LV_SYMBOL_WIFI "  Wi-Fi Settings", dashcdg_ui_flair_wifi_sub(), on_wifi, disp);
 

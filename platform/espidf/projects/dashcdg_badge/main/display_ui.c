@@ -1,5 +1,5 @@
 /*
- * Display lab: LCD backlight, rear RGB, idle power (NVS-backed). Audio prefs live in Audio lab.
+ * Display lab: LCD backlight, rear RGB, idle power (NVS-backed). Speaker/touch: Settings or Audio lab.
  */
 #include <stdio.h>
 

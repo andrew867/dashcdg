@@ -33,15 +33,41 @@
 #define CYD_VBAT_R_OHM_BOTTOM 100000u
 
 /*
- * One-point pack voltage trim (see vbat_sense.c): at known averaged raw, true pack mV (DMM).
- * Applies a constant gain so that raw matches the reference. Set DASHCDG_VBAT_CAL_REF_RAW to 0
- * to disable. Add more points later if you extend vbat_sense to a piecewise table.
+ * Pack voltage trim (see vbat_sense.c): (averaged SAR raw, true pack mV from DMM / logger).
+ * Builds piecewise-linear map from divider linear estimate -> measured; knots sorted by estimate.
+ * Set DASHCDG_VBAT_CAL_POINT1_RAW to 0 to disable all trim (identity).
+ * Optional knots: POINT2_RAW 0 => two-point only. Each higher point requires the previous
+ * optional point enabled (POINT4 only if POINT2 and POINT3 are non-zero), up to five knots.
  */
-#ifndef DASHCDG_VBAT_CAL_REF_RAW
-#define DASHCDG_VBAT_CAL_REF_RAW 2100
+#ifndef DASHCDG_VBAT_CAL_POINT0_RAW
+#define DASHCDG_VBAT_CAL_POINT0_RAW 2000
 #endif
-#ifndef DASHCDG_VBAT_CAL_REF_BAT_MV
-#define DASHCDG_VBAT_CAL_REF_BAT_MV 3620
+#ifndef DASHCDG_VBAT_CAL_POINT0_MV
+#define DASHCDG_VBAT_CAL_POINT0_MV 3465
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT1_RAW
+#define DASHCDG_VBAT_CAL_POINT1_RAW 2100
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT1_MV
+#define DASHCDG_VBAT_CAL_POINT1_MV 3620
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT2_RAW
+#define DASHCDG_VBAT_CAL_POINT2_RAW 1955
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT2_MV
+#define DASHCDG_VBAT_CAL_POINT2_MV 3380
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT3_RAW
+#define DASHCDG_VBAT_CAL_POINT3_RAW 1900
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT3_MV
+#define DASHCDG_VBAT_CAL_POINT3_MV 3305
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT4_RAW
+#define DASHCDG_VBAT_CAL_POINT4_RAW 1770
+#endif
+#ifndef DASHCDG_VBAT_CAL_POINT4_MV
+#define DASHCDG_VBAT_CAL_POINT4_MV 3100
 #endif
 
 /* Physical panel pixels (before rotation). */

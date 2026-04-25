@@ -15,6 +15,7 @@
 #include "hal/adc_types.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 static const char *TAG = "vbat_sense";
 
@@ -22,9 +23,12 @@ static adc_oneshot_unit_handle_t s_unit;
 static adc_cali_handle_t s_cali;
 static bool s_cali_ok;
 static bool s_ready;
-/** One-point gain: vbat_display = vbat_linear * s_cal_num / s_cal_den (identity when den==0). */
-static int s_vbat_cal_num = 1;
-static int s_vbat_cal_den = 0;
+#define VBAT_TRIM_MAX_KNOTS 5
+
+/** Piecewise trim on divider linear pack estimate (mV): 0 = off, 2..VBAT_TRIM_MAX_KNOTS sorted knots. */
+static int s_trim_n;
+static int s_trim_l[VBAT_TRIM_MAX_KNOTS];
+static int s_trim_mv[VBAT_TRIM_MAX_KNOTS];
 
 /* ESP32: GPIO34 == ADC1 ch6. */
 #define VBAT_ADC_UNIT     ADC_UNIT_1
@@ -61,7 +65,7 @@ static int pin_mv_from_raw(int raw)
     return mV;
 }
 
-/** Pack mV from raw using divider only (same as dashcdg_vbat_sense_read before one-point trim). */
+/** Pack mV from raw using divider only (same as dashcdg_vbat_sense_read before trim). */
 static int vbat_linear_mv_from_raw(int raw)
 {
     int pin = pin_mv_from_raw(raw);
@@ -70,6 +74,41 @@ static int vbat_linear_mv_from_raw(int raw)
     }
     int64_t numer = (int64_t)pin * (int64_t)(CYD_VBAT_R_OHM_TOP + CYD_VBAT_R_OHM_BOTTOM);
     return (int)(numer / (int64_t)CYD_VBAT_R_OHM_BOTTOM);
+}
+
+static void vbat_trim_sort_knots(int n, int *l, int *mv)
+{
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (l[j] < l[i]) {
+                int t = l[i];
+                l[i] = l[j];
+                l[j] = t;
+                t = mv[i];
+                mv[i] = mv[j];
+                mv[j] = t;
+            }
+        }
+    }
+}
+
+/** Map divider-linear pack mV -> trimmed pack mV (extrapolates beyond end knots). */
+static int vbat_apply_trim(int vbat_lin)
+{
+    if (s_trim_n < 2) {
+        return vbat_lin;
+    }
+    int n = s_trim_n;
+    int i = 0;
+    while (i < n - 2 && vbat_lin > s_trim_l[i + 1]) {
+        i++;
+    }
+    int64_t dmv = (int64_t)s_trim_mv[i + 1] - (int64_t)s_trim_mv[i];
+    int64_t dl = (int64_t)s_trim_l[i + 1] - (int64_t)s_trim_l[i];
+    if (dl == 0) {
+        return s_trim_mv[i];
+    }
+    return (int)(s_trim_mv[i] + dmv * ((int64_t)vbat_lin - (int64_t)s_trim_l[i]) / dl);
 }
 
 esp_err_t dashcdg_vbat_sense_init(void)
@@ -103,18 +142,76 @@ esp_err_t dashcdg_vbat_sense_init(void)
 
     vbat_sense_install_cali();
 
-    s_vbat_cal_num = 1;
-    s_vbat_cal_den = 0;
-#if DASHCDG_VBAT_CAL_REF_RAW > 0
+    s_trim_n = 0;
+#if DASHCDG_VBAT_CAL_POINT1_RAW > 0 && DASHCDG_VBAT_CAL_POINT0_RAW > 0
     {
-        int est_mv = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_REF_RAW);
-        if (est_mv > 100) {
-            s_vbat_cal_num = DASHCDG_VBAT_CAL_REF_BAT_MV;
-            s_vbat_cal_den = est_mv;
-            ESP_LOGI(TAG, "VBAT one-point cal: raw %d -> est %d mV, trim to %d mV (gain %d/%d)",
-                     DASHCDG_VBAT_CAL_REF_RAW, est_mv, DASHCDG_VBAT_CAL_REF_BAT_MV, s_vbat_cal_num, s_vbat_cal_den);
+        int l[VBAT_TRIM_MAX_KNOTS];
+        int mv[VBAT_TRIM_MAX_KNOTS];
+        int n = 0;
+        l[n] = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_POINT0_RAW);
+        mv[n] = DASHCDG_VBAT_CAL_POINT0_MV;
+        n++;
+        l[n] = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_POINT1_RAW);
+        mv[n] = DASHCDG_VBAT_CAL_POINT1_MV;
+        n++;
+#if DASHCDG_VBAT_CAL_POINT2_RAW > 0
+        l[n] = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_POINT2_RAW);
+        mv[n] = DASHCDG_VBAT_CAL_POINT2_MV;
+        n++;
+#if DASHCDG_VBAT_CAL_POINT3_RAW > 0
+        l[n] = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_POINT3_RAW);
+        mv[n] = DASHCDG_VBAT_CAL_POINT3_MV;
+        n++;
+#if DASHCDG_VBAT_CAL_POINT4_RAW > 0
+        l[n] = vbat_linear_mv_from_raw(DASHCDG_VBAT_CAL_POINT4_RAW);
+        mv[n] = DASHCDG_VBAT_CAL_POINT4_MV;
+        n++;
+#endif
+#endif
+#endif
+        vbat_trim_sort_knots(n, l, mv);
+        bool ok = true;
+        for (int i = 0; i < n; i++) {
+            if (l[i] < 100) {
+                ok = false;
+            }
+        }
+        for (int i = 0; i < n - 1; i++) {
+            if (l[i + 1] - l[i] < 5) {
+                ok = false;
+            }
+        }
+        if (ok) {
+            for (int i = 0; i < n; i++) {
+                s_trim_l[i] = l[i];
+                s_trim_mv[i] = mv[i];
+            }
+            s_trim_n = n;
+            if (n == 2) {
+                ESP_LOGI(TAG,
+                         "VBAT 2-pt cal (sorted knots): est %d mV -> true %d; est %d mV -> true %d (raw in %d,%d)",
+                         l[0], mv[0], l[1], mv[1], DASHCDG_VBAT_CAL_POINT0_RAW, DASHCDG_VBAT_CAL_POINT1_RAW);
+            } else if (n == 3) {
+                ESP_LOGI(TAG,
+                         "VBAT 3-pt cal: knots est %d/%d/%d mV -> true %d/%d/%d mV (raw ref %d,%d,%d)",
+                         l[0], l[1], l[2], mv[0], mv[1], mv[2], DASHCDG_VBAT_CAL_POINT0_RAW,
+                         DASHCDG_VBAT_CAL_POINT1_RAW, DASHCDG_VBAT_CAL_POINT2_RAW);
+            } else if (n == 4) {
+                ESP_LOGI(TAG,
+                         "VBAT 4-pt cal: knots est %d/%d/%d/%d mV -> true %d/%d/%d/%d mV (raw ref %d,%d,%d,%d)",
+                         l[0], l[1], l[2], l[3], mv[0], mv[1], mv[2], mv[3], DASHCDG_VBAT_CAL_POINT0_RAW,
+                         DASHCDG_VBAT_CAL_POINT1_RAW, DASHCDG_VBAT_CAL_POINT2_RAW, DASHCDG_VBAT_CAL_POINT3_RAW);
+            } else {
+                ESP_LOGI(TAG,
+                         "VBAT 5-pt cal: knots est %d/%d/%d/%d/%d mV -> true %d/%d/%d/%d/%d mV (raw ref "
+                         "%d,%d,%d,%d,%d)",
+                         l[0], l[1], l[2], l[3], l[4], mv[0], mv[1], mv[2], mv[3], mv[4],
+                         DASHCDG_VBAT_CAL_POINT0_RAW, DASHCDG_VBAT_CAL_POINT1_RAW, DASHCDG_VBAT_CAL_POINT2_RAW,
+                         DASHCDG_VBAT_CAL_POINT3_RAW, DASHCDG_VBAT_CAL_POINT4_RAW);
+            }
         } else {
-            ESP_LOGW(TAG, "VBAT cal ref raw %d gave est %d mV; cal disabled", DASHCDG_VBAT_CAL_REF_RAW, est_mv);
+            ESP_LOGW(TAG, "VBAT cal disabled (n=%d l=%d,%d,%d,%d,%d)", n, l[0], n > 1 ? l[1] : 0, n > 2 ? l[2] : 0,
+                     n > 3 ? l[3] : 0, n > 4 ? l[4] : 0);
         }
     }
 #endif
@@ -147,8 +244,14 @@ esp_err_t dashcdg_vbat_sense_read(int *out_raw, int *out_pin_mv, int *out_vbat_m
     int pin = pin_mv_from_raw(raw);
     int64_t numer = (int64_t)pin * (int64_t)(CYD_VBAT_R_OHM_TOP + CYD_VBAT_R_OHM_BOTTOM);
     int vbat = (int)(numer / (int64_t)CYD_VBAT_R_OHM_BOTTOM);
-    if (s_vbat_cal_den > 0 && s_vbat_cal_num > 0) {
-        vbat = (int)(((int64_t)vbat * (int64_t)s_vbat_cal_num) / (int64_t)s_vbat_cal_den);
+    if (s_trim_n >= 2) {
+        vbat = vbat_apply_trim(vbat);
+        if (vbat < 2500) {
+            vbat = 2500;
+        }
+        if (vbat > 4500) {
+            vbat = 4500;
+        }
     }
 
     if (out_raw) {

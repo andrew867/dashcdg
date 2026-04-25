@@ -11,6 +11,7 @@
 #include "esp_wifi.h"
 #include "lvgl.h"
 
+#include "battery_label.h"
 #include "badge_rx.h"
 #include "dashcdg/media_clock.h"
 #include "display_lvgl.h"
@@ -64,38 +65,6 @@ static void dashcdg_ui_no_scroll(lv_obj_t *obj)
     }
 }
 
-/* Pack-side battery colour (same curve as home_ui). */
-static lv_color_t karaoke_bat_color_from_pack_mv(int vbat_mv)
-{
-    const int mv_red = 3450;
-    const int mv_green = 4180;
-    int x = (vbat_mv - mv_red) * 255 / (mv_green - mv_red);
-    if (x < 0) {
-        x = 0;
-    }
-    if (x > 255) {
-        x = 255;
-    }
-    return lv_color_mix(lv_color_hex(0x33dd66), lv_color_hex(0xff4444), (uint8_t)x);
-}
-
-static const char *karaoke_bat_sym_from_mv(int vbat_mv)
-{
-    if (vbat_mv >= 4180) {
-        return LV_SYMBOL_BATTERY_FULL;
-    }
-    if (vbat_mv >= 4000) {
-        return LV_SYMBOL_BATTERY_3;
-    }
-    if (vbat_mv >= 3850) {
-        return LV_SYMBOL_BATTERY_2;
-    }
-    if (vbat_mv >= 3650) {
-        return LV_SYMBOL_BATTERY_1;
-    }
-    return LV_SYMBOL_BATTERY_EMPTY;
-}
-
 static void karaoke_status_fill_bat(char *bat_txt, size_t bat_sz, lv_color_t *bat_col)
 {
     int raw = 0;
@@ -111,15 +80,8 @@ static void karaoke_status_fill_bat(char *bat_txt, size_t bat_sz, lv_color_t *ba
             return;
         }
     }
-    int deci = (vbat * 10 + 500) / 1000;
-    if (deci < 0) {
-        deci = 0;
-    }
-    int w = deci / 10;
-    int f = deci % 10;
-    (void)raw;
-    snprintf(bat_txt, bat_sz, "%s %d.%dV", karaoke_bat_sym_from_mv(vbat), w, f);
-    *bat_col = karaoke_bat_color_from_pack_mv(vbat);
+    dashcdg_battery_format_status_line_raw(bat_txt, bat_sz, vbat, raw);
+    *bat_col = dashcdg_battery_label_color_from_pack_mv(vbat);
 }
 
 static void karaoke_status_fill_wifi(char *wifi_txt, size_t wifi_sz)

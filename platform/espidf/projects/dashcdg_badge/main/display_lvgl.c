@@ -65,31 +65,59 @@ static void dashcdg_display_schedule_post_wake_touch_rearm(void)
 /** Same panel handle passed to esp_lvgl_port (LVGL logical coords == draw_bitmap after MADCTL). */
 static esp_lcd_panel_handle_t s_lcd_panel;
 
-static void dashcdg_indev_activity_on_press(lv_event_t *e)
-{
-    (void)e;
-    dashcdg_platform_hw_notify_activity();
-}
-
 static bool dashcdg_indev_click_is_button_like(lv_obj_t *obj)
 {
     for (lv_obj_t *o = obj; o != NULL; o = lv_obj_get_parent(o)) {
         if (lv_obj_check_type(o, &lv_button_class)) {
             return true;
         }
+        if (lv_obj_check_type(o, &lv_imagebutton_class)) {
+            return true;
+        }
         if (lv_obj_check_type(o, &lv_switch_class)) {
+            return true;
+        }
+        if (lv_obj_check_type(o, &lv_checkbox_class)) {
+            return true;
+        }
+        if (lv_obj_check_type(o, &lv_slider_class)) {
+            return true;
+        }
+        /* Home Wi-Fi status: clickable lv_label, not lv_button (see home_ui.c). */
+        if (lv_obj_check_type(o, &lv_label_class) && lv_obj_has_flag(o, LV_OBJ_FLAG_CLICKABLE)) {
             return true;
         }
     }
     return false;
 }
 
-static void dashcdg_indev_hw_feedback(lv_event_t *e)
+/** Try PRESSED (`active_obj`) then CLICKED (`param`) — on LVGL 9.5 either can be NULL depending on hit target. */
+static void dashcdg_indev_maybe_ui_sound_for_obj(lv_obj_t *obj_from_clicked)
 {
-    lv_obj_t *obj = lv_event_get_param(e);
+    lv_obj_t *obj = obj_from_clicked;
+    if (obj == NULL) {
+        obj = lv_indev_get_active_obj();
+    }
     if (obj != NULL && dashcdg_indev_click_is_button_like(obj)) {
         dashcdg_platform_hw_ui_sound_confirm_click();
     }
+}
+
+static void dashcdg_indev_activity_on_press(lv_event_t *e)
+{
+    (void)e;
+    dashcdg_platform_hw_notify_activity();
+    /* LVGL 9: only `lv_indev_get_active_obj(void)` exists; it is valid while this indev event runs. */
+    dashcdg_indev_maybe_ui_sound_for_obj(lv_indev_get_active_obj());
+}
+
+static void dashcdg_indev_clicked(lv_event_t *e)
+{
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_param(e);
+    if (obj == NULL) {
+        obj = lv_indev_get_active_obj();
+    }
+    dashcdg_indev_maybe_ui_sound_for_obj(obj);
 }
 
 static void dashcdg_panel_power_lv_cb(lv_timer_t *t)
@@ -538,7 +566,7 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
     s_tp = touch;
     s_touch_indev = indev;
     lv_indev_add_event_cb(indev, dashcdg_indev_activity_on_press, LV_EVENT_PRESSED, NULL);
-    lv_indev_add_event_cb(indev, dashcdg_indev_hw_feedback, LV_EVENT_CLICKED, NULL);
+    lv_indev_add_event_cb(indev, dashcdg_indev_clicked, LV_EVENT_CLICKED, NULL);
     (void)dashcdg_touch_apply_store_or_defaults();
 
     (void)lv_timer_create(dashcdg_panel_power_lv_cb, 150, NULL);

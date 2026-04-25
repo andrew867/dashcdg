@@ -6,7 +6,6 @@
 #include "lvgl.h"
 
 #include "apps_ui.h"
-#include "audio_lab_ui.h"
 #include "badge_ui_flair.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
@@ -30,7 +29,6 @@ static void on_audio_lab(lv_event_t *e)
 {
     lv_disp_t *disp = lv_event_get_user_data(e);
     if (disp) {
-        dashcdg_audio_lab_ui_set_return_to_apps_menu(true);
         dashcdg_nav_audio_lab(disp);
     }
 }
@@ -156,7 +154,7 @@ esp_err_t dashcdg_applications_ui_present(lv_disp_t *disp)
     lv_obj_set_style_text_color(sub, lv_color_hex(0x557766), 0);
 
     apps_make_tile(scroll, LV_SYMBOL_AUDIO "  Audio lab",
-                    "PWM lab, NVS beep level, CDG heap note — same as setup hub, shortcut here.", on_audio_lab, disp);
+                    "Mary PWM demo. Speaker + touch: Setup -> Audio and touch beeps (tile).", on_audio_lab, disp);
 
     apps_make_tile(scroll, LV_SYMBOL_DRIVE "  SD / files",
                     "Reserved — on-device loader when storage path is ready.", NULL, disp);

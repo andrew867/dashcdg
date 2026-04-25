@@ -1,62 +1,171 @@
 /*
- * Minimal square-wave lab voice (~8 kHz tick). Not a full PSG emulator — enough to exercise IO26 PWM.
+ * Audio lab: square-wave demo tune ("Mary Had a Little Lamb") plus soft bass + echo.
+ * Samples go to `dashcdg_platform_hw_lab_pcm_push_u8` (ESP32: DAC DMA; else LEDC PWM PCM).
  */
 #include "badge_lab_ym.h"
 
 #include "platform_hw.h"
 
 #include "esp_log.h"
-#include "esp_rom_sys.h"
+#include "esp_timer.h"
+#include "sdkconfig.h"
+#if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+#include "esp_attr.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 static const char *TAG = "badge_lab_ym";
 
-#define LAB_TASK_STACK  3072
-#define LAB_TASK_PRIO   5
-#define LAB_SAMPLE_US   125U /* ~8000 Hz */
+#define LAB_TASK_STACK  4096
+/* Timer-driven PCM: prio only affects wake latency vs LVGL (no busy-spin on CPU). */
+#define LAB_TASK_PRIO   8
+#define LAB_FS_HZ       DASHCDG_LAB_PCM_FS_HZ
+#define LAB_SAMPLE_US   (1000000u / LAB_FS_HZ)
+
+#define PATTERN_LEN     32U
+/** ~120 BPM sixteenths: 0.125 s per pattern step at Fs (`Fs/8`). */
+#define TICKS_PER_STEP  (DASHCDG_LAB_PCM_FS_HZ / 8u)
+/** Max samples per tight loop before yielding (backlog after preemption must not starve LVGL / WDT). */
+#define LAB_MAX_BURST     2048U
+
+#if CONFIG_IDF_TARGET_ESP32
+/** Slightly wider than PWM-only path: DAC chain applies its own level / softening in `platform_hw.c`. */
+#define LAB_SAMPLE_PEAK_CLAMP 72
+#else
+#define LAB_SAMPLE_PEAK_CLAMP 52
+#endif
 
 static TaskHandle_t s_task;
+static esp_timer_handle_t s_pcm_tmr;
 static volatile bool s_want_play;
+
+#if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+static void IRAM_ATTR lab_pcm_timer_cb(void *arg)
+{
+    (void)arg;
+    BaseType_t hpw = pdFALSE;
+    if (s_task != NULL) {
+        vTaskNotifyGiveFromISR(s_task, &hpw);
+    }
+    if (hpw == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+#else
+static void lab_pcm_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_task != NULL) {
+        (void)xTaskNotifyGive(s_task);
+    }
+}
+#endif
 
 static uint32_t s_phase[3];
 static uint32_t s_inc[3];
 static uint32_t s_tick;
+static uint32_t s_step_counter;
+static uint32_t s_pat_pos;
 
-static const uint16_t k_row0[] = {262, 294, 330, 349, 392, 440, 392, 349};
-static const uint16_t k_row1[] = {196, 220, 196, 174, 196, 220, 247, 220};
+/** Lead: "Mary Had a Little Lamb" in C (Hz, 0 = rest). */
+static const uint16_t k_lead[PATTERN_LEN] = {
+    330, 294, 262, 294, 330, 330, 330, 294, 294, 294, 330, 392, 392,
+    330, 294, 262, 294, 330, 330, 330, 330, 294, 294, 330, 294, 262, 0, 0, 0, 0, 0, 0,
+};
+
+/** Bass: ~two octaves below lead (Hz, 0 = rest). */
+static const uint16_t k_bass[PATTERN_LEN] = {
+    82, 73, 65, 73, 82, 82, 82, 73, 73, 73, 82, 98, 98,
+    82, 73, 65, 73, 82, 82, 82, 82, 73, 73, 82, 73, 65, 0, 0, 0, 0, 0, 0,
+};
+
+/** 1 = soft kick on phrase starts. */
+static const uint8_t k_drum[PATTERN_LEN] = {
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+static uint8_t s_kick_env;
+static uint8_t s_snare_env;
 
 static uint32_t hz_to_inc(uint16_t hz)
 {
-    return ((uint32_t)hz * (1U << 22)) / 8000U;
+    if (hz == 0U) {
+        return 0U;
+    }
+    /* 32-bit phase accumulator: increment per sample = hz / Fs * 2^32. */
+    return (uint32_t)(((uint64_t)hz << 32) / (uint64_t)LAB_FS_HZ);
 }
 
-static void pattern_refresh(void)
+static void pattern_apply_step(void)
 {
-    unsigned i0 = (unsigned)(s_tick / 512U) % (sizeof(k_row0) / sizeof(k_row0[0]));
-    unsigned i1 = (unsigned)(s_tick / 384U) % (sizeof(k_row1) / sizeof(k_row1[0]));
-    s_inc[0] = hz_to_inc(k_row0[i0]);
-    s_inc[1] = hz_to_inc((uint16_t)(k_row1[i1] + 3U));
-    s_inc[2] = hz_to_inc((uint16_t)(k_row0[i0] / 2U + 6U));
+    uint16_t l = k_lead[s_pat_pos];
+    uint16_t b = k_bass[s_pat_pos];
+    uint8_t d = k_drum[s_pat_pos];
+
+    s_inc[0] = hz_to_inc(l);
+    s_inc[1] = hz_to_inc(b);
+    /* High echo: fifth-ish double from lead two steps behind. */
+    uint32_t echo_pos = (s_pat_pos + PATTERN_LEN - 2U) % PATTERN_LEN;
+    uint16_t el = k_lead[echo_pos];
+    if (el > 0U) {
+        s_inc[2] = hz_to_inc((uint16_t)((el * 3U) / 2U)); /* ~perfect fifth */
+    } else {
+        s_inc[2] = 0U;
+    }
+
+    if (d == 1U) {
+        s_kick_env = 22U;
+    } else if (d == 2U) {
+        s_snare_env = 28U;
+    }
+}
+
+static void pattern_advance_if_needed(void)
+{
+    s_step_counter++;
+    if (s_step_counter >= TICKS_PER_STEP) {
+        s_step_counter = 0U;
+        s_pat_pos = (s_pat_pos + 1U) % PATTERN_LEN;
+        pattern_apply_step();
+    }
 }
 
 static int32_t ym_tick(void)
 {
     s_tick++;
-    if ((s_tick & 127U) == 0U) {
-        pattern_refresh();
-    }
+    pattern_advance_if_needed();
 
     int32_t acc = 0;
     for (int i = 0; i < 3; i++) {
+        if (s_inc[i] == 0U) {
+            continue;
+        }
         s_phase[i] += s_inc[i];
         int32_t sq = (s_phase[i] & 0x80000000U) ? 2730 : -2730;
+        if (i == 2) {
+            sq = (sq * 13) / 32; /* echo channel quieter */
+        }
         acc += sq;
     }
-    return acc / 3;
+    acc /= 3;
+
+    if (s_kick_env > 0U) {
+        acc += (int32_t)s_kick_env * 95;
+        s_kick_env--;
+    }
+    if (s_snare_env > 0U) {
+        /* Hiss-ish: sign from phase LSB */
+        int32_t hiss = ((s_tick & 1U) != 0U) ? 900 : -900;
+        acc += (hiss * (int32_t)s_snare_env) / 28;
+        s_snare_env--;
+    }
+    return acc;
 }
 
 static uint8_t lab_sample_to_duty(int32_t sample)
@@ -79,12 +188,13 @@ static uint8_t lab_sample_to_duty(int32_t sample)
         peak = 255U;
     }
 
+    /* Keep below full 8-bit swing: SC8002B + transducer; ESP32 DAC path scales further in platform_hw. */
     int32_t x = (sample * (int32_t)peak) / 4096;
-    if (x > 100) {
-        x = 100;
+    if (x > LAB_SAMPLE_PEAK_CLAMP) {
+        x = LAB_SAMPLE_PEAK_CLAMP;
     }
-    if (x < -100) {
-        x = -100;
+    if (x < -LAB_SAMPLE_PEAK_CLAMP) {
+        x = -LAB_SAMPLE_PEAK_CLAMP;
     }
     int32_t d = (int32_t)128 + x;
     if (d < 4) {
@@ -102,22 +212,80 @@ static void lab_task(void *arg)
     bool carrier_on = false;
 
     for (;;) {
-        if (s_want_play) {
+        if (!s_want_play) {
+            if (carrier_on) {
+                if (s_pcm_tmr) {
+                    (void)esp_timer_stop(s_pcm_tmr);
+                }
+                dashcdg_platform_hw_lab_pcm_stream_end();
+                carrier_on = false;
+            }
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        /* `play_set(true)` calls `lab_pcm_stream_end()` first; re-acquire streaming if we lost it. */
+        bool streaming = dashcdg_platform_hw_lab_pcm_is_streaming();
+        if (!carrier_on || !streaming) {
+            if (carrier_on && !streaming) {
+                if (s_pcm_tmr) {
+                    (void)esp_timer_stop(s_pcm_tmr);
+                }
+                carrier_on = false;
+            }
             if (!carrier_on) {
                 dashcdg_badge_lab_ym_reset();
-                dashcdg_platform_hw_lab_pcm_stream_begin();
+                if (!dashcdg_platform_hw_lab_pcm_stream_begin()) {
+                    vTaskDelay(pdMS_TO_TICKS(2));
+                    continue;
+                }
                 carrier_on = true;
+                if (s_pcm_tmr && esp_timer_start_periodic(s_pcm_tmr, LAB_SAMPLE_US) != ESP_OK) {
+                    ESP_LOGE(TAG, "esp_timer_start_periodic failed");
+                }
             }
-            int32_t s = ym_tick();
-            uint8_t d = lab_sample_to_duty(s);
-            dashcdg_platform_hw_lab_pcm_push_u8(d);
-            esp_rom_delay_us(LAB_SAMPLE_US);
-        } else {
+        }
+
+        /* `ulTaskNotifyTake(pdTRUE, ...)` returns the pending count then clears it — process every tick. */
+        uint32_t pending = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+        if (!s_want_play) {
+            if (s_pcm_tmr) {
+                (void)esp_timer_stop(s_pcm_tmr);
+            }
             if (carrier_on) {
                 dashcdg_platform_hw_lab_pcm_stream_end();
                 carrier_on = false;
             }
-            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+        if (!dashcdg_platform_hw_lab_pcm_is_streaming()) {
+            if (s_pcm_tmr) {
+                (void)esp_timer_stop(s_pcm_tmr);
+            }
+            carrier_on = false;
+            continue;
+        }
+        if (pending == 0U) {
+            /* Timeout: keep streaming path alive; timer may have stalled. */
+            continue;
+        }
+        while (pending > 0U) {
+            if (!s_want_play) {
+                break;
+            }
+            if (!dashcdg_platform_hw_lab_pcm_is_streaming()) {
+                break;
+            }
+            uint32_t chunk = (pending > LAB_MAX_BURST) ? LAB_MAX_BURST : pending;
+            pending -= chunk;
+            while (chunk-- > 0U) {
+                int32_t s = ym_tick();
+                uint8_t d = lab_sample_to_duty(s);
+                dashcdg_platform_hw_lab_pcm_push_u8(d);
+            }
+            if (pending > 0U) {
+                taskYIELD();
+            }
         }
     }
 }
@@ -126,7 +294,11 @@ void dashcdg_badge_lab_ym_reset(void)
 {
     memset(s_phase, 0, sizeof(s_phase));
     s_tick = 0U;
-    pattern_refresh();
+    s_step_counter = 0U;
+    s_pat_pos = 0U;
+    s_kick_env = 0U;
+    s_snare_env = 0U;
+    pattern_apply_step();
 }
 
 void dashcdg_badge_lab_ym_init(void)
@@ -138,20 +310,54 @@ void dashcdg_badge_lab_ym_init(void)
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate lab_task failed");
         s_task = NULL;
+        return;
+    }
+    const esp_timer_create_args_t tcfg = {
+        .callback = &lab_pcm_timer_cb,
+        .arg = NULL,
+#if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+        .dispatch_method = ESP_TIMER_ISR,
+#else
+        .dispatch_method = ESP_TIMER_TASK,
+#endif
+        .name = "lab_pcm",
+        .skip_unhandled_events = false,
+    };
+    if (esp_timer_create(&tcfg, &s_pcm_tmr) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_timer_create lab_pcm failed");
+        s_pcm_tmr = NULL;
     }
 }
 
 void dashcdg_badge_lab_ym_play_set(bool play)
 {
     dashcdg_badge_lab_ym_init();
+    if (play) {
+        /* Ensure IO26 / streaming flag / seq state are sane before the lab task opens PCM again. */
+        dashcdg_platform_hw_lab_pcm_stream_end();
+        dashcdg_badge_lab_ym_reset();
+    } else {
+        /* Stop timer + streaming here so pause is immediate (lab task may be mid-burst on ulTaskNotifyTake). */
+        if (s_pcm_tmr) {
+            (void)esp_timer_stop(s_pcm_tmr);
+        }
+        dashcdg_platform_hw_lab_pcm_stream_end();
+    }
     s_want_play = play;
+    if (s_task != NULL) {
+        (void)xTaskNotifyGive(s_task);
+    }
 }
 
 void dashcdg_badge_lab_ym_stop(void)
 {
     s_want_play = false;
+    if (s_pcm_tmr) {
+        (void)esp_timer_stop(s_pcm_tmr);
+    }
     dashcdg_platform_hw_lab_pcm_stream_end();
     if (s_task) {
+        (void)xTaskNotifyGive(s_task);
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

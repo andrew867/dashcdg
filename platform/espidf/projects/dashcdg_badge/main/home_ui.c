@@ -12,6 +12,7 @@
 #include "esp_wifi.h"
 #include "lvgl.h"
 
+#include "battery_label.h"
 #include "board_cyd_freenove_32.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
@@ -33,33 +34,29 @@ static lv_obj_t *s_lbl_wifi;
 static lv_obj_t *s_lbl_ip;
 static lv_obj_t *s_lbl_bat;
 static lv_obj_t *s_info_modal;
+/** Sysinfo modal: battery block label + timer (LVGL thread; no port lock in cb). */
+static lv_obj_t *s_info_pack_lbl;
+static lv_timer_t *s_info_live_tmr;
 
 /** Full-width low-pack warning on `lv_layer_top` (dismiss tap; re-arms above clear mV). */
 static lv_obj_t *s_lowbat_root;
-static lv_obj_t *s_lowbat_lbl;
+static lv_obj_t *s_lowbat_title;
+static lv_obj_t *s_lowbat_sub;
 static lv_timer_t *s_lowbat_anim_timer;
 static uint8_t s_lowbat_user_dismissed;
 static uint8_t s_lowbat_anim_step;
 
 /** Show bar at/under this pack mV; hide until re-armed after reaching CLEAR mV. */
-#define HOME_LOWBAT_SHOW_MV  3620
-#define HOME_LOWBAT_CLEAR_MV 3760
+#define HOME_LOWBAT_SHOW_MV  3400
+#define HOME_LOWBAT_CLEAR_MV 3520
 
-/** Battery label text color: dedicated style so theme refresh cannot revert to primary (blue). */
-static lv_style_t s_home_bat_text_style;
-static bool s_home_bat_text_style_inited;
-
-static void home_bat_text_style_attach(lv_obj_t *lbl_bat)
+/** Battery label: use default style selector `0` (same as karaoke bar) so tint updates apply reliably. */
+static void home_bat_label_init_style(lv_obj_t *lbl_bat)
 {
     if (!lbl_bat) {
         return;
     }
-    if (!s_home_bat_text_style_inited) {
-        lv_style_init(&s_home_bat_text_style);
-        lv_style_set_text_color(&s_home_bat_text_style, lv_color_hex(0xccbb66));
-        s_home_bat_text_style_inited = true;
-    }
-    lv_obj_add_style(lbl_bat, &s_home_bat_text_style, 0);
+    lv_obj_set_style_text_color(lbl_bat, lv_color_hex(0xaaccbb), 0);
 }
 
 /** LVGL 9 defaults lv_obj to scrollable; tiny flex overflows draw scrollbar chrome on the status dock. */
@@ -126,6 +123,11 @@ static void on_tile_applications(lv_event_t *e)
 
 static void sysinfo_modal_close(void)
 {
+    if (s_info_live_tmr) {
+        lv_timer_del(s_info_live_tmr);
+        s_info_live_tmr = NULL;
+    }
+    s_info_pack_lbl = NULL;
     if (s_info_modal && lv_obj_is_valid(s_info_modal)) {
         lv_obj_del(s_info_modal);
     }
@@ -149,27 +151,70 @@ static void on_modal_ok_click(lv_event_t *e)
     sysinfo_modal_close();
 }
 
-static esp_err_t home_battery_read_once(int *out_raw, int *out_vbat_mv)
+static esp_err_t home_battery_read_once(int *out_raw, int *out_pin_mv, int *out_vbat_mv)
 {
     int raw = 0;
+    int pin = 0;
     int vbat = 0;
     esp_err_t br = ESP_FAIL;
 
     if (dashcdg_platform_hw_is_ready()) {
-        br = dashcdg_platform_hw_battery_read(&raw, NULL, &vbat);
+        br = dashcdg_platform_hw_battery_read(&raw, &pin, &vbat);
     }
     if (br != ESP_OK) {
-        if (!dashcdg_vbat_sense_is_ready() || dashcdg_vbat_sense_read(&raw, NULL, &vbat) != ESP_OK) {
+        pin = 0;
+        if (!dashcdg_vbat_sense_is_ready() || dashcdg_vbat_sense_read(&raw, &pin, &vbat) != ESP_OK) {
             return ESP_FAIL;
         }
     }
     if (out_raw) {
         *out_raw = raw;
     }
+    if (out_pin_mv) {
+        *out_pin_mv = pin;
+    }
     if (out_vbat_mv) {
         *out_vbat_mv = vbat;
     }
     return ESP_OK;
+}
+
+static void home_sysinfo_refresh_pack_lbl(void)
+{
+    if (!s_info_pack_lbl || !lv_obj_is_valid(s_info_pack_lbl)) {
+        return;
+    }
+    int braw = 0;
+    int pin_mv = 0;
+    int bmv = 0;
+    char buf[320];
+    if (home_battery_read_once(&braw, &pin_mv, &bmv) != ESP_OK) {
+        snprintf(buf, sizeof(buf), "--- Pack (ADC) ---\n(read failed)\n");
+        lv_label_set_text(s_info_pack_lbl, buf);
+        return;
+    }
+    snprintf(buf, sizeof(buf),
+             "--- Pack (ADC) ---\n"
+             "raw .... %d   (log at shutdown for cal)\n"
+             "pin .... %d mV\n"
+             "pack ... %d mV\n"
+             "dock tint: red low %d .. blue mid %d .. green high %d mV\n",
+             braw, pin_mv, bmv, DASHCDG_BAT_COLOR_MV_LOW, DASHCDG_BAT_COLOR_MV_MID, DASHCDG_BAT_COLOR_MV_FULL);
+    lv_label_set_text(s_info_pack_lbl, buf);
+}
+
+static void home_sysinfo_live_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_info_modal || !lv_obj_is_valid(s_info_modal) || !s_info_pack_lbl || !lv_obj_is_valid(s_info_pack_lbl)) {
+        if (s_info_live_tmr) {
+            lv_timer_del(s_info_live_tmr);
+            s_info_live_tmr = NULL;
+        }
+        s_info_pack_lbl = NULL;
+        return;
+    }
+    home_sysinfo_refresh_pack_lbl();
 }
 
 static void home_lowbat_overlay_destroy(void)
@@ -182,7 +227,8 @@ static void home_lowbat_overlay_destroy(void)
         lv_obj_del(s_lowbat_root);
     }
     s_lowbat_root = NULL;
-    s_lowbat_lbl = NULL;
+    s_lowbat_title = NULL;
+    s_lowbat_sub = NULL;
 }
 
 static void home_lowbat_anim_timer_cb(lv_timer_t *t)
@@ -193,8 +239,8 @@ static void home_lowbat_anim_timer_cb(lv_timer_t *t)
         return;
     }
     s_lowbat_anim_step++;
-    lv_obj_set_style_bg_color(s_lowbat_root, (s_lowbat_anim_step & 1U) ? lv_color_hex(0x481010) : lv_color_hex(0x702020), 0);
-    lv_obj_set_style_border_color(s_lowbat_root, (s_lowbat_anim_step & 2U) ? lv_color_hex(0xff8800) : lv_color_hex(0xff2200), 0);
+    lv_obj_set_style_bg_color(s_lowbat_root, (s_lowbat_anim_step & 1U) ? lv_color_hex(0x3a1510) : lv_color_hex(0x4a2010), 0);
+    lv_obj_set_style_border_color(s_lowbat_root, (s_lowbat_anim_step & 2U) ? lv_color_hex(0xff9933) : lv_color_hex(0xff5522), 0);
 }
 
 static void home_lowbat_overlay_touch_dismiss(lv_event_t *e)
@@ -230,41 +276,62 @@ static void home_lowbat_overlay_update(int raw, int vbat_mv)
     if (!s_lowbat_root || !lv_obj_is_valid(s_lowbat_root)) {
         s_lowbat_root = lv_obj_create(lv_layer_top());
         lv_obj_set_width(s_lowbat_root, lv_pct(100));
-        lv_obj_set_height(s_lowbat_root, 38);
+        lv_obj_set_height(s_lowbat_root, LV_SIZE_CONTENT);
         lv_obj_align(s_lowbat_root, LV_ALIGN_TOP_MID, 0, 0);
         lv_obj_set_style_bg_opa(s_lowbat_root, LV_OPA_COVER, 0);
         lv_obj_set_style_opa(s_lowbat_root, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(s_lowbat_root, lv_color_hex(0x501010), 0);
+        lv_obj_set_style_bg_color(s_lowbat_root, lv_color_hex(0x3a1510), 0);
+        lv_obj_set_style_bg_grad_dir(s_lowbat_root, LV_GRAD_DIR_NONE, 0);
+        lv_obj_set_style_shadow_width(s_lowbat_root, 0, 0);
+        lv_obj_set_style_outline_width(s_lowbat_root, 0, 0);
         lv_obj_set_style_border_side(s_lowbat_root, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_width(s_lowbat_root, 3, 0);
-        lv_obj_set_style_border_color(s_lowbat_root, lv_color_hex(0xff6600), 0);
-        lv_obj_set_style_pad_hor(s_lowbat_root, 8, 0);
-        lv_obj_set_style_pad_ver(s_lowbat_root, 4, 0);
+        lv_obj_set_style_border_width(s_lowbat_root, 4, 0);
+        lv_obj_set_style_border_color(s_lowbat_root, lv_color_hex(0xff7722), 0);
+        lv_obj_set_style_pad_hor(s_lowbat_root, 10, 0);
+        lv_obj_set_style_pad_ver(s_lowbat_root, 8, 0);
+        lv_obj_set_style_pad_row(s_lowbat_root, 4, 0);
         lv_obj_set_style_radius(s_lowbat_root, 0, 0);
+        lv_obj_set_flex_flow(s_lowbat_root, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(s_lowbat_root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_flag(s_lowbat_root, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_lowbat_root, home_lowbat_overlay_touch_dismiss, LV_EVENT_CLICKED, NULL);
         lv_obj_remove_flag(s_lowbat_root, LV_OBJ_FLAG_SCROLLABLE);
 
-        s_lowbat_lbl = lv_label_create(s_lowbat_root);
-        lv_label_set_long_mode(s_lowbat_lbl, LV_LABEL_LONG_MODE_WRAP);
-        lv_obj_set_width(s_lowbat_lbl, lv_pct(94));
-        lv_obj_set_style_text_color(s_lowbat_lbl, lv_color_hex(0xffccaa), 0);
-        lv_obj_align(s_lowbat_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+        s_lowbat_title = lv_label_create(s_lowbat_root);
+        lv_label_set_long_mode(s_lowbat_title, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_width(s_lowbat_title, lv_pct(92));
+        lv_obj_set_style_text_color(s_lowbat_title, lv_color_hex(0xfff2e6), 0);
+        lv_obj_set_style_text_align(s_lowbat_title, LV_TEXT_ALIGN_CENTER, 0);
+
+        s_lowbat_sub = lv_label_create(s_lowbat_root);
+        lv_label_set_long_mode(s_lowbat_sub, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_width(s_lowbat_sub, lv_pct(92));
+        lv_obj_set_style_text_color(s_lowbat_sub, lv_color_hex(0xd4b8a8), 0);
+        lv_obj_set_style_text_align(s_lowbat_sub, LV_TEXT_ALIGN_CENTER, 0);
+        {
+            int sw = HOME_LOWBAT_SHOW_MV / 1000;
+            int sf = (HOME_LOWBAT_SHOW_MV % 1000) / 10;
+            int cw = HOME_LOWBAT_CLEAR_MV / 1000;
+            int cf = (HOME_LOWBAT_CLEAR_MV % 1000) / 10;
+            char sub[160];
+            snprintf(sub, sizeof(sub),
+                     "Tap to hide. Comes back if the pack stays at or under %d.%02d V until it reads above "
+                     "%d.%02d V while charging.",
+                     sw, sf, cw, cf);
+            lv_label_set_text(s_lowbat_sub, sub);
+        }
 
         s_lowbat_anim_step = 0U;
         if (s_lowbat_anim_timer == NULL) {
-            s_lowbat_anim_timer = lv_timer_create(home_lowbat_anim_timer_cb, 180, NULL);
+            s_lowbat_anim_timer = lv_timer_create(home_lowbat_anim_timer_cb, 320, NULL);
         }
         lv_obj_move_foreground(s_lowbat_root);
     }
 
-    if (s_lowbat_lbl && lv_obj_is_valid(s_lowbat_lbl)) {
-        char line[140];
-        snprintf(line, sizeof(line),
-                 LV_SYMBOL_WARNING "  LOW PACK  %d.%dV   raw %d   %d mV\n"
-                 "tap bar to dismiss   (re-arms after %d mV)",
-                 w, f, raw, vbat_mv, HOME_LOWBAT_CLEAR_MV);
-        lv_label_set_text(s_lowbat_lbl, line);
+    if (s_lowbat_title && lv_obj_is_valid(s_lowbat_title)) {
+        char line[96];
+        snprintf(line, sizeof(line), LV_SYMBOL_BATTERY_EMPTY "  Low battery  %d.%dV", w, f);
+        lv_label_set_text(s_lowbat_title, line);
     }
 }
 
@@ -330,22 +397,6 @@ static void on_info_btn(lv_event_t *e)
         snprintf(body + z1, sizeof(body) - z1, "\n[wifi] idle / disconnected\n");
     }
 
-    {
-        int braw = 0;
-        int bmv = 0;
-        size_t zb = strlen(body);
-        if (home_battery_read_once(&braw, &bmv) == ESP_OK) {
-            snprintf(body + zb, sizeof(body) - zb,
-                     "\n--- Pack (ADC) ---\n"
-                     "raw .... %d   (log at shutdown for colour cal)\n"
-                     "pack ... %d mV\n"
-                     "dock tint mix: 3450 mV (red) .. 4180 mV (green)\n",
-                     braw, bmv);
-        } else {
-            snprintf(body + zb, sizeof(body) - zb, "\n--- Pack (ADC) ---\n(read failed)\n");
-        }
-    }
-
     lv_obj_t *layer = lv_layer_top();
     s_info_modal = lv_obj_create(layer);
     lv_obj_set_size(s_info_modal, lv_pct(100), lv_pct(100));
@@ -391,12 +442,23 @@ static void on_info_btn(lv_event_t *e)
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
     lv_obj_add_event_cb(scroll, on_modal_panel_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(scroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(scroll, 6, 0);
 
     lv_obj_t *txt = lv_label_create(scroll);
     lv_label_set_long_mode(txt, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_width(txt, lv_pct(100));
     lv_obj_set_style_text_color(txt, lv_color_hex(0xaaccbb), 0);
     lv_label_set_text(txt, body);
+
+    lv_obj_t *pack_lbl = lv_label_create(scroll);
+    s_info_pack_lbl = pack_lbl;
+    lv_label_set_long_mode(pack_lbl, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(pack_lbl, lv_pct(100));
+    lv_obj_set_style_text_color(pack_lbl, lv_color_hex(0xaaccbb), 0);
+    home_sysinfo_refresh_pack_lbl();
+    s_info_live_tmr = lv_timer_create(home_sysinfo_live_timer_cb, 500, NULL);
 
     lv_obj_t *row = lv_obj_create(panel);
     lv_obj_set_width(row, lv_pct(100));
@@ -445,42 +507,17 @@ void dashcdg_home_ui_pause_status_updates(void)
     home_lowbat_overlay_destroy();
 }
 
-/*
- * Pack-side colour: red toward ~3.45 V (3.3 V rail + ME6217-class dropout headroom), green toward
- * ~4.2 V full; smooth mix in between (ESP brownout is on the regulated rail, not this sense node).
- */
-static lv_color_t home_bat_color_from_pack_mv(int vbat_mv)
-{
-    const int mv_red = 3450;
-    const int mv_green = 4180;
-    int x = (vbat_mv - mv_red) * 255 / (mv_green - mv_red);
-    if (x < 0) {
-        x = 0;
-    }
-    if (x > 255) {
-        x = 255;
-    }
-    /* lv_color_mix(c1,c2,mix): mix->255 pulls toward c1, mix->0 toward c2 - green high, red low. */
-    return lv_color_mix(lv_color_hex(0x33dd66), lv_color_hex(0xff4444), (uint8_t)x);
-}
-
 static void home_status_fill_bat(char *bat_txt, size_t bat_sz, lv_color_t *bat_col)
 {
     int raw = 0;
     int vbat = 0;
-    if (home_battery_read_once(&raw, &vbat) != ESP_OK) {
-        snprintf(bat_txt, bat_sz, " -- ");
+    if (home_battery_read_once(&raw, NULL, &vbat) != ESP_OK) {
+        snprintf(bat_txt, bat_sz, LV_SYMBOL_BATTERY_EMPTY " --");
         *bat_col = lv_color_hex(0x887766);
         return;
     }
-    int deci = (vbat * 10 + 500) / 1000;
-    if (deci < 0) {
-        deci = 0;
-    }
-    int w = deci / 10;
-    int f = deci % 10;
-    snprintf(bat_txt, bat_sz, "%4d %d.%dV", raw, w, f);
-    *bat_col = home_bat_color_from_pack_mv(vbat);
+    dashcdg_battery_format_status_line_raw(bat_txt, bat_sz, vbat, raw);
+    *bat_col = dashcdg_battery_label_color_from_pack_mv(vbat);
 }
 
 #if DASHCDG_HOME_TOUCH_DEBUG_OVERLAY
@@ -545,11 +582,7 @@ static void home_status_apply_labels(const char *wifi_txt, const char *ip_txt, c
     lv_label_set_text(s_lbl_wifi, wifi_txt);
     lv_label_set_text(s_lbl_ip, ip_txt);
     if (s_lbl_bat) {
-        if (s_home_bat_text_style_inited) {
-            lv_style_set_text_color(&s_home_bat_text_style, bat_col);
-        } else {
-            lv_obj_set_style_text_color(s_lbl_bat, bat_col, 0);
-        }
+        lv_obj_set_style_text_color(s_lbl_bat, bat_col, 0);
         lv_label_set_text(s_lbl_bat, bat_txt);
         lv_obj_invalidate(s_lbl_bat);
     }
@@ -574,7 +607,7 @@ static void home_status_timer_cb(lv_timer_t *t)
     {
         int br = 0;
         int bmv = 0;
-        if (home_battery_read_once(&br, &bmv) == ESP_OK) {
+        if (home_battery_read_once(&br, NULL, &bmv) == ESP_OK) {
             home_lowbat_overlay_update(br, bmv);
         } else {
             home_lowbat_overlay_destroy();
@@ -601,7 +634,7 @@ static void home_status_refresh_foreign(void)
     {
         int br = 0;
         int bmv = 0;
-        if (home_battery_read_once(&br, &bmv) == ESP_OK) {
+        if (home_battery_read_once(&br, NULL, &bmv) == ESP_OK) {
             home_lowbat_overlay_update(br, bmv);
         }
     }
@@ -801,7 +834,7 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
     lv_label_set_long_mode(s_lbl_bat, LV_LABEL_LONG_MODE_CLIP);
     lv_obj_set_width(s_lbl_bat, 94);
     lv_obj_set_height(s_lbl_bat, 18);
-    home_bat_text_style_attach(s_lbl_bat);
+    home_bat_label_init_style(s_lbl_bat);
     lv_obj_set_style_text_align(s_lbl_bat, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_text(s_lbl_bat, " -- ");
 
