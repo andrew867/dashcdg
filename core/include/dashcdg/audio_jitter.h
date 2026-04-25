@@ -4,10 +4,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum {
-    DASHCDG_AUDIO_JITTER_MAX_PAYLOAD = 255,
-    DASHCDG_AUDIO_JITTER_SLOT_COUNT = 64
-};
+enum { DASHCDG_AUDIO_JITTER_MAX_PAYLOAD = 255 };
+
+/*
+ * Desktop default 64 slots (~18+ KiB struct). Embedded targets may override before including
+ * this header (e.g. ESP-IDF `target_compile_definitions(... DASHCDG_AUDIO_JITTER_SLOT_COUNT=24)`).
+ */
+#ifndef DASHCDG_AUDIO_JITTER_SLOT_COUNT
+#define DASHCDG_AUDIO_JITTER_SLOT_COUNT 64
+#endif
 
 /*
  * When the next sequential frame is missing and no higher-sequence packet is buffered,
@@ -41,6 +46,16 @@ enum {
  */
 #ifndef DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS
 #define DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS 280U
+#endif
+/*
+ * Skip-starvation gate normally refuses loss/hole SKIP while the host PCM ring still looks "deep"
+ * (protects underrun). If decode is wedged for this long anyway, allow SKIP — otherwise Win32/P3
+ * paths can deadlock: ring never drains, gate never opens, CDG keeps advancing (see
+ * docs/specs/desktop-rx-p3-gdi-audio-stall-rca.md). Must stay above
+ * tests/test_core.c:test_audio_jitter_skip_blocked_while_device_buffer_is_healthy (500 ms).
+ */
+#ifndef DASHCDG_AUDIO_STARVATION_GATE_BYPASS_MS
+#define DASHCDG_AUDIO_STARVATION_GATE_BYPASS_MS 900U
 #endif
 
 struct dashcdg_audio_jitter_frame {

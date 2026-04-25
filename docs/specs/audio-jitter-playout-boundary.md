@@ -101,6 +101,8 @@ enum dashcdg_audio_drain_step {
 
 **Playout-delay alignment:** The drain step must compare `jb->next_playback_ms` against the **receiver local playout target**, not raw sender playback. Implementations therefore subtract `announced_playout_delay_ms` from `sender_playback_now_ms` before deciding a frame is late. Without that subtraction, the receiver treats every packet as late by roughly the entire preroll and burns through startup audio immediately.
 
+**Skip-starvation bypass:** The drain input’s `audio_buffered_ms` gate avoids skipping while the host PCM ring is still “deep.” If `ms_since_prior_audio_apply` exceeds `DASHCDG_AUDIO_STARVATION_GATE_BYPASS_MS` (~900 ms), the gate opens anyway so loss recovery cannot deadlock when the ring is stuck high but decode has stalled (see `docs/specs/desktop-rx-p3-gdi-audio-stall-rca.md`).
+
 ## Invariants (MUST hold)
 
 1. `payload_length <= DASHCDG_AUDIO_JITTER_MAX_PAYLOAD` or insert returns `0`.

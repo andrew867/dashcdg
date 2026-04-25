@@ -12,6 +12,11 @@ static int dashcdg_audio_jitter_skip_starvation_gate_open(const struct dashcdg_a
         return 1;
     }
 
+    if (in->ms_since_prior_audio_apply != 0U &&
+            in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STARVATION_GATE_BYPASS_MS) {
+        return 1;
+    }
+
     max_safe_buffer_ms = (uint32_t) in->announced_audio_frame_ms * 2U;
     if (in->announced_playout_delay_ms > 0U) {
         uint32_t quarter_preroll_ms = (uint32_t) in->announced_playout_delay_ms / 4U;
@@ -161,6 +166,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
 ) {
     struct dashcdg_audio_jitter_frame *frame;
     uint64_t receiver_playback_now_ms = 0U;
+    int starvation_gate_open = 0;
 
     if (jb == NULL || in == NULL || out_frame == NULL || out_missing_skips_delta == NULL) {
         return DASHCDG_AUDIO_DRAIN_STOP;
@@ -188,10 +194,45 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         return DASHCDG_AUDIO_DRAIN_APPLY;
     }
 
+    starvation_gate_open = dashcdg_audio_jitter_skip_starvation_gate_open(in);
+
+    /*
+     * Recovery guard for "full-jitter deadlock":
+     * - next_media_sequence is missing,
+     * - buffer is near full with newer frames queued,
+     * - decode was already primed.
+     *
+     * In this state, waiting for late gates can permanently stall playout (ingest stops at slot cap,
+     * no new packets can enter, and next sequence never materializes). Fast-forward to the oldest
+     * available frame so drain can resume and continuity can recover.
+     */
+    if (in->primed_decode != 0 &&
+            in->announced_audio_frame_ms > 0 &&
+            in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
+            dashcdg_audio_jitter_occupied_count(jb) >= (DASHCDG_AUDIO_JITTER_SLOT_COUNT - 2U)) {
+        struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
+
+        if (oldest != NULL && oldest->media_sequence > jb->next_media_sequence) {
+            uint32_t jump = oldest->media_sequence - jb->next_media_sequence;
+            *out_missing_skips_delta = (uint64_t) jump;
+            jb->next_media_sequence = oldest->media_sequence;
+            jb->next_playback_ms += (uint64_t) jump * (uint64_t) in->announced_audio_frame_ms;
+            return DASHCDG_AUDIO_DRAIN_SKIP;
+        }
+    }
+
     if (in->have_sender_playback && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
                     in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
-            dashcdg_audio_jitter_skip_starvation_gate_open(in) &&
+            (starvation_gate_open ||
+                    /*
+                     * If occupancy is near-full and the missing sequence never arrives, using the
+                     * jitter occupancy proxy as "buffered_ms" can keep the starvation gate closed
+                     * forever. Allow a guarded hole-skip so playout does not deadlock at full depth.
+                     */
+                    (in->primed_decode != 0 &&
+                            in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
+                            dashcdg_audio_jitter_occupied_count(jb) >= (DASHCDG_AUDIO_JITTER_SLOT_COUNT - 2U))) &&
             receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
 
@@ -260,7 +301,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
     if (in->primed_decode != 0 && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
                     in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
-            dashcdg_audio_jitter_skip_starvation_gate_open(in) &&
+            starvation_gate_open &&
             in->ms_since_prior_audio_apply != 0U &&
             in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
             dashcdg_audio_jitter_oldest(jb) == NULL) {
