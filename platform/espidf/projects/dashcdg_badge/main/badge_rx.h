@@ -23,6 +23,11 @@ typedef struct {
     uint32_t v4_clock_count;
     uint32_t v4_video_delta_count;
     uint32_t v4_anchor_chunks;
+    uint32_t v4_audio_chunk_rx;
+    uint32_t v4_audio_frames_out;
+    uint32_t v4_audio_decode_fail;
+    uint32_t v4_audio_dac_begin_fail;
+    uint32_t v4_audio_unsupported_codec;
     uint32_t v4_loading_screen_count;
     uint64_t last_sequence;
     int32_t skew_ema_ms;
@@ -43,8 +48,10 @@ typedef struct {
     uint8_t cdg_heap_ok;
     /** Last v4 media sender unicast (PTP/rx-stats dest), or "--". */
     char tx_stats_dest[20];
-    /** V4_RX_STATS datagrams successfully sent to TX PTP listener (same port as mcast). */
+    /** V4_RX_STATS datagrams successfully sent to TX PTP listener (BADGE_RX_TX_STATS_PORT). */
     uint32_t v4_rx_stats_sent;
+    /** Peer V4_RX_STATS datagrams observed on BADGE_RX_TX_STATS_PORT. */
+    uint32_t v4_rx_stats_peer_packets;
     /** Jitter backpressure: evict_pressure rounds (furthest-ahead batches dropped). */
     uint32_t jb_evict_rounds;
     /** CDG raster blit clipped to this height (192 full, 96 partial under jitter pressure). */
@@ -61,6 +68,8 @@ typedef struct {
 
 void dashcdg_badge_rx_start(void);
 void dashcdg_badge_rx_stop(void);
+void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on);
+void dashcdg_badge_rx_get_decode_enabled(bool *video_on, bool *audio_on);
 /** After LVGL freed widgets / heap settled, try calloc CDG+jitter again (no-op if already ok). */
 void dashcdg_badge_rx_try_upgrade_cdg_heap(void);
 void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out);

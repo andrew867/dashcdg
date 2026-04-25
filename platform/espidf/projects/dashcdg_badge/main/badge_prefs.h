@@ -23,3 +23,9 @@ esp_err_t dashcdg_badge_prefs_save_beep_volume(uint8_t pct_5_100);
 /** Touch click beep: `out_on` 0/1 (default on). */
 esp_err_t dashcdg_badge_prefs_load_touch_beep(uint8_t *out_on);
 esp_err_t dashcdg_badge_prefs_save_touch_beep(uint8_t on);
+
+/** Karaoke decode toggles: defaults on. */
+esp_err_t dashcdg_badge_prefs_load_karaoke_video_decode(uint8_t *out_on);
+esp_err_t dashcdg_badge_prefs_save_karaoke_video_decode(uint8_t on);
+esp_err_t dashcdg_badge_prefs_load_karaoke_audio_decode(uint8_t *out_on);
+esp_err_t dashcdg_badge_prefs_save_karaoke_audio_decode(uint8_t on);

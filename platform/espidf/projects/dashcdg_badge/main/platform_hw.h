@@ -5,6 +5,15 @@
 
 #include "esp_err.h"
 
+/**
+ * Audio lab (Mary demo) PCM sample rate: must match `badge_lab_ym.c` esp_timer period.
+ * 24 kHz matches half the desktop v4 default wire rate (48 kHz) for mental alignment.
+ * ESP32 DAC default digital clock supports ~19.6 kHz–MHz (not 16 kHz).
+ */
+#ifndef DASHCDG_LAB_PCM_FS_HZ
+#define DASHCDG_LAB_PCM_FS_HZ 24000u
+#endif
+
 typedef enum {
     DASHCDG_HW_SCREEN_HOME = 0,
     DASHCDG_HW_SCREEN_WIFI,
@@ -77,11 +86,27 @@ void dashcdg_platform_hw_set_touch_beep_enabled(bool on);
 /** PWM beep loudness 5-100 (maps to LEDC duty; analog 4k7+20k + SC8002B path is quiet at mid duty). */
 void dashcdg_platform_hw_set_beep_volume_pct(uint8_t pct_5_100);
 
-/** PWM lab stream on IO26: fixed ~24 kHz carrier, duty = mono PCM (exclusive with UI beep sequences). */
-void dashcdg_platform_hw_lab_pcm_stream_begin(void);
+/**
+ * Lab stream on IO26 (exclusive with UI beep sequences).
+ * On ESP32: native DAC continuous + I2S0 DMA (`dac_continuous_*`, 8-bit samples; driver expands to 16-bit DMA).
+ * Otherwise: LEDC fixed-carrier PWM duty stream.
+ */
+bool dashcdg_platform_hw_lab_pcm_stream_begin(void);
 void dashcdg_platform_hw_lab_pcm_stream_end(void);
+/** True while lab owns IO26 (UI beeps suppressed; `beep_seq_tick` idle). */
+bool dashcdg_platform_hw_lab_pcm_is_streaming(void);
 void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8);
 uint8_t dashcdg_platform_hw_get_beep_volume_pct(void);
+
+/**
+ * Karaoke v4 decoded PCM -> ESP32 native DAC (48 kHz mono, IO26). Call only from `badge_rx` task.
+ * Mutual exclude with audio lab DAC (`dashcdg_platform_hw_lab_pcm_*`).
+ */
+bool dashcdg_platform_hw_karaoke_dac_begin(void);
+void dashcdg_platform_hw_karaoke_dac_stop(void);
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples);
+/** If a partial native-DAC DMA chunk is buffered, pad with mid-scale and flush (chunk size is KARAOKE_DAC_PCM_CHUNK). */
+void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
 
 /**
  * LVGL thread: non-zero panel command pending (1 = ST7789 sleep off, 2 = wake on).
@@ -98,7 +123,8 @@ void dashcdg_platform_hw_ack_display_power_cmd(void);
 uint32_t dashcdg_platform_hw_consume_post_wake_ui_mask(void);
 
 /**
- * Thread-safe snapshot of the last battery sample taken inside the platform task (~400 ms).
+ * Thread-safe snapshot of the last battery sample taken inside the platform task
+ * (adaptive cadence: active ~1 s, karaoke ~1.5 s, sleep ~4 s, plus IIR smoothing).
  * Falls back to immediate `dashcdg_vbat_sense_read` if the task is not running.
  */
 esp_err_t dashcdg_platform_hw_battery_read(int *out_raw, int *out_pin_mv, int *out_vbat_mv);

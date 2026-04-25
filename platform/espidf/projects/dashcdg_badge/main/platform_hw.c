@@ -1,7 +1,8 @@
 /*
  * Low-priority FreeRTOS task: RGB status LED (LEDC), backlight PWM (IO27), battery cache,
- * user button (IO0), SC8002B enable (IO4), PWM "chiptune" audio on IO26 (slow multi-note sequences,
- * sine-shaped duty envelope; mid-range carriers — high/fast modulation reads as hash on PWM).
+ * user button (IO0), SC8002B enable (IO4), audio on IO26: UI = LEDC tones; lab + karaoke v4 = ESP32 DAC
+ * continuous (I2S0 DMA) when `CONFIG_IDF_TARGET_ESP32`, else LEDC PWM PCM. Beep paths must not touch IO26
+ * while either DAC stream is active (LEDC vs DAC conflict; mute must not assert /SHDN during karaoke).
  */
 #include "platform_hw.h"
 
@@ -15,6 +16,9 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/ledc.h"
+#if CONFIG_IDF_TARGET_ESP32
+#include "driver/dac_continuous.h"
+#endif
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -37,6 +41,12 @@ static const char *TAG = "platform_hw";
 #define HW_TASK_STACK  3072
 #define HW_TASK_PRIO   1
 #define HW_TICK_MS     40
+/* Battery ADC cadence: slow in sleep, moderate in active UI (cached for callers). */
+#define BAT_SAMPLE_ACTIVE_MS 1000U
+#define BAT_SAMPLE_KARAOKE_MS 1500U
+#define BAT_SAMPLE_SLEEP_MS 4000U
+/* IIR smoothing: new = old*(1-1/4) + sample*(1/4). */
+#define BAT_EMA_SHIFT 2U
 
 #define LEDC_MODE           LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_RGB_BL   LEDC_TIMER_0
@@ -86,6 +96,9 @@ static volatile int32_t s_disp_pwrcmd;
 
 static bool s_wifi_ps_saved_valid;
 static wifi_ps_type_t s_wifi_ps_saved;
+/** PS before karaoke streaming; restored when leaving karaoke (separate from panel-sleep PS save). */
+static bool s_wifi_ps_karaoke_saved_valid;
+static wifi_ps_type_t s_wifi_ps_karaoke_saved;
 
 static bool s_rgb_status_enabled = true;
 static uint8_t s_rgb_status_pct = 100;
@@ -98,6 +111,7 @@ static int s_bat_raw;
 static int s_bat_pin_mv;
 static int s_bat_vbat_mv;
 static uint64_t s_bat_sample_ms;
+static bool s_bat_cache_valid;
 
 typedef struct {
     uint16_t freq_hz;
@@ -120,7 +134,8 @@ static uint64_t s_seq_note_t1_ms;
 static beep_seq_kind_t s_seq_kind;
 
 /** 5-100: scales peak LEDC duty on IO26 (default 85; was hardcoded ~50% peak). */
-static uint8_t s_beep_vol_pct = 85;
+/** Written under `s_mtx`; read lock-free from lab PCM task (single-byte load on ESP32). */
+static volatile uint8_t s_beep_vol_pct = 85;
 /** LVGL UI tones (button triad, slider blip); power jingles ignore this. */
 static bool s_touch_beep_on = true;
 
@@ -166,8 +181,28 @@ static uint64_t s_last_blip_queued_ms;
 /** Throttle indev button triads so double-events / tight navigation do not stack sequences. */
 static uint64_t s_last_ui_queued_ms;
 
-/** When true, `beep_seq_tick` yields IO26 to `dashcdg_platform_hw_lab_pcm_push_u8` (fixed-carrier PWM). */
+/** When true, `beep_seq_tick` yields IO26 to `dashcdg_platform_hw_lab_pcm_push_u8`. */
 static volatile bool s_lab_pcm_streaming;
+
+#if CONFIG_IDF_TARGET_ESP32
+/** When true, native DAC owns GPIO26; do not touch LEDC_CH_AUDIO or amp shutdown from beep paths. */
+static volatile bool s_karaoke_pcm_streaming;
+/** DAC DMA writes in fixed chunks (driver packs 8-bit samples to 16-bit I2S slots on ESP32). */
+#define LAB_DAC_PCM_CHUNK 256u
+static dac_continuous_handle_t s_dac_lab_handle;
+static uint8_t s_dac_lab_chunk[LAB_DAC_PCM_CHUNK];
+static size_t s_dac_lab_fill;
+/** 1st-order low-pass state for light zipper / harmonic taming at 24 kHz. */
+static uint8_t s_dac_lp_u8 = 128;
+/*
+ * 48 kHz mono 8-bit DAC stream. Chunk must divide AMR-WB decode length (960 samples) so we never
+ * pad mid-frame with silence (512 did not divide 960 → audible "picket fence").
+ */
+#define KARAOKE_DAC_PCM_CHUNK 320u
+static dac_continuous_handle_t s_karaoke_dac_handle;
+static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_PCM_CHUNK];
+static size_t s_karaoke_dac_fill;
+#endif
 
 static int beep_kind_priority(beep_seq_kind_t k)
 {
@@ -273,7 +308,9 @@ static void pm_request_manual_sleep_fade_locked(uint64_t now)
     }
     s_bl_sleep_fade_manual = true;
     s_pm_state = PM_SLEEP_FADE;
-    (void)beep_queue_copy_locked(k_sleep_seq, (uint8_t)(sizeof(k_sleep_seq) / sizeof(k_sleep_seq[0])), BEEP_SEQ_SLEEP, now);
+    if (s_touch_beep_on) {
+        (void)beep_queue_copy_locked(k_sleep_seq, (uint8_t)(sizeof(k_sleep_seq) / sizeof(k_sleep_seq[0])), BEEP_SEQ_SLEEP, now);
+    }
 }
 
 static uint8_t pm_idle_dim_target_pct_locked(void)
@@ -351,7 +388,9 @@ static void pm_bump_activity_locked(uint64_t now)
             s_wifi_ps_saved_valid = false;
         }
         s_btn_block_until_hi = true;
-        (void)beep_queue_copy_locked(k_wake_seq, (uint8_t)(sizeof(k_wake_seq) / sizeof(k_wake_seq[0])), BEEP_SEQ_WAKE, now);
+        if (s_touch_beep_on) {
+            (void)beep_queue_copy_locked(k_wake_seq, (uint8_t)(sizeof(k_wake_seq) / sizeof(k_wake_seq[0])), BEEP_SEQ_WAKE, now);
+        }
     } else if (s_pm_state == PM_SLEEP_FADE) {
         s_bl_sleep_fade_manual = false;
         s_pm_state = PM_ACTIVE;
@@ -384,7 +423,9 @@ static void pm_update_idle_locked(uint64_t now)
         s_pm_state != PM_WAKE_FADE) {
         s_bl_sleep_fade_manual = false;
         s_pm_state = PM_SLEEP_FADE;
-        (void)beep_queue_copy_locked(k_sleep_seq, (uint8_t)(sizeof(k_sleep_seq) / sizeof(k_sleep_seq[0])), BEEP_SEQ_SLEEP, now);
+        if (s_touch_beep_on) {
+            (void)beep_queue_copy_locked(k_sleep_seq, (uint8_t)(sizeof(k_sleep_seq) / sizeof(k_sleep_seq[0])), BEEP_SEQ_SLEEP, now);
+        }
         return;
     }
 
@@ -467,6 +508,14 @@ static void amp_set_run(bool run)
 /** PWM to 0 only; does not touch amp shutdown (use between envelope samples while a jingle runs). */
 static void beep_pwm_zero_locked(void)
 {
+#if CONFIG_IDF_TARGET_ESP32
+    if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+#endif
+    if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
     ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, 0);
     ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
 }
@@ -474,6 +523,14 @@ static void beep_pwm_zero_locked(void)
 /** Full mute: zero PWM and assert SC8002B shutdown (call when idle / sequence finished). */
 static void beep_mute_locked(void)
 {
+#if CONFIG_IDF_TARGET_ESP32
+    if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+#endif
+    if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
     beep_pwm_zero_locked();
     amp_set_run(false);
 }
@@ -523,6 +580,11 @@ static float beep_envelope(uint32_t elapsed_ms, uint32_t dur_ms)
 
 static void beep_apply_freq_duty_locked(uint32_t freq_hz, uint32_t duty_u8)
 {
+#if CONFIG_IDF_TARGET_ESP32
+    if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+#endif
     if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
         return;
     }
@@ -556,6 +618,17 @@ static bool beep_queue_copy_locked(const beep_note_t *src, uint8_t n, beep_seq_k
     if (src == NULL || n == 0U || n > BEEP_SEQ_CAP) {
         return false;
     }
+    /* Lab / karaoke own IO26; never queue UI/blip on top of DAC PCM. */
+    if (kind == BEEP_SEQ_UI || kind == BEEP_SEQ_BLIP) {
+        if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+            return false;
+        }
+#if CONFIG_IDF_TARGET_ESP32
+        if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
+            return false;
+        }
+#endif
+    }
     neu = beep_kind_priority(kind);
     cur = beep_kind_priority(s_seq_kind);
     if (s_seq_len > 0U && s_seq_idx < s_seq_len && neu < cur) {
@@ -575,42 +648,62 @@ static void beep_seq_tick_locked(uint64_t now)
     if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
         return;
     }
-    if (s_seq_len > 0U && s_seq_idx < s_seq_len) {
-        while (s_seq_idx < s_seq_len && now >= s_seq_note_t1_ms) {
-            s_seq_idx++;
-            if (s_seq_idx >= s_seq_len) {
-                s_seq_len = 0U;
-                s_seq_kind = BEEP_SEQ_NONE;
-                goto after_note_seq;
-            }
-            s_seq_note_t0_ms = now;
-            s_seq_note_t1_ms = now + (uint64_t)s_seq[s_seq_idx].duration_ms;
-        }
-
-        const beep_note_t *n = &s_seq[s_seq_idx];
-        uint32_t elapsed = (uint32_t)(now - s_seq_note_t0_ms);
-        uint32_t dur = (uint32_t)n->duration_ms;
-        if (dur < 1U) {
-            dur = 1U;
-        }
-        float env = beep_envelope(elapsed, dur);
-        uint32_t peak = beep_peak_duty_u8();
-        uint32_t duty = (uint32_t)((float)peak * env);
-        if (duty < 1U && env > 0.08f) {
-            duty = 1U;
-        }
-
-        beep_apply_freq_duty_locked((uint32_t)n->freq_hz, duty);
+#if CONFIG_IDF_TARGET_ESP32
+    if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
+        return;
+    }
+#endif
+    /* Idle: do NOT call `beep_mute_locked` every tick — that was toggling /SHDN + PWM at 15–40 Hz and
+     * choked UI beeps (amp never stayed on long enough for the triad envelope). */
+    if (s_seq_len == 0U) {
+        return;
+    }
+    if (s_seq_idx >= s_seq_len) {
+        s_seq_len = 0U;
+        s_seq_kind = BEEP_SEQ_NONE;
+        beep_mute_locked();
         return;
     }
 
-after_note_seq:
-    beep_mute_locked();
+    while (s_seq_idx < s_seq_len && now >= s_seq_note_t1_ms) {
+        s_seq_idx++;
+        if (s_seq_idx >= s_seq_len) {
+            s_seq_len = 0U;
+            s_seq_kind = BEEP_SEQ_NONE;
+            beep_mute_locked();
+            return;
+        }
+        s_seq_note_t0_ms = now;
+        s_seq_note_t1_ms = now + (uint64_t)s_seq[s_seq_idx].duration_ms;
+    }
+
+    const beep_note_t *n = &s_seq[s_seq_idx];
+    uint32_t elapsed = (uint32_t)(now - s_seq_note_t0_ms);
+    uint32_t dur = (uint32_t)n->duration_ms;
+    if (dur < 1U) {
+        dur = 1U;
+    }
+    float env = beep_envelope(elapsed, dur);
+    uint32_t peak = beep_peak_duty_u8();
+    uint32_t duty = (uint32_t)((float)peak * env);
+    if (duty < 1U && env > 0.08f) {
+        duty = 1U;
+    }
+
+    beep_apply_freq_duty_locked((uint32_t)n->freq_hz, duty);
 }
 
 static bool beep_seq_active(void)
 {
     return s_seq_len > 0U && s_seq_idx < s_seq_len;
+}
+
+/** Drop UI/wake/sleep sequence state (does not touch GPIO; caller often follows with mute or lab setup). */
+static void beep_seq_abort_locked(void)
+{
+    s_seq_len = 0U;
+    s_seq_idx = 0U;
+    s_seq_kind = BEEP_SEQ_NONE;
 }
 
 static esp_err_t ledc_install_rgb_bl(void)
@@ -663,6 +756,196 @@ static esp_err_t ledc_install_beep(void)
     ch.hpoint = 0;
     return ledc_channel_config(&ch);
 }
+
+#if CONFIG_IDF_TARGET_ESP32
+/** Re-bind IO26 to LEDC after DAC continuous teardown (UI beeps / mute). Caller holds `s_mtx`. */
+static esp_err_t ledc_beep_audio_channel_attach_locked(void)
+{
+    ledc_channel_config_t ch = {0};
+    ch.gpio_num = DASHCDG_HW_GPIO_AUDIO_PWM;
+    ch.speed_mode = LEDC_MODE;
+    ch.channel = LEDC_CH_AUDIO;
+    ch.intr_type = LEDC_INTR_DISABLE;
+    ch.timer_sel = LEDC_TIMER_BEEP;
+    ch.duty = 0;
+    ch.hpoint = 0;
+    return ledc_channel_config(&ch);
+}
+
+/** Pad partial chunk with mid-scale silence, drain DMA, delete DAC handle, restore LEDC on IO26. */
+static void lab_dac_flush_stop_and_ledc_restore_locked(void)
+{
+    if (s_dac_lab_handle == NULL) {
+        return;
+    }
+    s_dac_lp_u8 = 128U;
+    while (s_dac_lab_fill > 0U) {
+        while (s_dac_lab_fill < LAB_DAC_PCM_CHUNK) {
+            s_dac_lab_chunk[s_dac_lab_fill++] = 128U;
+        }
+        (void)dac_continuous_write(s_dac_lab_handle, s_dac_lab_chunk, LAB_DAC_PCM_CHUNK, NULL, -1);
+        s_dac_lab_fill = 0U;
+    }
+    (void)dac_continuous_disable(s_dac_lab_handle);
+    (void)dac_continuous_del_channels(s_dac_lab_handle);
+    s_dac_lab_handle = NULL;
+    (void)ledc_beep_audio_channel_attach_locked();
+}
+
+static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
+{
+    if (s_karaoke_dac_handle == NULL) {
+        return;
+    }
+    while (s_karaoke_dac_fill > 0U) {
+        while (s_karaoke_dac_fill < KARAOKE_DAC_PCM_CHUNK) {
+            s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
+        }
+        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, KARAOKE_DAC_PCM_CHUNK, NULL, -1);
+        s_karaoke_dac_fill = 0U;
+    }
+    (void)dac_continuous_disable(s_karaoke_dac_handle);
+    (void)dac_continuous_del_channels(s_karaoke_dac_handle);
+    s_karaoke_dac_handle = NULL;
+    (void)ledc_beep_audio_channel_attach_locked();
+    __atomic_store_n(&s_karaoke_pcm_streaming, false, __ATOMIC_RELEASE);
+}
+
+bool dashcdg_platform_hw_karaoke_dac_begin(void)
+{
+    esp_err_t de;
+
+    if (!s_mtx) {
+        return false;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
+        return false;
+    }
+    if (s_dac_lab_handle != NULL) {
+        /*
+         * Audio-lab can leave a stale DAC handle behind if stream_end fails to take s_mtx during a
+         * busy period. Recover ownership here so karaoke RX does not stay permanently silent.
+         */
+        if (!__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+            lab_dac_flush_stop_and_ledc_restore_locked();
+        } else {
+            xSemaphoreGive(s_mtx);
+            return false;
+        }
+    }
+    if (s_karaoke_dac_handle != NULL) {
+        xSemaphoreGive(s_mtx);
+        return true;
+    }
+    beep_seq_abort_locked();
+    (void)ledc_stop(LEDC_MODE, LEDC_CH_AUDIO, 0);
+    {
+        dac_continuous_config_t dcfg = {
+            .chan_mask = DAC_CHANNEL_MASK_CH1,
+            .desc_num = 8,
+            .buf_size = KARAOKE_DAC_PCM_CHUNK,
+            .freq_hz = 48000,
+            .offset = 0,
+            .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
+            .chan_mode = DAC_CHANNEL_MODE_SIMUL,
+        };
+        de = dac_continuous_new_channels(&dcfg, &s_karaoke_dac_handle);
+        if (de != ESP_OK) {
+            ESP_LOGE(TAG, "karaoke dac_continuous_new_channels: %s", esp_err_to_name(de));
+            s_karaoke_dac_handle = NULL;
+            (void)ledc_beep_audio_channel_attach_locked();
+            xSemaphoreGive(s_mtx);
+            return false;
+        }
+        de = dac_continuous_enable(s_karaoke_dac_handle);
+        if (de != ESP_OK) {
+            ESP_LOGE(TAG, "karaoke dac_continuous_enable: %s", esp_err_to_name(de));
+            (void)dac_continuous_disable(s_karaoke_dac_handle);
+            (void)dac_continuous_del_channels(s_karaoke_dac_handle);
+            s_karaoke_dac_handle = NULL;
+            (void)ledc_beep_audio_channel_attach_locked();
+            xSemaphoreGive(s_mtx);
+            return false;
+        }
+    }
+    s_karaoke_dac_fill = 0U;
+    amp_set_run(true);
+    __atomic_store_n(&s_karaoke_pcm_streaming, true, __ATOMIC_RELEASE);
+    xSemaphoreGive(s_mtx);
+    return true;
+}
+
+void dashcdg_platform_hw_karaoke_dac_stop(void)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
+        return;
+    }
+    karaoke_dac_flush_stop_and_ledc_restore_locked();
+    beep_mute_locked();
+    xSemaphoreGive(s_mtx);
+}
+
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples)
+{
+    if (pcm == NULL || samples == 0U || s_karaoke_dac_handle == NULL) {
+        return;
+    }
+    amp_set_run(true);
+    for (size_t i = 0U; i < samples; ++i) {
+        int32_t s = (int32_t)pcm[i];
+        int32_t u = (s * 120) / 32768 + 128;
+        if (u < 16) {
+            u = 16;
+        }
+        if (u > 239) {
+            u = 239;
+        }
+        s_karaoke_dac_chunk[s_karaoke_dac_fill++] = (uint8_t)u;
+        if (s_karaoke_dac_fill >= KARAOKE_DAC_PCM_CHUNK) {
+            (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, KARAOKE_DAC_PCM_CHUNK, NULL, -1);
+            s_karaoke_dac_fill = 0U;
+        }
+    }
+}
+
+void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(8)) != pdTRUE) {
+        return;
+    }
+    if (s_karaoke_dac_handle != NULL && s_karaoke_dac_fill > 0U) {
+        while (s_karaoke_dac_fill < KARAOKE_DAC_PCM_CHUNK) {
+            s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
+        }
+        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, KARAOKE_DAC_PCM_CHUNK, NULL, -1);
+        s_karaoke_dac_fill = 0U;
+    }
+    xSemaphoreGive(s_mtx);
+}
+#endif
+
+#if !CONFIG_IDF_TARGET_ESP32
+bool dashcdg_platform_hw_karaoke_dac_begin(void)
+{
+    return false;
+}
+
+void dashcdg_platform_hw_karaoke_dac_stop(void) {}
+
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples)
+{
+    (void)pcm;
+    (void)samples;
+}
+
+void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void) {}
+#endif
 
 static esp_err_t gpio_misc_init(void)
 {
@@ -725,12 +1008,32 @@ static void sample_battery_update_cache(void)
         return;
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
-        s_bat_raw = raw;
-        s_bat_pin_mv = pin;
-        s_bat_vbat_mv = vbat;
+        if (!s_bat_cache_valid) {
+            s_bat_raw = raw;
+            s_bat_pin_mv = pin;
+            s_bat_vbat_mv = vbat;
+            s_bat_cache_valid = true;
+        } else {
+            const int k = (1 << BAT_EMA_SHIFT);
+
+            s_bat_raw = (s_bat_raw * (k - 1) + raw + (k / 2)) / k;
+            s_bat_pin_mv = (s_bat_pin_mv * (k - 1) + pin + (k / 2)) / k;
+            s_bat_vbat_mv = (s_bat_vbat_mv * (k - 1) + vbat + (k / 2)) / k;
+        }
         s_bat_sample_ms = dashcdg_clock_now_ms();
         xSemaphoreGive(s_mtx);
     }
+}
+
+static uint32_t battery_sample_period_ms(void)
+{
+    if (s_pm_state == PM_SLEEP || s_pm_state == PM_SLEEP_FADE) {
+        return BAT_SAMPLE_SLEEP_MS;
+    }
+    if (s_screen == DASHCDG_HW_SCREEN_KARAOKE) {
+        return BAT_SAMPLE_KARAOKE_MS;
+    }
+    return BAT_SAMPLE_ACTIVE_MS;
 }
 
 static void led_anim_frame(uint64_t now_ms)
@@ -808,7 +1111,7 @@ static void hw_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(tick_ms));
         uint64_t now = dashcdg_clock_now_ms();
 
-        if (now - last_bat_ms >= 400U) {
+        if (now - last_bat_ms >= battery_sample_period_ms()) {
             last_bat_ms = now;
             sample_battery_update_cache();
         }
@@ -963,16 +1266,36 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
     if (!s_mtx) {
         return;
     }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
-        dashcdg_hw_screen_t prev = s_screen;
-        s_screen = s;
-        if (s == DASHCDG_HW_SCREEN_KARAOKE && prev != DASHCDG_HW_SCREEN_KARAOKE) {
-            atomic_store_explicit(&s_karaoke_last_mcast_rx_ms, 0ULL, memory_order_relaxed);
-            atomic_store_explicit(&s_karaoke_last_overlay_ms, 0ULL, memory_order_relaxed);
-            s_karaoke_mcast_act_throttle_ms = 0ULL;
+    for (int attempt = 0; attempt < 4; attempt++) {
+        if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) == pdTRUE) {
+            dashcdg_hw_screen_t prev = s_screen;
+            s_screen = s;
+            if (s == DASHCDG_HW_SCREEN_KARAOKE && prev != DASHCDG_HW_SCREEN_KARAOKE) {
+                atomic_store_explicit(&s_karaoke_last_mcast_rx_ms, 0ULL, memory_order_relaxed);
+                atomic_store_explicit(&s_karaoke_last_overlay_ms, 0ULL, memory_order_relaxed);
+                s_karaoke_mcast_act_throttle_ms = 0ULL;
+                /* Modem sleep adds multi-ms wake latency; multicast audio gaps read as choppy playout. */
+                {
+                    wifi_ps_type_t cur = WIFI_PS_NONE;
+                    if (esp_wifi_get_ps(&cur) == ESP_OK) {
+                        s_wifi_ps_karaoke_saved = cur;
+                        s_wifi_ps_karaoke_saved_valid = true;
+                    } else {
+                        s_wifi_ps_karaoke_saved_valid = false;
+                    }
+                    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+                }
+            } else if (prev == DASHCDG_HW_SCREEN_KARAOKE && s != DASHCDG_HW_SCREEN_KARAOKE) {
+                if (s_wifi_ps_karaoke_saved_valid) {
+                    (void)esp_wifi_set_ps(s_wifi_ps_karaoke_saved);
+                    s_wifi_ps_karaoke_saved_valid = false;
+                }
+            }
+            pm_bump_activity_locked(dashcdg_clock_now_ms());
+            xSemaphoreGive(s_mtx);
+            return;
         }
-        pm_bump_activity_locked(dashcdg_clock_now_ms());
-        xSemaphoreGive(s_mtx);
+        vTaskDelay(pdMS_TO_TICKS(3));
     }
 }
 
@@ -1019,10 +1342,10 @@ void dashcdg_platform_hw_touch_click(void)
         return;
     }
     uint64_t now = dashcdg_clock_now_ms();
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(40)) == pdTRUE) {
         bool was_sleep = (s_pm_state == PM_SLEEP);
         pm_bump_activity_locked(now);
-        if (s_touch_beep_on && !was_sleep) {
+        if (s_touch_beep_on && !was_sleep && s_screen != DASHCDG_HW_SCREEN_AUDIO_LAB) {
             if ((now - s_last_blip_queued_ms) >= BEEP_BLIP_MIN_GAP_MS) {
                 if (beep_queue_copy_locked(k_blip_seq, (uint8_t)(sizeof(k_blip_seq) / sizeof(k_blip_seq[0])), BEEP_SEQ_BLIP,
                                            now)) {
@@ -1040,10 +1363,10 @@ void dashcdg_platform_hw_ui_sound_confirm_click(void)
         return;
     }
     uint64_t now = dashcdg_clock_now_ms();
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(40)) == pdTRUE) {
         bool was_sleep = (s_pm_state == PM_SLEEP);
         pm_bump_activity_locked(now);
-        if (s_touch_beep_on && !was_sleep) {
+        if (s_touch_beep_on && !was_sleep && s_screen != DASHCDG_HW_SCREEN_AUDIO_LAB) {
             if ((now - s_last_ui_queued_ms) >= BEEP_UI_MIN_GAP_MS) {
                 if (beep_queue_copy_locked(k_ui_seq, (uint8_t)(sizeof(k_ui_seq) / sizeof(k_ui_seq[0])), BEEP_SEQ_UI, now)) {
                     s_last_ui_queued_ms = now;
@@ -1151,35 +1474,127 @@ void dashcdg_platform_hw_set_beep_volume_pct(uint8_t pct_5_100)
     }
 }
 
-void dashcdg_platform_hw_lab_pcm_stream_begin(void)
+bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
 {
     if (!s_mtx) {
-        return;
+        return false;
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
-        return;
+        return false;
     }
+#if CONFIG_IDF_TARGET_ESP32
+    if (s_karaoke_dac_handle != NULL) {
+        xSemaphoreGive(s_mtx);
+        return false;
+    }
+#endif
+    /* Play demo: abort UI triad state; lab owns IO26 while streaming. */
+    beep_seq_abort_locked();
+#if CONFIG_IDF_TARGET_ESP32
+    (void)ledc_stop(LEDC_MODE, LEDC_CH_AUDIO, 0);
+    /* DMA descriptor buf_size must satisfy `write_bytes * 2 >= 2 * buf_size` (16-bit slot expand),
+     * or IDF's `s_dac_wait_to_load_dma_data` halves alternate loads via a static split_flag
+     * (motorboating / buzz). Match `LAB_DAC_PCM_CHUNK`. */
+    dac_continuous_config_t dcfg = {
+        .chan_mask = DAC_CHANNEL_MASK_CH1,
+        .desc_num = 8,
+        .buf_size = LAB_DAC_PCM_CHUNK,
+        .freq_hz = (uint32_t)DASHCDG_LAB_PCM_FS_HZ,
+        .offset = 0,
+        .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
+    };
+    esp_err_t de = dac_continuous_new_channels(&dcfg, &s_dac_lab_handle);
+    if (de != ESP_OK) {
+        ESP_LOGE(TAG, "dac_continuous_new_channels: %s", esp_err_to_name(de));
+        s_dac_lab_handle = NULL;
+        (void)ledc_beep_audio_channel_attach_locked();
+        xSemaphoreGive(s_mtx);
+        return false;
+    }
+    de = dac_continuous_enable(s_dac_lab_handle);
+    if (de != ESP_OK) {
+        ESP_LOGE(TAG, "dac_continuous_enable: %s", esp_err_to_name(de));
+        (void)dac_continuous_disable(s_dac_lab_handle);
+        (void)dac_continuous_del_channels(s_dac_lab_handle);
+        s_dac_lab_handle = NULL;
+        (void)ledc_beep_audio_channel_attach_locked();
+        xSemaphoreGive(s_mtx);
+        return false;
+    }
+    s_dac_lab_fill = 0U;
+    s_dac_lp_u8 = 128U;
     __atomic_store_n(&s_lab_pcm_streaming, true, __ATOMIC_RELEASE);
-    /* High carrier so duty changes approximate PCM; above UI beep path 8 kHz cap (see `beep_apply_freq_duty_locked`). */
+    amp_set_run(true);
+#else
+    __atomic_store_n(&s_lab_pcm_streaming, true, __ATOMIC_RELEASE);
     (void)ledc_set_freq(LEDC_MODE, LEDC_TIMER_BEEP, 24000U);
     amp_set_run(true);
     ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, 128U);
     ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
+#endif
     xSemaphoreGive(s_mtx);
+    return true;
+}
+
+bool dashcdg_platform_hw_lab_pcm_is_streaming(void)
+{
+    return __atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED);
 }
 
 void dashcdg_platform_hw_lab_pcm_stream_end(void)
 {
+    /* Always clear first: if mutex wait fails, lab stops pushing but a stuck "streaming" flag
+     * would silence UI beeps forever (beep_seq_tick returns early while streaming is true). */
+    __atomic_store_n(&s_lab_pcm_streaming, false, __ATOMIC_RELEASE);
     if (!s_mtx) {
         return;
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
         return;
     }
-    __atomic_store_n(&s_lab_pcm_streaming, false, __ATOMIC_RELEASE);
+#if CONFIG_IDF_TARGET_ESP32
+    lab_dac_flush_stop_and_ledc_restore_locked();
+#endif
+    beep_seq_abort_locked();
     beep_mute_locked();
     xSemaphoreGive(s_mtx);
 }
+
+#if CONFIG_IDF_TARGET_ESP32
+/**
+ * Map PWM-style ~mid duty to DAC line level: modest AC gain + soft clip, then light low-pass
+ * to reduce zipper / harsh clipping distortion at 24 kHz.
+ */
+static uint8_t lab_pcm_prepare_dac_u8(uint8_t pwm_style_u8)
+{
+    int32_t c = (int32_t)pwm_style_u8 - 128;
+    c = (c * 20) / 10; /* 2.0x */
+    if (c > 100) {
+        c = 100 + (c - 100) / 4; /* soft knee */
+    }
+    if (c < -100) {
+        c = -100 + (c + 100) / 4;
+    }
+    if (c > 115) {
+        c = 115;
+    }
+    if (c < -115) {
+        c = -115;
+    }
+    int32_t t = 128 + c;
+    if (t < 10) {
+        t = 10;
+    }
+    if (t > 245) {
+        t = 245;
+    }
+    uint8_t tgt = (uint8_t)t;
+    uint8_t out = (uint8_t)(((uint16_t)s_dac_lp_u8 * 3U + (uint16_t)tgt + 2U) / 4U);
+    s_dac_lp_u8 = out;
+    return out;
+}
+#endif
 
 void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8)
 {
@@ -1187,21 +1602,24 @@ void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8)
         return;
     }
     amp_set_run(true);
+#if CONFIG_IDF_TARGET_ESP32
+    if (s_dac_lab_handle != NULL) {
+        s_dac_lab_chunk[s_dac_lab_fill++] = lab_pcm_prepare_dac_u8(duty_u8);
+        if (s_dac_lab_fill >= LAB_DAC_PCM_CHUNK) {
+            (void)dac_continuous_write(s_dac_lab_handle, s_dac_lab_chunk, LAB_DAC_PCM_CHUNK, NULL, -1);
+            s_dac_lab_fill = 0U;
+        }
+        return;
+    }
+#endif
     ledc_set_duty(LEDC_MODE, LEDC_CH_AUDIO, duty_u8);
     ledc_update_duty(LEDC_MODE, LEDC_CH_AUDIO);
 }
 
 uint8_t dashcdg_platform_hw_get_beep_volume_pct(void)
 {
-    uint8_t v = 85;
-    if (!s_mtx) {
-        return v;
-    }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
-        v = s_beep_vol_pct;
-        xSemaphoreGive(s_mtx);
-    }
-    return v;
+    /* Lab PCM runs in a tight loop; do not block on `s_mtx` here (UI/beep may hold it). */
+    return s_beep_vol_pct;
 }
 
 esp_err_t dashcdg_platform_hw_battery_read(int *out_raw, int *out_pin_mv, int *out_vbat_mv)
@@ -1210,6 +1628,10 @@ esp_err_t dashcdg_platform_hw_battery_read(int *out_raw, int *out_pin_mv, int *o
         return dashcdg_vbat_sense_read(out_raw, out_pin_mv, out_vbat_mv);
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) != pdTRUE) {
+        return dashcdg_vbat_sense_read(out_raw, out_pin_mv, out_vbat_mv);
+    }
+    if (!s_bat_cache_valid) {
+        xSemaphoreGive(s_mtx);
         return dashcdg_vbat_sense_read(out_raw, out_pin_mv, out_vbat_mv);
     }
     if (out_raw) {
