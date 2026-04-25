@@ -64,7 +64,7 @@ PortAudio’s `outputBufferDacTime - currentTime` can **jitter by a few ms per b
 
 `dashcdg_desktop_audio_is_running()` reflects an internal `playback_running` flag. The callback can return `paAbort` or the host stream can go inactive without that flag being cleared immediately.
 
-`dashcdg_rx_handle_dead_audio_backend_locked()` previously treated `is_running` **== 1** as “healthy”lllllllll nasrt5555555555555555555555555555 and returned without rebuild → **no dead-stream recovery**.
+`dashcdg_rx_handle_dead_audio_backend_locked()` previously treated `is_running` **== 1** as “healthy” and returned without rebuild → **no dead-stream recovery**.
 
 **Mitigation:** When `g_audio->stream != NULL`, if `Pa_IsStreamActive(stream) != 1`, **fall through** to the same rebuild path as a dead backend.
 
@@ -83,16 +83,19 @@ PortAudio’s `outputBufferDacTime - currentTime` can **jitter by a few ms per b
 
 ### Issue E - WinMM/GDI stall around ~190 s, no recovery until track change/restart
 
-- Symptom: on P3/GDI/WinMM path, audio can drop out after long run and never recover on the current track.
-- Root causes:
+**Status: OPEN (2026-04)** — still reproduced after the mitigations below; audio can remain dead **until track change or RX restart**. Treat soak item 4 as a **known failure mode**, not a pass criterion, until a verified same-track recovery exists.
+
+- Symptom: on P3/GDI/WinMM path, audio can drop out after a long run (~190 s reported) and **not** recover on the **current** track.
+- Contributing factors (historical; partially addressed):
   1. WinMM worker had early error returns (`waveOutPrepareHeader`/`waveOutWrite`) that skipped common teardown path.
   2. Restart path could create a new WinMM stream while stale `audio_io_ctx` still existed.
   3. WaveOut builds could take non-legacy recovery path that is optimized for PortAudio behavior.
-- Fixes:
+- Mitigations shipped (frequency/recovery **unproven** on same track):
   1. WinMM thread now always exits through unified cleanup (`winmm_shutdown`).
   2. `dashcdg_desktop_audio_start_stream()` destroys stale WinMM stream before recreate.
   3. WaveOut builds force legacy-safe recovery fallback in RX (stop + flush + re-prime).
   4. Output readiness for WinMM now requires live `hwo` (not just non-null ctx pointer).
+- Next investigation angles: long-run WinMM `waveOut*` state (device reset, buffer completion stalls), GDI/message-pump interaction starving the media thread, and whether stall correlates with **buffer index / queue depth** rather than wall time alone.
 
 ### Issue F - RX peer `age=` drifts upward instead of staying low
 
@@ -110,7 +113,7 @@ PortAudio’s `outputBufferDacTime - currentTime` can **jitter by a few ms per b
 1. Run TX + three receivers (Win11 GL, P3 GDI/WinMM, ESP32) for >= 30 min.
 2. Verify TX peer lines keep `age` near stats interval (usually <= 2-4 s, occasional spikes, then recover).
 3. Confirm no persistent negative latency after at least 5 track changes and one pause/resume cycle.
-4. On P3 WinMM path, verify no unrecoverable silence around 190 s; if a stall occurs, recovery log appears and audio returns on same track.
+4. On P3 WinMM path, **log** any stall around ~190 s (Issue E — same-track recovery not required to pass until fixed). Capture whether recovery logs appear and whether audio returns without track change.
 5. Capture logs for any residual `bad-lat`, `slow-age`, or repeated recovery churn for threshold tuning.
 
 ## Related comments in tree

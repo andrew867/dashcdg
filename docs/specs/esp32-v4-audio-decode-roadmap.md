@@ -1,5 +1,7 @@
 # ESP32 v4 audio decode + sync (badge / karaoke) — difficulty and plan
 
+**See also:** [`docs/embedded/esp32-karaoke-decode-toggles-video-regression-rca.md`](../embedded/esp32-karaoke-decode-toggles-video-regression-rca.md) — what decode toggles actually gate, CDG vs audio resource contention, and slot-count tradeoffs.
+
 ## TL;DR difficulty
 
 | Area | Effort | Why |

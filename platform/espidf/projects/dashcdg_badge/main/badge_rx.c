@@ -389,6 +389,9 @@ static void badge_rx_handle_v4_loading_screen(const struct dashcdg_packet_view *
     if (view == NULL || s_cdg == NULL || s_jb == NULL) {
         return;
     }
+    if (!s_video_decode_enabled) {
+        return;
+    }
     if (s_cdg_snapshots_applied > 0U || s_jb->initialized || s_jitter_cdg_primed) {
         return;
     }
@@ -1363,7 +1366,12 @@ static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
         break;
     case DASHCDG_PACKET_V4_CLOCK_SYNC:
         handle_clock_sync(&view, local_now_ms);
-        drain_cdg_to_idle(local_now_ms);
+        /* `drain_cdg_to_idle` walks CDG jitter + audio; skip CDG drain when video decode is off. */
+        if (s_video_decode_enabled) {
+            drain_cdg_to_idle(local_now_ms);
+        } else {
+            badge_rx_drain_v4_audio(local_now_ms);
+        }
         break;
     case DASHCDG_PACKET_V4_LOADING_SCREEN:
         badge_rx_handle_v4_loading_screen(&view, local_now_ms);
@@ -1737,6 +1745,7 @@ void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on)
     s_audio_decode_enabled = audio_on ? 1U : 0U;
     if (!s_video_decode_enabled && s_jb != NULL) {
         dashcdg_cdg_batch_jitter_clear(s_jb);
+        s_jitter_cdg_primed = 0;
     }
     if (!s_audio_decode_enabled) {
         if (s_audio_jb != NULL) {
@@ -1956,6 +1965,10 @@ void dashcdg_badge_rx_cdg_overlay_tick(lv_obj_t *cdg_lv_slot)
         return;
     }
     if (s_cdg == NULL) {
+        xSemaphoreGive(s_mtx);
+        return;
+    }
+    if (!s_video_decode_enabled) {
         xSemaphoreGive(s_mtx);
         return;
     }
