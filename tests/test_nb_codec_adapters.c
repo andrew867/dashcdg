@@ -216,6 +216,48 @@ static void test_amr_wb_roundtrip_produces_pcm(void) {
     dashcdg_amr_wb_encoder_destroy(enc);
 }
 
+static void test_amr_wb_decode_after_jitter_style_lost(void)
+{
+    void *enc = NULL;
+    void *dec = NULL;
+    int16_t pcm_in[DASHCDG_TEST_PCM48_FRAMES];
+    int16_t pcm_a[DASHCDG_TEST_PCM48_FRAMES];
+    int16_t pcm_plc[DASHCDG_TEST_PCM48_FRAMES];
+    int16_t pcm_b[DASHCDG_TEST_PCM48_FRAMES];
+    uint8_t p1[128];
+    uint8_t p2[128];
+    int e1;
+    int e2;
+    int d;
+    int64_t energy = 0;
+    size_t i;
+
+    dashcdg_fill_test_mono_program(pcm_in, DASHCDG_TEST_PCM48_FRAMES, 0.22);
+    dashcdg_amr_wb_encoder_create(&enc);
+    dashcdg_amr_wb_decoder_create(&dec);
+    assert(enc != NULL && dec != NULL);
+    e1 = dashcdg_amr_wb_encoder_run(enc, pcm_in, p1, sizeof(p1));
+    dashcdg_fill_test_mono_program(pcm_in, DASHCDG_TEST_PCM48_FRAMES, 0.88);
+    e2 = dashcdg_amr_wb_encoder_run(enc, pcm_in, p2, sizeof(p2));
+    assert(e1 > 0 && e2 > 0);
+
+    d = dashcdg_amr_wb_decoder_run(dec, p1, (size_t) e1, pcm_a, DASHCDG_TEST_PCM48_FRAMES);
+    assert(d == (int) DASHCDG_TEST_PCM48_FRAMES);
+    d = dashcdg_amr_wb_decoder_run_lost(dec, pcm_plc, DASHCDG_TEST_PCM48_FRAMES);
+    assert(d == (int) DASHCDG_TEST_PCM48_FRAMES);
+    d = dashcdg_amr_wb_decoder_run(dec, p2, (size_t) e2, pcm_b, DASHCDG_TEST_PCM48_FRAMES);
+    assert(d == (int) DASHCDG_TEST_PCM48_FRAMES);
+
+    for (i = 0U; i < DASHCDG_TEST_PCM48_FRAMES; ++i) {
+        int32_t s = (int32_t) pcm_b[i];
+        energy += (int64_t) s * (int64_t) s;
+    }
+    assert(energy > 500000LL);
+
+    dashcdg_amr_wb_decoder_destroy(dec);
+    dashcdg_amr_wb_encoder_destroy(enc);
+}
+
 static void test_amr_nb_roundtrip_produces_pcm(void) {
     void *enc = NULL;
     void *dec = NULL;
@@ -390,6 +432,7 @@ static void test_amr_wb_encoders_keep_independent_overlap_state(void) {
 
 int main(void) {
     test_amr_wb_roundtrip_produces_pcm();
+    test_amr_wb_decode_after_jitter_style_lost();
     test_amr_nb_roundtrip_produces_pcm();
     test_evrc_roundtrip_produces_pcm();
     test_qcelp8k_roundtrip_produces_pcm();
