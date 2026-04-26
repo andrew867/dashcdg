@@ -22,11 +22,21 @@ struct dashcdg_cdg_batch_jitter_frame {
     int occupied;
     uint64_t packet_start_index;
     uint8_t packet_count;
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+    uint8_t *packet_bytes;
+#else
     uint8_t packet_bytes[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+#endif
 };
 
 struct dashcdg_cdg_batch_jitter_buffer {
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+    struct dashcdg_cdg_batch_jitter_frame *slots;
+    uint8_t *payload_pool;
+    size_t slot_capacity;
+#else
     struct dashcdg_cdg_batch_jitter_frame slots[DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT];
+#endif
     int initialized;
     uint64_t next_packet_index;
     uint64_t highest_packet_index_seen;
@@ -55,6 +65,11 @@ enum dashcdg_cdg_batch_drain_step {
 
 void dashcdg_cdg_batch_jitter_init(struct dashcdg_cdg_batch_jitter_buffer *jb);
 void dashcdg_cdg_batch_jitter_clear(struct dashcdg_cdg_batch_jitter_buffer *jb);
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t slot_count);
+void dashcdg_cdg_batch_jitter_release(struct dashcdg_cdg_batch_jitter_buffer *jb);
+#endif
+size_t dashcdg_cdg_batch_jitter_capacity(const struct dashcdg_cdg_batch_jitter_buffer *jb);
 
 int dashcdg_cdg_batch_jitter_insert(
         struct dashcdg_cdg_batch_jitter_buffer *jb,

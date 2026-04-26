@@ -22,5 +22,7 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_CDG_BATCH_JITTER_SLOT
 # Audio jitter: keep struct off dram0 .bss budget (64 slots ~18 KiB). 24 ~= 0.5 s @ 20 ms frames.
 # ~0.6 s @ 20 ms frames; helps Wi-Fi reorder bursts without evicting as often (heap struct, not .bss).
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_SLOT_COUNT=30)
+target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_HEAP_BACKED=1)
+target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED=1)
 # Badge Wi-Fi is bursty; default 280 ms `STALL_LOSS` + long `select` idle falsely advanced seq (choppy holes).
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS=850)

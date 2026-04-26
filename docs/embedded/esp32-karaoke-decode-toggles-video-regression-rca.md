@@ -29,6 +29,17 @@
 - **Audio path** unchanged when only video is off (expected for Wi-Fi vs audio isolation tests).
 - **Idle `select` timeout path:** still drains audio and pads DAC — correct for audio-on.
 
+## Dynamic memory profile (runtime, mode-aware)
+
+`badge_rx` now applies a memory profile whenever decode toggles change:
+
+- **Audio off:** frees audio jitter + AMR decode scratch, and lowers CDG jitter reserve from 6 to 2 slots so video can occupy more of the existing ring before eviction.
+- **Audio on:** re-allocates audio jitter and restores CDG reserve to 6 slots.
+- **Video off:** frees CDG overlay blit scratch and in-progress anchor assembly buffers.
+- **Video on:** re-allocates blit scratch on demand.
+
+Important limit: CDG/audio jitter **slot counts remain compile-time struct sizes** (`DASHCDG_*_JITTER_SLOT_COUNT`). Runtime mode switches reclaim heap and tune pressure, but they do not change absolute ring capacity without a deeper refactor.
+
 ## Likely regressions for CDG *reliability* when audio landed (independent of toggles)
 
 These compete for the same ESP32 resources as CDG video:

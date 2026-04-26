@@ -2,44 +2,216 @@
 
 #include "dashcdg/common.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+static size_t cdg_jb_capacity(const struct dashcdg_cdg_batch_jitter_buffer *jb) {
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+    return (jb != NULL) ? jb->slot_capacity : 0U;
+#else
+    (void) jb;
+    return DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT;
+#endif
+}
+
+size_t dashcdg_cdg_batch_jitter_capacity(const struct dashcdg_cdg_batch_jitter_buffer *jb) { return cdg_jb_capacity(jb); }
+
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+static void cdg_jb_zero_slot(struct dashcdg_cdg_batch_jitter_frame *slot) {
+    uint8_t *p = slot->packet_bytes;
+    memset(slot, 0, sizeof(*slot));
+    slot->packet_bytes = p;
+}
+#else
+static void cdg_jb_zero_slot(struct dashcdg_cdg_batch_jitter_frame *slot) { memset(slot, 0, sizeof(*slot)); }
+#endif
 
 void dashcdg_cdg_batch_jitter_init(struct dashcdg_cdg_batch_jitter_buffer *jb) {
     if (jb == NULL) {
         return;
     }
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
     memset(jb, 0, sizeof(*jb));
+    (void) dashcdg_cdg_batch_jitter_resize(jb, DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT);
+#else
+    memset(jb, 0, sizeof(*jb));
+#endif
 }
 
 void dashcdg_cdg_batch_jitter_clear(struct dashcdg_cdg_batch_jitter_buffer *jb) {
+    if (jb == NULL) {
+        return;
+    }
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+    if (jb->slots == NULL || jb->slot_capacity == 0U) {
+        jb->initialized = 0;
+        jb->next_packet_index = 0U;
+        jb->highest_packet_index_seen = 0U;
+        jb->next_playback_ms = 0U;
+        jb->reordered_batches = 0U;
+        jb->pending_drops = 0U;
+        return;
+    }
+    for (size_t i = 0; i < jb->slot_capacity; ++i) {
+        cdg_jb_zero_slot(&jb->slots[i]);
+    }
+    jb->initialized = 0;
+    jb->next_packet_index = 0U;
+    jb->highest_packet_index_seen = 0U;
+    jb->next_playback_ms = 0U;
+    jb->reordered_batches = 0U;
+    jb->pending_drops = 0U;
+#else
     dashcdg_cdg_batch_jitter_init(jb);
+#endif
 }
+
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t slot_count) {
+    struct dashcdg_cdg_batch_jitter_frame *slots;
+    uint8_t *pool;
+    size_t slot_bytes = (size_t) DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+    struct dashcdg_cdg_batch_jitter_frame *old_slots;
+    uint8_t *old_pool;
+    size_t old_cap;
+    int old_initialized;
+    uint64_t old_next_packet_index;
+    uint64_t old_highest_packet_index_seen;
+    uint64_t old_next_playback_ms;
+    uint64_t old_reordered_batches;
+    uint64_t old_pending_drops;
+    uint64_t copied_highest = 0U;
+    int copied_any = 0;
+    size_t copied = 0U;
+    uint8_t *picked = NULL;
+
+    if (jb == NULL || slot_count == 0U) {
+        return 0;
+    }
+    old_slots = jb->slots;
+    old_pool = jb->payload_pool;
+    old_cap = jb->slot_capacity;
+    old_initialized = jb->initialized;
+    old_next_packet_index = jb->next_packet_index;
+    old_highest_packet_index_seen = jb->highest_packet_index_seen;
+    old_next_playback_ms = jb->next_playback_ms;
+    old_reordered_batches = jb->reordered_batches;
+    old_pending_drops = jb->pending_drops;
+
+    slots = (struct dashcdg_cdg_batch_jitter_frame *) calloc(slot_count, sizeof(*slots));
+    if (slots == NULL) {
+        return 0;
+    }
+    pool = (uint8_t *) calloc(slot_count, slot_bytes);
+    if (pool == NULL) {
+        free(slots);
+        return 0;
+    }
+    for (size_t i = 0; i < slot_count; ++i) {
+        slots[i].packet_bytes = pool + (i * slot_bytes);
+    }
+    jb->slots = slots;
+    jb->payload_pool = pool;
+    jb->slot_capacity = slot_count;
+
+    for (size_t i = 0; i < slot_count; ++i) {
+        cdg_jb_zero_slot(&jb->slots[i]);
+    }
+    jb->initialized = 0;
+    jb->next_packet_index = old_next_packet_index;
+    jb->highest_packet_index_seen = old_highest_packet_index_seen;
+    jb->next_playback_ms = old_next_playback_ms;
+    jb->reordered_batches = old_reordered_batches;
+    jb->pending_drops = old_pending_drops;
+
+    if (old_slots != NULL && old_cap > 0U && old_initialized) {
+        picked = (uint8_t *) calloc(old_cap, sizeof(uint8_t));
+        if (picked == NULL) {
+            jb->pending_drops++;
+        } else {
+            while (copied < slot_count) {
+                size_t best_i = old_cap;
+                uint64_t best_idx = 0U;
+                for (size_t i = 0; i < old_cap; ++i) {
+                    if (picked[i] || !old_slots[i].occupied || old_slots[i].packet_start_index < old_next_packet_index) {
+                        continue;
+                    }
+                    if (best_i == old_cap || old_slots[i].packet_start_index < best_idx) {
+                        best_i = i;
+                        best_idx = old_slots[i].packet_start_index;
+                    }
+                }
+                if (best_i == old_cap) {
+                    break;
+                }
+                picked[best_i] = 1U;
+                {
+                    size_t bytes = (size_t)old_slots[best_i].packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
+                    jb->slots[copied].occupied = 1;
+                    jb->slots[copied].packet_start_index = old_slots[best_i].packet_start_index;
+                    jb->slots[copied].packet_count = old_slots[best_i].packet_count;
+                    memcpy(jb->slots[copied].packet_bytes, old_slots[best_i].packet_bytes, bytes);
+                }
+                if (!copied_any || old_slots[best_i].packet_start_index > copied_highest) {
+                    copied_highest = old_slots[best_i].packet_start_index;
+                }
+                copied_any = 1;
+                copied++;
+            }
+            free(picked);
+        }
+        if (copied_any) {
+            jb->initialized = 1;
+            jb->highest_packet_index_seen = copied_highest;
+        }
+    }
+
+    if (old_slots != NULL) {
+        free(old_slots);
+    }
+    if (old_pool != NULL) {
+        free(old_pool);
+    }
+    return 1;
+}
+
+void dashcdg_cdg_batch_jitter_release(struct dashcdg_cdg_batch_jitter_buffer *jb) {
+    if (jb == NULL) {
+        return;
+    }
+    if (jb->slots != NULL) {
+        free(jb->slots);
+    }
+    if (jb->payload_pool != NULL) {
+        free(jb->payload_pool);
+    }
+    memset(jb, 0, sizeof(*jb));
+}
+#endif
 
 struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_find(
         const struct dashcdg_cdg_batch_jitter_buffer *jb,
         uint64_t packet_start_index
 ) {
+    size_t cap = cdg_jb_capacity(jb);
     if (jb == NULL) {
         return NULL;
     }
-
-    for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (jb->slots[i].occupied && jb->slots[i].packet_start_index == packet_start_index) {
             return (struct dashcdg_cdg_batch_jitter_frame *) &jb->slots[i];
         }
     }
-
     return NULL;
 }
 
 struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_oldest(const struct dashcdg_cdg_batch_jitter_buffer *jb) {
     struct dashcdg_cdg_batch_jitter_frame *oldest = NULL;
-
+    size_t cap = cdg_jb_capacity(jb);
     if (jb == NULL) {
         return NULL;
     }
-
-    for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (!jb->slots[i].occupied) {
             continue;
         }
@@ -47,23 +219,20 @@ struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_oldest(const str
             oldest = (struct dashcdg_cdg_batch_jitter_frame *) &jb->slots[i];
         }
     }
-
     return oldest;
 }
 
 size_t dashcdg_cdg_batch_jitter_occupied_count(const struct dashcdg_cdg_batch_jitter_buffer *jb) {
     size_t n = 0U;
-
+    size_t cap = cdg_jb_capacity(jb);
     if (jb == NULL) {
         return 0U;
     }
-
-    for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (jb->slots[i].occupied) {
             ++n;
         }
     }
-
     return n;
 }
 
@@ -76,28 +245,19 @@ int dashcdg_cdg_batch_jitter_insert(
 ) {
     struct dashcdg_cdg_batch_jitter_frame *slot = NULL;
     size_t packet_bytes;
+    size_t cap = cdg_jb_capacity(jb);
 
-    if (jb == NULL || payload == NULL || packet_count == 0 || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS) {
+    if (jb == NULL || payload == NULL || packet_count == 0 || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS || cap == 0U) {
         return 0;
     }
-
     packet_bytes = (size_t) packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
 
     if (!jb->initialized) {
-        /*
-         * Always start the live cursor at packet index 0. The first datagram that arrives may be a
-         * later batch (UDP reorder or v4 sending two deltas per tick); anchoring next_packet_index
-         * to that first batch made every earlier batch get dropped as "late", which showed up as
-         * periodic missing graphic stripes during full-screen CDG paints.
-         */
         jb->next_packet_index = 0U;
         jb->highest_packet_index_seen = packet_start_index;
         jb->next_playback_ms = 0U;
         jb->initialized = 1;
     } else if (packet_start_index + (uint64_t) packet_count <= jb->next_packet_index) {
-        /*
-         * Entire batch lies before the apply cursor — duplicate or replay of already-consumed data.
-         */
         if (count_stats) {
             jb->pending_drops++;
         }
@@ -113,7 +273,7 @@ int dashcdg_cdg_batch_jitter_insert(
         return 0;
     }
 
-    for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (!jb->slots[i].occupied) {
             slot = &jb->slots[i];
             break;
@@ -126,7 +286,7 @@ int dashcdg_cdg_batch_jitter_insert(
         return 0;
     }
 
-    memset(slot, 0, sizeof(*slot));
+    cdg_jb_zero_slot(slot);
     slot->occupied = 1;
     slot->packet_start_index = packet_start_index;
     slot->packet_count = packet_count;
@@ -149,11 +309,9 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
     if (jb == NULL || in == NULL || out_frame == NULL || out_missing_skips_delta == NULL) {
         return DASHCDG_CDG_BATCH_DRAIN_STOP;
     }
-
     *out_frame = NULL;
     *out_missing_skips_delta = 0U;
-
-    if (!jb->initialized) {
+    if (!jb->initialized || cdg_jb_capacity(jb) == 0U) {
         return DASHCDG_CDG_BATCH_DRAIN_STOP;
     }
 
@@ -172,17 +330,10 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         return DASHCDG_CDG_BATCH_DRAIN_APPLY;
     }
 
-    /*
-     * If the cursor jumped ahead of the earliest buffered batch but that batch is exactly the
-     * contiguous predecessor region (common after aggressive stall recovery), rewind the cursor so
-     * we paint those packets instead of leaving a permanent hole.
-     */
     {
         struct dashcdg_cdg_batch_jitter_frame *oldest_gap = dashcdg_cdg_batch_jitter_oldest(jb);
-
         if (oldest_gap != NULL && oldest_gap->packet_start_index < jb->next_packet_index) {
             uint64_t oldest_end = oldest_gap->packet_start_index + (uint64_t) oldest_gap->packet_count;
-
             if (oldest_end == jb->next_packet_index) {
                 jb->next_packet_index = oldest_gap->packet_start_index;
                 jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
@@ -192,16 +343,8 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         }
     }
 
-    /*
-     * Cold join before clock_sync: the drain cursor defaults to packet 0, but the first UDP
-     * datagram may already carry a later contiguous batch (TX already advanced, or reorder).
-     * Without a sender playback timeline we cannot run real-time late-skip logic; jump once
-     * from the initial cursor to the earliest buffered batch so CDG can paint instead of
-     * stalling until a v4 anchor seek realigns the jitter cursor.
-     */
     if (!in->have_sender_playback) {
         struct dashcdg_cdg_batch_jitter_frame *oldest_live = dashcdg_cdg_batch_jitter_oldest(jb);
-
         if (jb->next_packet_index == 0U && oldest_live != NULL &&
                 oldest_live->packet_start_index > jb->next_packet_index) {
             *out_frame = oldest_live;
@@ -213,7 +356,6 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
     if (in->have_sender_playback && in->late_gate != 0 &&
             receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_cdg_batch_jitter_frame *oldest = dashcdg_cdg_batch_jitter_oldest(jb);
-
         if (oldest != NULL && oldest->packet_start_index > jb->next_packet_index) {
             if (in->primed_decode == 0 || in->ms_since_prior_cdg_apply == 0U ||
                     in->ms_since_prior_cdg_apply < (uint64_t) DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS) {
@@ -227,7 +369,6 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
                 return DASHCDG_CDG_BATCH_DRAIN_STOP;
             }
             uint64_t skipped_packet_index = jb->next_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
-
             *out_missing_skips_delta = 1U;
             jb->next_packet_index = skipped_packet_index;
             jb->next_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
@@ -236,7 +377,6 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         }
         return DASHCDG_CDG_BATCH_DRAIN_SKIP;
     }
-
     return DASHCDG_CDG_BATCH_DRAIN_STOP;
 }
 
@@ -244,85 +384,69 @@ void dashcdg_cdg_batch_jitter_note_applied(struct dashcdg_cdg_batch_jitter_buffe
     if (jb == NULL || slot == NULL || !slot->occupied) {
         return;
     }
-
     jb->next_packet_index += (uint64_t) slot->packet_count;
     jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
-    memset(slot, 0, sizeof(*slot));
+    cdg_jb_zero_slot(slot);
 }
 
 void dashcdg_cdg_batch_jitter_apply_snapshot_seek(struct dashcdg_cdg_batch_jitter_buffer *jb, uint64_t packet_index) {
+    size_t cap = cdg_jb_capacity(jb);
     if (jb == NULL) {
         return;
     }
-
-    for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (jb->slots[i].occupied && jb->slots[i].packet_start_index < packet_index) {
-            memset(&jb->slots[i], 0, sizeof(jb->slots[i]));
+            cdg_jb_zero_slot(&jb->slots[i]);
         }
     }
-
     jb->next_packet_index = packet_index;
     jb->next_playback_ms = dashcdg_packet_count_to_ms(packet_index);
     jb->initialized = 1;
 }
 
 void dashcdg_cdg_batch_jitter_evict_pressure(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t min_free_slots) {
-    if (jb == NULL || min_free_slots == 0U) {
+    size_t cap = cdg_jb_capacity(jb);
+    if (jb == NULL || min_free_slots == 0U || cap == 0U) {
         return;
     }
-
-    for (int round = 0; round < (int)DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT + 4; ++round) {
+    for (int round = 0; round < (int) cap + 4; ++round) {
         size_t occ = dashcdg_cdg_batch_jitter_occupied_count(jb);
-        size_t free_slots = (occ < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT) ? (DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT - occ) : 0U;
-
+        size_t free_slots = (occ < cap) ? (cap - occ) : 0U;
         if (free_slots >= min_free_slots) {
             return;
         }
-
-        {
-            size_t evict_i = DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT;
-            uint64_t best_ps = 0U;
-            int found_ahead = 0;
-
-            for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
+        size_t evict_i = cap;
+        uint64_t best_ps = 0U;
+        int found_ahead = 0;
+        for (size_t i = 0; i < cap; ++i) {
+            if (!jb->slots[i].occupied) {
+                continue;
+            }
+            uint64_t ps = jb->slots[i].packet_start_index;
+            if (ps >= jb->next_packet_index) {
+                if (!found_ahead || ps > best_ps) {
+                    best_ps = ps;
+                    evict_i = i;
+                    found_ahead = 1;
+                }
+            }
+        }
+        if (!found_ahead) {
+            for (size_t i = 0; i < cap; ++i) {
                 if (!jb->slots[i].occupied) {
                     continue;
                 }
-                {
-                    uint64_t ps = jb->slots[i].packet_start_index;
-
-                    if (ps >= jb->next_packet_index) {
-                        if (!found_ahead || ps > best_ps) {
-                            best_ps = ps;
-                            evict_i = i;
-                            found_ahead = 1;
-                        }
-                    }
+                uint64_t ps = jb->slots[i].packet_start_index;
+                if (evict_i == cap || ps > best_ps) {
+                    best_ps = ps;
+                    evict_i = i;
                 }
             }
-
-            if (!found_ahead) {
-                for (size_t i = 0; i < DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT; ++i) {
-                    if (!jb->slots[i].occupied) {
-                        continue;
-                    }
-                    {
-                        uint64_t ps = jb->slots[i].packet_start_index;
-
-                        if (evict_i == DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT || ps > best_ps) {
-                            best_ps = ps;
-                            evict_i = i;
-                        }
-                    }
-                }
-            }
-
-            if (evict_i == DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT) {
-                return;
-            }
-
-            memset(&jb->slots[evict_i], 0, sizeof(jb->slots[evict_i]));
-            jb->pending_drops++;
         }
+        if (evict_i == cap) {
+            return;
+        }
+        cdg_jb_zero_slot(&jb->slots[evict_i]);
+        jb->pending_drops++;
     }
 }

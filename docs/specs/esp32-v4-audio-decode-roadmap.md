@@ -2,6 +2,8 @@
 
 **See also:** [`docs/embedded/esp32-karaoke-decode-toggles-video-regression-rca.md`](../embedded/esp32-karaoke-decode-toggles-video-regression-rca.md) — what decode toggles actually gate, CDG vs audio resource contention, and slot-count tradeoffs.
 
+**Refactor package:** [`docs/specs/esp32-heap-backed-jitter-rings-spec.md`](esp32-heap-backed-jitter-rings-spec.md), [`docs/specs/esp32-heap-backed-jitter-rings-test-plan.md`](esp32-heap-backed-jitter-rings-test-plan.md), and [`docs/embedded/esp32-heap-backed-jitter-rings-implementation-plan.md`](../embedded/esp32-heap-backed-jitter-rings-implementation-plan.md).
+
 ## TL;DR difficulty
 
 | Area | Effort | Why |

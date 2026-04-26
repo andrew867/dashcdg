@@ -36,6 +36,15 @@ typedef struct {
     uint64_t jb_next_packet_index;
     size_t jb_pending_slots;
     uint64_t live_missing_skips;
+    /** Estimated missing wire packets from header.sequence gaps (all packet types). */
+    uint64_t wire_missing_estimate;
+    /** Out-of-order/late wire sequence observations. */
+    uint32_t wire_reorder_events;
+    /** Per-stream gap estimates for quick corruption correlation in the modal. */
+    uint32_t audio_missing_estimate;
+    uint32_t cdg_missing_estimate;
+    uint32_t clock_missing_estimate;
+    uint32_t repair_missing_estimate;
     char song_id[80];
     char last_error[64];
     /** Filled in dashcdg_badge_rx_get_stats (IGMP join succeeded in open_multicast_rx). */
@@ -64,6 +73,19 @@ typedef struct {
     uint32_t v4_video_repair_rx_reverse;
     uint32_t v4_video_repair_recovered;
     uint32_t v4_video_repair_failed;
+    /** Runtime jitter capacities (slots). */
+    uint16_t audio_slots_capacity;
+    uint16_t video_slots_capacity;
+    /** Active memory profile enum in badge_rx.c. */
+    uint8_t memory_profile;
+    /** Profile transitions and failed resize attempts. */
+    uint32_t memory_profile_switches;
+    uint32_t memory_profile_resize_failures;
+    /** Frames dropped during shrink/resizes and adaptive grow count. */
+    uint32_t memory_profile_resize_audio_dropped;
+    uint32_t memory_profile_resize_video_dropped;
+    uint32_t memory_profile_adaptive_grows;
+    uint32_t memory_profile_adaptive_shrinks;
 } dashcdg_badge_rx_stats_t;
 
 void dashcdg_badge_rx_start(void);
