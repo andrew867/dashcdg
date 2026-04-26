@@ -257,7 +257,7 @@ int dashcdg_cdg_batch_jitter_insert(
         jb->highest_packet_index_seen = packet_start_index;
         jb->next_playback_ms = 0U;
         jb->initialized = 1;
-    } else if (packet_start_index + (uint64_t) packet_count <= jb->next_packet_index) {
+    } else if (packet_start_index + (uint64_t) packet_count < jb->next_packet_index) {
         if (count_stats) {
             jb->pending_drops++;
         }

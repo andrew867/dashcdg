@@ -23,8 +23,13 @@
 static const char *TAG = "karaoke_ui";
 
 static lv_timer_t *s_tick;
-/** Modal body label; refreshed while open (NULL when closed). */
-static lv_obj_t *s_mcast_modal_lbl;
+/** Modal dashboard cards; refreshed while open (NULL when closed). */
+static lv_obj_t *s_mcast_card_net;
+static lv_obj_t *s_mcast_card_stream;
+static lv_obj_t *s_mcast_card_repair;
+static lv_obj_t *s_mcast_card_memory;
+static lv_obj_t *s_mcast_card_system;
+static lv_obj_t *s_mcast_card_song;
 static lv_obj_t *s_mcast_modal_root;
 /** Layout anchor + border; pixels drawn via esp_lcd_panel_draw_bitmap (see badge_rx_ui_tick). */
 static lv_obj_t *s_cdg_slot;
@@ -62,8 +67,6 @@ static uint16_t s_mcast_modal_body_ticks;
 /** Next time (ms) to refresh Wi-Fi + battery in the status dock (~phone-like cadence). */
 static uint64_t s_status_slow_deadline_ms;
 
-/** Large RX stats text for mcast modal (avoid ~1.4 KiB on stack in `on_tick`). */
-static char s_mcast_modal_scratch[1536];
 /** Wi-Fi / bat label refresh interval (also bounds `platform_hw` ADC reads from this UI path). */
 #define KARAOKE_STATUS_SLOW_PERIOD_MS 2500U
 /** Loss smoothing window uses 2s quality samples x 5 entries (~10s rolling average). */
@@ -356,7 +359,12 @@ static void mcast_modal_close(void)
         lv_obj_del(s_mcast_modal_root);
     }
     s_mcast_modal_root = NULL;
-    s_mcast_modal_lbl = NULL;
+    s_mcast_card_net = NULL;
+    s_mcast_card_stream = NULL;
+    s_mcast_card_repair = NULL;
+    s_mcast_card_memory = NULL;
+    s_mcast_card_system = NULL;
+    s_mcast_card_song = NULL;
     /* CDG overlay blit bypasses LVGL; after close, ask LVGL to repaint the slot area. */
     if (s_cdg_slot && lv_obj_is_valid(s_cdg_slot)) {
         lv_obj_invalidate(s_cdg_slot);
@@ -430,6 +438,106 @@ static void on_mcast_ok(lv_event_t *e)
     mcast_modal_close();
 }
 
+static lv_obj_t *karaoke_mcast_dashboard_card(lv_obj_t *parent, const char *title)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_width(card, lv_pct(48));
+    lv_obj_set_height(card, 84);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x0b1210), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x224c3d), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 5, 0);
+    lv_obj_set_style_pad_all(card, 6, 0);
+    lv_obj_set_style_pad_row(card, 4, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    dashcdg_ui_no_scroll(card);
+
+    lv_obj_t *hdr = lv_label_create(card);
+    lv_label_set_text(hdr, title);
+    lv_obj_set_style_text_color(hdr, lv_color_hex(0x66ffcc), 0);
+
+    lv_obj_t *body = lv_label_create(card);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_color(body, lv_color_hex(0xbadccf), 0);
+    lv_label_set_text(body, "--");
+    return body;
+}
+
+static void karaoke_mcast_modal_update_dashboard(void)
+{
+    dashcdg_badge_rx_stats_t st;
+    char line[224];
+    unsigned loss_x100 = 0U;
+    unsigned long heap_free = (unsigned long)esp_get_free_heap_size();
+    unsigned long heap_min = (unsigned long)esp_get_minimum_free_heap_size();
+    unsigned long int_largest = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    unsigned video_occ = 0U;
+    const char *profile = "bal";
+
+    if (!(s_mcast_card_net && s_mcast_card_stream && s_mcast_card_repair && s_mcast_card_memory && s_mcast_card_system &&
+          s_mcast_card_song)) {
+        return;
+    }
+    dashcdg_badge_rx_get_stats(&st);
+    if (st.datagrams > 0U) {
+        uint64_t lx100 = (st.wire_missing_estimate * 10000ULL) / st.datagrams;
+        if (lx100 > 10000ULL) {
+            lx100 = 10000ULL;
+        }
+        loss_x100 = (unsigned)lx100;
+    }
+    video_occ = st.video_slots_capacity > 0U ? (unsigned)st.jb_pending_slots : 0U;
+    switch (st.memory_profile) {
+    case 0:
+        profile = "min";
+        break;
+    case 1:
+        profile = "aud";
+        break;
+    case 2:
+        profile = "vid";
+        break;
+    default:
+        profile = "bal";
+        break;
+    }
+
+    snprintf(line, sizeof(line), "MCAST %s\nSTA %s\nIGMP %s\nstats tx/peer %lu/%lu",
+             st.tx_stats_dest[0] ? st.tx_stats_dest : "--", st.sta_ip[0] ? st.sta_ip : "--",
+             st.igmp_joined ? "joined" : "no", (unsigned long)st.v4_rx_stats_sent, (unsigned long)st.v4_rx_stats_peer_packets);
+    lv_label_set_text(s_mcast_card_net, line);
+
+    snprintf(line, sizeof(line), "loss %u.%02u%% reorder %lu\nclk %lu delta %lu anchor %lu\naudio rx/out %lu/%lu",
+             (unsigned)(loss_x100 / 100U), (unsigned)(loss_x100 % 100U), (unsigned long)st.wire_reorder_events,
+             (unsigned long)st.v4_clock_count, (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks,
+             (unsigned long)st.v4_audio_chunk_rx, (unsigned long)st.v4_audio_frames_out);
+    lv_label_set_text(s_mcast_card_stream, line);
+
+    snprintf(line, sizeof(line), "nack tx %lu\nrepair pkt f/r %lu/%lu\nrecover fail %lu/%lu\nmiss rep %lu",
+             (unsigned long)st.v4_repair_nack_tx, (unsigned long)st.v4_video_repair_rx_forward,
+             (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long)st.v4_video_repair_recovered,
+             (unsigned long)st.v4_video_repair_failed, (unsigned long)st.repair_missing_estimate);
+    lv_label_set_text(s_mcast_card_repair, line);
+
+    snprintf(line, sizeof(line), "profile %s sw %lu\nslots a/v %u/%u\npending v %u evict %lu\nresize fail %lu",
+             profile, (unsigned long)st.memory_profile_switches, (unsigned)st.audio_slots_capacity,
+             (unsigned)st.video_slots_capacity, (unsigned)video_occ, (unsigned long)st.jb_evict_rounds,
+             (unsigned long)st.memory_profile_resize_failures);
+    lv_label_set_text(s_mcast_card_memory, line);
+
+    snprintf(line, sizeof(line), "heap free/min %lu/%lu\nint largest %lu\nparse fail %lu\nseq %llu",
+             heap_free, heap_min, int_largest, (unsigned long)st.parse_failures, (unsigned long long)st.last_sequence);
+    lv_label_set_text(s_mcast_card_system, line);
+
+    snprintf(line, sizeof(line), "%s\nclock %s  decode %s\naudio dec fail %lu  dac fail %lu",
+             st.song_id[0] ? st.song_id : "(none)", st.have_clock ? "yes" : "no", st.cdg_heap_ok ? "on" : "off",
+             (unsigned long)st.v4_audio_decode_fail, (unsigned long)st.v4_audio_dac_begin_fail);
+    lv_label_set_text(s_mcast_card_song, line);
+}
+
 static void on_info_btn(lv_event_t *e)
 {
     (void)e;
@@ -450,9 +558,8 @@ static void on_info_btn(lv_event_t *e)
     s_mcast_modal_root = root;
 
     lv_obj_t *panel = lv_obj_create(root);
-    /* ~72% of display height leaves scrim top/bottom for tap-outside; tweak pct for read vs dismiss. */
-    lv_obj_set_width(panel, lv_pct(90));
-    lv_obj_set_height(panel, lv_pct(72));
+    lv_obj_set_width(panel, lv_pct(96));
+    lv_obj_set_height(panel, lv_pct(92));
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05080a), 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
@@ -470,30 +577,28 @@ static void on_info_btn(lv_event_t *e)
     lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *mtitle = lv_label_create(panel);
-    lv_label_set_text(mtitle, "[ MCAST | RX ]");
+    lv_label_set_text(mtitle, "[ RX DASHBOARD ]");
     lv_obj_set_style_text_color(mtitle, lv_color_hex(0x66ffcc), 0);
 
-    lv_obj_t *scroll = lv_obj_create(panel);
-    lv_obj_set_width(scroll, lv_pct(100));
-    lv_obj_set_flex_grow(scroll, 1);
-    lv_obj_set_style_min_height(scroll, 120, 0);
-    lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_pad_all(scroll, 4, 0);
-    lv_obj_set_style_border_width(scroll, 0, 0);
-    /* Same plane as panel (was darker #040608 vs #05080a). */
-    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
-    lv_obj_add_event_cb(scroll, on_mcast_panel_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *board = lv_obj_create(panel);
+    lv_obj_set_width(board, lv_pct(100));
+    lv_obj_set_flex_grow(board, 1);
+    lv_obj_set_style_border_width(board, 0, 0);
+    lv_obj_set_style_bg_opa(board, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(board, 2, 0);
+    lv_obj_set_style_pad_row(board, 6, 0);
+    lv_obj_set_style_pad_column(board, 6, 0);
+    lv_obj_set_flex_flow(board, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(board, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    dashcdg_ui_no_scroll(board);
 
-    s_mcast_modal_lbl = lv_label_create(scroll);
-    lv_label_set_long_mode(s_mcast_modal_lbl, LV_LABEL_LONG_MODE_WRAP);
-    lv_obj_set_width(s_mcast_modal_lbl, lv_pct(100));
-    lv_obj_set_style_text_color(s_mcast_modal_lbl, lv_color_hex(0xaaccbb), 0);
-    {
-        dashcdg_badge_rx_format_mcast_modal(s_mcast_modal_scratch, sizeof(s_mcast_modal_scratch));
-        lv_label_set_text(s_mcast_modal_lbl, s_mcast_modal_scratch);
-    }
+    s_mcast_card_net = karaoke_mcast_dashboard_card(board, "NET");
+    s_mcast_card_stream = karaoke_mcast_dashboard_card(board, "STREAM");
+    s_mcast_card_repair = karaoke_mcast_dashboard_card(board, "REPAIR");
+    s_mcast_card_memory = karaoke_mcast_dashboard_card(board, "MEMORY");
+    s_mcast_card_system = karaoke_mcast_dashboard_card(board, "SYSTEM");
+    s_mcast_card_song = karaoke_mcast_dashboard_card(board, "SONG");
+    karaoke_mcast_modal_update_dashboard();
 
     lv_obj_t *row = lv_obj_create(panel);
     lv_obj_set_width(row, lv_pct(100));
@@ -558,11 +663,10 @@ static void on_tick(lv_timer_t *t)
             }
             karaoke_status_bar_update_fast(&st);
         }
-        if (s_mcast_modal_lbl && lv_obj_is_valid(s_mcast_modal_lbl)) {
+        if (karaoke_mcast_modal_is_open()) {
             if (++s_mcast_modal_body_ticks >= 20U) {
                 s_mcast_modal_body_ticks = 0U;
-                dashcdg_badge_rx_format_mcast_modal(s_mcast_modal_scratch, sizeof(s_mcast_modal_scratch));
-                lv_label_set_text(s_mcast_modal_lbl, s_mcast_modal_scratch);
+                karaoke_mcast_modal_update_dashboard();
             }
         } else {
             s_mcast_modal_body_ticks = 0U;

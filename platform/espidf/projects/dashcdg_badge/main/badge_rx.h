@@ -71,6 +71,7 @@ typedef struct {
     uint32_t v4_video_repair_rx_packets;
     uint32_t v4_video_repair_rx_forward;
     uint32_t v4_video_repair_rx_reverse;
+    uint32_t v4_repair_nack_tx;
     uint32_t v4_video_repair_recovered;
     uint32_t v4_video_repair_failed;
     /** Runtime jitter capacities (slots). */

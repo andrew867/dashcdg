@@ -113,6 +113,7 @@ typedef enum {
 #define BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX 144U
 #define BADGE_RX_VIDEO_REPAIR_SYMBOL_MAX (BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX + 1U)
 #define BADGE_RX_VIDEO_REPAIR_REDUNDANCY_MAX 6U
+#define BADGE_RX_PRE_ANCHOR_DRAIN_GRACE_MS 1800U
 /*
  * Keep full-height blits for correctness. Partial-height pressure clipping produced visible banding/
  * stale lower scanlines (wrong palette stripes + bottom held color) under current overlay path.
@@ -208,6 +209,7 @@ static uint64_t s_clock_last_playback_ms;
 static uint64_t s_active_session_start_ms;
 static uint32_t s_active_asset_size;
 static char s_active_song_id[DASHCDG_MAX_SONG_ID];
+static uint64_t s_active_session_local_start_ms;
 static int s_active_session_valid;
 static struct badge_rx_video_repair_group s_video_repair_groups[BADGE_RX_TRACKED_VIDEO_REPAIR_GROUPS];
 
@@ -951,6 +953,7 @@ static void badge_rx_send_v4_repair_nack(int sockfd, uint64_t now_ms, uint32_t g
     dst.sin_addr.s_addr = inet_addr(BADGE_RX_MCAST_ADDR);
     sent = sendto(sockfd, pkt, sz, 0, (struct sockaddr *)&dst, sizeof(dst));
     if (sent == (ssize_t)sz) {
+        s_stats.v4_repair_nack_tx++;
         s_last_nack_ms = now_ms;
         s_last_nack_group_id = group_id;
         s_last_nack_mask = missing_mask;
@@ -1072,6 +1075,17 @@ static void drain_cdg_to_idle(uint64_t local_now_ms)
     struct dashcdg_cdg_batch_jitter_drain_input din;
     struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
     uint64_t miss = 0;
+
+    if (s_cdg_snapshots_applied == 0U &&
+        s_active_session_local_start_ms != 0U &&
+        local_now_ms > s_active_session_local_start_ms &&
+        (local_now_ms - s_active_session_local_start_ms) < BADGE_RX_PRE_ANCHOR_DRAIN_GRACE_MS) {
+        /*
+         * During a fresh session, prefer waiting briefly for the first anchor instead of applying
+         * whatever mid-stream deltas arrived first. This reduces missed-clear/title-overlap artifacts.
+         */
+        return;
+    }
     int guard = 0;
 
     badge_rx_drain_v4_audio(local_now_ms);
@@ -1690,6 +1704,7 @@ static void handle_session_info(const struct dashcdg_packet_view *view)
     }
 
     s_active_session_start_ms = view->v4_session_info.session_start_ms;
+    s_active_session_local_start_ms = dashcdg_clock_now_ms();
     s_active_asset_size = view->v4_session_info.asset_size;
     memcpy(s_active_song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID);
     s_active_session_valid = 1;
@@ -2367,6 +2382,7 @@ void dashcdg_badge_rx_start(void)
     s_sync_local_ms = 0U;
     s_sync_playback_ms = 0U;
     s_active_session_start_ms = 0U;
+    s_active_session_local_start_ms = 0U;
     s_active_asset_size = 0U;
     memset(s_active_song_id, 0, sizeof(s_active_song_id));
     s_active_session_valid = 0;
@@ -2671,6 +2687,7 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
         "audio rx %lu  out %lu  dec_fail %lu  dac_begin_fail %lu  unsup %lu\n"
         "delta %lu  anchor %lu  load %lu\n"
         "rwin %lu  fwd %lu  rev %lu\n"
+        "nack_tx %lu\n"
         "rrec %lu  rfail %lu\n"
         "wire miss_est %llu  reorder %lu\n"
         "miss by type a/c/clk/rep %lu/%lu/%lu/%lu\n"
@@ -2710,7 +2727,8 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
         (unsigned long)st.v4_audio_dac_begin_fail, (unsigned long)st.v4_audio_unsupported_codec,
         (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks, (unsigned long)st.v4_loading_screen_count,
         (unsigned long)st.v4_video_repair_rx_packets, (unsigned long)st.v4_video_repair_rx_forward,
-        (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long)st.v4_video_repair_recovered,
+        (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long)st.v4_repair_nack_tx,
+        (unsigned long)st.v4_video_repair_recovered,
         (unsigned long)st.v4_video_repair_failed, (unsigned long long)st.wire_missing_estimate,
         (unsigned long)st.wire_reorder_events, (unsigned long)st.audio_missing_estimate, (unsigned long)st.cdg_missing_estimate,
         (unsigned long)st.clock_missing_estimate, (unsigned long)st.repair_missing_estimate,
