@@ -121,3 +121,97 @@ PortAudio’s `outputBufferDacTime - currentTime` can **jitter by a few ms per b
 - `app_rx.c` — CDG drain when PCM ring full (WinMM / slow hosts).
 - `audio_jitter.h` — hole recovery skew bounds (`SKIP_EMPTY_`*).
 
+## Incident addendum (2026-04-25): RX break-up after long run + TX negative latency
+
+### Mission statement
+
+Prevent long-run audio degradation in desktop receivers and eliminate false/negative TX-reported peer latency while preserving cold-join and recovery behavior.
+
+### Observed evidence (current logs)
+
+- TX (`desktop-tx-20260425-031536-p20476.log`) repeatedly reports:
+  - `state=degraded why=no-latency` with `lat=0ms` despite non-zero buffers.
+  - `state=degraded why=bad-lat` with persistent negative values (`lat=-77ms`, `lat=-93ms`, etc.).
+- RX (`desktop-rx-20260425-033836-p18968.log`) shows recurrent loop:
+  - `audio_queue_overflow +47/+54/+55 ...`
+  - `audio: re-priming after host underrun burst`
+  - `host_underrun +48/+49 frames ...`
+  - then repeats at short cadence.
+- RX stats around failure windows show buffer collapse from healthy ~300+ ms down to tens of ms shortly after recovery/re-prime.
+
+### Fault tree (NASA-style)
+
+1. **Top event A: TX reports impossible/negative peer latency.**
+   1.1 **Contributing cause:** latency formula mixes two different sender timeline estimators (`network_playback_ms` and wall-anchor playback) and chooses the minimum.  
+   1.2 **Trigger condition:** brief sender catch-up/drift or timeline transitions make sender-side estimate lag receiver-reported presented timestamp domain.  
+   1.3 **Effect:** computed latency crosses <=0 and is classified as `no-latency`/`bad-lat`, poisoning control eligibility.
+
+2. **Top event B: RX audio enters self-sustaining underrun/re-prime churn.**
+   2.1 **Contributing cause:** host-underrun auto-recovery threshold is aggressive (`MIN_STALE_MS=80`), so routine short stalls can trigger full re-prime.  
+   2.2 **Contributing cause:** re-prime path resets stream/ring timing but does not reset audio jitter/decode priming, allowing continuity skip bursts immediately after recovery under reorder/backpressure.  
+   2.3 **Trigger condition:** transient callback starvation or queue pressure event during steady state.  
+   2.4 **Effect:** recovery action itself destabilizes playout (overflow -> underrun -> re-prime), producing audible break-up.
+
+### Root causes (confirmed)
+
+- **RC-1 (TX latency math):** `dashcdg_tx_compute_rx_latency_ms_locked` computes latency from sender-local playback estimators that can diverge from the receiver’s reported epoch under real scheduling drift.
+- **RC-2 (RX recovery policy):** `dashcdg_rx_should_auto_recover_host_underrun_locked` is calibrated for very fast intervention, but in current desktop runs this creates false-positive recoveries.
+- **RC-3 (RX recovery state hygiene):** `dashcdg_rx_reprime_audio_after_host_underrun_locked` does not fully reset jitter/decode priming state, enabling post-recovery continuity skips and re-entry churn.
+
+### Corrective actions (implementation plan)
+
+1. **CA-1 (TX latency domain unification):** compute latency primarily from receiver-reported `sender_time_observed_ms` projected by report age, and compare against projected `presented_audio_timestamp_ms`; keep sender-local fallback only for missing legacy fields.
+2. **CA-2 (RX anti-chatter gate):** require sustained stale/no-progress window before host-underrun auto-recovery can fire (raise effective stale window; do not recover while queue/timestamp is still actively progressing).
+3. **CA-3 (RX deterministic recovery reset):** on host-underrun re-prime, clear audio jitter queue and decode priming state so post-recovery playout restarts from coherent sequence boundary.
+
+### Additional bugs/risk notes found during analysis
+
+- **Risk-1:** `host_underrun` bursts can be logged with `ts=-1` during churn windows; this is valid signal for missing DAC timestamp but should not by itself force immediate hard recovery.
+- **Risk-2:** TX peer health currently treats `lat<=0` as hard degraded even when packet age is near-zero and receiver buffer is healthy; this can hide true state during transient estimator mismatch.
+
+### Verification criteria (must pass before closure)
+
+1. No persistent negative latency in TX peer summaries during 30+ minute soak and across track switches.
+2. RX logs do not show repeating `re-priming after host underrun burst` cycles at short cadence.
+3. RX maintains stable `v4-stats ... buf` near target envelope with occasional recoverable dips, not repeated collapse.
+4. No regressions in cold-join, pause/unpause, codec switch, and idle-RX-then-TX-start flows.
+
+## Follow-up addendum (2026-04-25 night)
+
+### New findings from current TX/RX logs
+
+- Desktop RX can run stable for long windows (`buf ~350-370ms`) and then hit a brief arrival-gap burst (`~300ms`, then `~1.8s`) followed by recover/re-prime.
+- TX "current stats" showed repeated `why=no-latency lat=0ms` for multiple peers including periods where `buf=140ms`.
+
+### Additional root causes
+
+1. **TX fallback guard bug:** latency computation still required `sender_time_observed_ms != 0` before entering the fallback path, so fallback was unreachable and peers stayed `no-latency`.
+2. **Decode-path stall mode:** receiver can accumulate pending jitter frames while decode/apply progress stalls; manual `D` off/on effectively rebuilds stream+decoder state and temporarily restores audio.
+3. **ESP32 stats semantics:** unsupported codec path advanced jitter but left `presented_audio_timestamp_ms` stale/zero, which amplified TX `no-latency` classifications.
+4. **TX domain-cross contamination:** `sender_time_observed_ms` (sender wall-clock epoch) was subtracted from receiver `presented_audio_timestamp_ms` (playback timeline), yielding impossible `bad-lat` magnitudes (for example `1573790xxms`).
+
+### Corrective actions added
+
+1. Remove hard requirement on `sender_time_observed_ms` in TX latency computation; require only non-zero presented timestamp.
+2. Add automatic decode-path rebuild recovery in desktop RX when jitter apply is stalled despite incoming datagrams and pending audio.
+3. Update ESP32 unsupported-codec path to advance presented timestamp using frame playback timeline.
+4. Make TX latency chooser prefer playback-domain candidate and reject implausible domain-mixed values instead of propagating giant bogus latencies.
+
+## Follow-up addendum (2026-04-26 early): continuity-skip storm with `buf=140`, `pts=0`
+
+### Symptom
+
+- RX can enter a loop of `audio_continuity_skip +1` every ~20 ms with `pending=0 buf=140`.
+- `v4-stats` in the same window reports `pts=0`, so audio never transitions to real applied playout.
+
+### Root cause
+
+- Audio jitter skip gate treated `audio_buffered_ms >= preroll/2` as sufficient to permit late-loss skip **before startup truly reached preroll/start conditions**.
+- With `preroll=500`, this opened at ~125 ms; observed steady `buf=140` met the gate and allowed repeated empty-slot continuity skips instead of waiting for startup fill/start.
+
+### Fix
+
+- Tightened pre-start skip eligibility in `core/src/audio_jitter.c`:
+  - replace `audio_buffered_ms >= announced_playout_delay_ms / 2` with `audio_buffered_ms >= announced_playout_delay_ms` (fallback to `frame_ms * 8` only when delay is zero).
+- This prevents continuity-skip storms in half-filled pre-start state and lets RX continue toward stable claim/start behavior.
+

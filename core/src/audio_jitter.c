@@ -1,6 +1,28 @@
 #include "dashcdg/audio_jitter.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+static size_t audio_jb_capacity(const struct dashcdg_audio_jitter_buffer *jb) {
+#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
+    return (jb != NULL) ? jb->slot_capacity : 0U;
+#else
+    (void) jb;
+    return DASHCDG_AUDIO_JITTER_SLOT_COUNT;
+#endif
+}
+
+size_t dashcdg_audio_jitter_capacity(const struct dashcdg_audio_jitter_buffer *jb) { return audio_jb_capacity(jb); }
+
+#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
+static void audio_jb_zero_slot(struct dashcdg_audio_jitter_frame *slot) {
+    uint8_t *p = slot->encoded_bytes;
+    memset(slot, 0, sizeof(*slot));
+    slot->encoded_bytes = p;
+}
+#else
+static void audio_jb_zero_slot(struct dashcdg_audio_jitter_frame *slot) { memset(slot, 0, sizeof(*slot)); }
+#endif
 
 static int dashcdg_audio_jitter_skip_starvation_gate_open(const struct dashcdg_audio_jitter_drain_input *in) {
     uint32_t max_safe_buffer_ms = 0U;
@@ -33,38 +55,190 @@ void dashcdg_audio_jitter_init(struct dashcdg_audio_jitter_buffer *jb) {
     if (jb == NULL) {
         return;
     }
+#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
     memset(jb, 0, sizeof(*jb));
+    (void) dashcdg_audio_jitter_resize(jb, DASHCDG_AUDIO_JITTER_SLOT_COUNT);
+#else
+    memset(jb, 0, sizeof(*jb));
+#endif
 }
 
 void dashcdg_audio_jitter_clear(struct dashcdg_audio_jitter_buffer *jb) {
+    if (jb == NULL) {
+        return;
+    }
+#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
+    if (jb->slots == NULL || jb->slot_capacity == 0U) {
+        jb->initialized = 0;
+        jb->next_media_sequence = 0U;
+        jb->highest_media_sequence_seen = 0U;
+        jb->next_playback_ms = 0U;
+        jb->reordered_packets = 0U;
+        jb->pending_drops = 0U;
+        return;
+    }
+    for (size_t i = 0; i < jb->slot_capacity; ++i) {
+        audio_jb_zero_slot(&jb->slots[i]);
+    }
+    jb->initialized = 0;
+    jb->next_media_sequence = 0U;
+    jb->highest_media_sequence_seen = 0U;
+    jb->next_playback_ms = 0U;
+    jb->reordered_packets = 0U;
+    jb->pending_drops = 0U;
+#else
     dashcdg_audio_jitter_init(jb);
+#endif
 }
+
+#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
+int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t slot_count) {
+    struct dashcdg_audio_jitter_frame *slots;
+    uint8_t *pool;
+    struct dashcdg_audio_jitter_frame *old_slots;
+    uint8_t *old_pool;
+    size_t old_cap;
+    int old_initialized;
+    uint32_t old_next_media_sequence;
+    uint32_t old_highest_media_sequence_seen;
+    uint64_t old_next_playback_ms;
+    uint64_t old_reordered_packets;
+    uint64_t old_pending_drops;
+    uint32_t copied_highest = 0U;
+    int copied_any = 0;
+    size_t copied = 0U;
+    uint8_t *picked = NULL;
+
+    if (jb == NULL || slot_count == 0U) {
+        return 0;
+    }
+    old_slots = jb->slots;
+    old_pool = jb->payload_pool;
+    old_cap = jb->slot_capacity;
+    old_initialized = jb->initialized;
+    old_next_media_sequence = jb->next_media_sequence;
+    old_highest_media_sequence_seen = jb->highest_media_sequence_seen;
+    old_next_playback_ms = jb->next_playback_ms;
+    old_reordered_packets = jb->reordered_packets;
+    old_pending_drops = jb->pending_drops;
+
+    slots = (struct dashcdg_audio_jitter_frame *) calloc(slot_count, sizeof(*slots));
+    if (slots == NULL) {
+        return 0;
+    }
+    pool = (uint8_t *) calloc(slot_count, DASHCDG_AUDIO_JITTER_MAX_PAYLOAD);
+    if (pool == NULL) {
+        free(slots);
+        return 0;
+    }
+    for (size_t i = 0; i < slot_count; ++i) {
+        slots[i].encoded_bytes = pool + (i * DASHCDG_AUDIO_JITTER_MAX_PAYLOAD);
+    }
+    jb->slots = slots;
+    jb->payload_pool = pool;
+    jb->slot_capacity = slot_count;
+
+    for (size_t i = 0; i < slot_count; ++i) {
+        audio_jb_zero_slot(&jb->slots[i]);
+    }
+    jb->initialized = 0;
+    jb->next_media_sequence = old_next_media_sequence;
+    jb->highest_media_sequence_seen = old_highest_media_sequence_seen;
+    jb->next_playback_ms = old_next_playback_ms;
+    jb->reordered_packets = old_reordered_packets;
+    jb->pending_drops = old_pending_drops;
+
+    if (old_slots != NULL && old_cap > 0U && old_initialized) {
+        picked = (uint8_t *) calloc(old_cap, sizeof(uint8_t));
+        if (picked == NULL) {
+            jb->pending_drops++;
+        } else {
+            while (copied < slot_count) {
+                size_t best_i = old_cap;
+                uint32_t best_seq = 0U;
+                for (size_t i = 0; i < old_cap; ++i) {
+                    if (picked[i] || !old_slots[i].occupied || old_slots[i].media_sequence < old_next_media_sequence) {
+                        continue;
+                    }
+                    if (best_i == old_cap || old_slots[i].media_sequence < best_seq) {
+                        best_i = i;
+                        best_seq = old_slots[i].media_sequence;
+                    }
+                }
+                if (best_i == old_cap) {
+                    break;
+                }
+                picked[best_i] = 1U;
+                jb->slots[copied].occupied = 1;
+                jb->slots[copied].media_sequence = old_slots[best_i].media_sequence;
+                jb->slots[copied].playback_ms = old_slots[best_i].playback_ms;
+                jb->slots[copied].frame_ms = old_slots[best_i].frame_ms;
+                jb->slots[copied].audio_profile_id = old_slots[best_i].audio_profile_id;
+                jb->slots[copied].codec_id = old_slots[best_i].codec_id;
+                jb->slots[copied].encoded_length = old_slots[best_i].encoded_length;
+                memcpy(jb->slots[copied].encoded_bytes, old_slots[best_i].encoded_bytes, old_slots[best_i].encoded_length);
+                if (!copied_any || old_slots[best_i].media_sequence > copied_highest) {
+                    copied_highest = old_slots[best_i].media_sequence;
+                }
+                copied_any = 1;
+                copied++;
+            }
+            free(picked);
+        }
+        if (copied_any) {
+            jb->initialized = 1;
+            jb->highest_media_sequence_seen = copied_highest;
+        }
+    }
+
+    if (old_slots != NULL) {
+        free(old_slots);
+    }
+    if (old_pool != NULL) {
+        free(old_pool);
+    }
+    return 1;
+}
+
+void dashcdg_audio_jitter_release(struct dashcdg_audio_jitter_buffer *jb) {
+    if (jb == NULL) {
+        return;
+    }
+    if (jb->slots != NULL) {
+        free(jb->slots);
+    }
+    if (jb->payload_pool != NULL) {
+        free(jb->payload_pool);
+    }
+    memset(jb, 0, sizeof(*jb));
+}
+#endif
 
 struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_find(
         const struct dashcdg_audio_jitter_buffer *jb,
         uint32_t media_sequence
 ) {
+    size_t cap = audio_jb_capacity(jb);
+
     if (jb == NULL) {
         return NULL;
     }
-
-    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (jb->slots[i].occupied && jb->slots[i].media_sequence == media_sequence) {
             return (struct dashcdg_audio_jitter_frame *) &jb->slots[i];
         }
     }
-
     return NULL;
 }
 
 struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_oldest(const struct dashcdg_audio_jitter_buffer *jb) {
     struct dashcdg_audio_jitter_frame *oldest = NULL;
+    size_t cap = audio_jb_capacity(jb);
 
     if (jb == NULL) {
         return NULL;
     }
-
-    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (!jb->slots[i].occupied) {
             continue;
         }
@@ -72,23 +246,21 @@ struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_oldest(const struct dash
             oldest = (struct dashcdg_audio_jitter_frame *) &jb->slots[i];
         }
     }
-
     return oldest;
 }
 
 size_t dashcdg_audio_jitter_occupied_count(const struct dashcdg_audio_jitter_buffer *jb) {
     size_t n = 0U;
+    size_t cap = audio_jb_capacity(jb);
 
     if (jb == NULL) {
         return 0U;
     }
-
-    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (jb->slots[i].occupied) {
             ++n;
         }
     }
-
     return n;
 }
 
@@ -104,8 +276,9 @@ int dashcdg_audio_jitter_insert(
         int count_stats
 ) {
     struct dashcdg_audio_jitter_frame *slot = NULL;
+    size_t cap = audio_jb_capacity(jb);
 
-    if (jb == NULL || payload == NULL || payload_length == 0 || payload_length > DASHCDG_AUDIO_JITTER_MAX_PAYLOAD) {
+    if (jb == NULL || payload == NULL || payload_length == 0 || payload_length > DASHCDG_AUDIO_JITTER_MAX_PAYLOAD || cap == 0U) {
         return 0;
     }
 
@@ -130,7 +303,7 @@ int dashcdg_audio_jitter_insert(
         return 0;
     }
 
-    for (size_t i = 0; i < DASHCDG_AUDIO_JITTER_SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < cap; ++i) {
         if (!jb->slots[i].occupied) {
             slot = &jb->slots[i];
             break;
@@ -143,7 +316,7 @@ int dashcdg_audio_jitter_insert(
         return 0;
     }
 
-    memset(slot, 0, sizeof(*slot));
+    audio_jb_zero_slot(slot);
     slot->occupied = 1;
     slot->media_sequence = media_sequence;
     slot->frame_ms = frame_ms;
@@ -166,7 +339,9 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
 ) {
     struct dashcdg_audio_jitter_frame *frame;
     uint64_t receiver_playback_now_ms = 0U;
+    uint32_t startup_skip_ready_buffer_ms = 0U;
     int starvation_gate_open = 0;
+    size_t cap = audio_jb_capacity(jb);
 
     if (jb == NULL || in == NULL || out_frame == NULL || out_missing_skips_delta == NULL) {
         return DASHCDG_AUDIO_DRAIN_STOP;
@@ -175,7 +350,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
     *out_frame = NULL;
     *out_missing_skips_delta = 0U;
 
-    if (!jb->initialized) {
+    if (!jb->initialized || cap == 0U) {
         return DASHCDG_AUDIO_DRAIN_STOP;
     }
 
@@ -187,6 +362,10 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             receiver_playback_now_ms = 0U;
         }
     }
+    startup_skip_ready_buffer_ms = (uint32_t) in->announced_playout_delay_ms;
+    if (startup_skip_ready_buffer_ms == 0U && in->announced_audio_frame_ms > 0U) {
+        startup_skip_ready_buffer_ms = (uint32_t) in->announced_audio_frame_ms * 8U;
+    }
 
     frame = dashcdg_audio_jitter_find(jb, jb->next_media_sequence);
     if (frame != NULL) {
@@ -196,20 +375,10 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
 
     starvation_gate_open = dashcdg_audio_jitter_skip_starvation_gate_open(in);
 
-    /*
-     * Recovery guard for "full-jitter deadlock":
-     * - next_media_sequence is missing,
-     * - buffer is near full with newer frames queued,
-     * - decode was already primed.
-     *
-     * In this state, waiting for late gates can permanently stall playout (ingest stops at slot cap,
-     * no new packets can enter, and next sequence never materializes). Fast-forward to the oldest
-     * available frame so drain can resume and continuity can recover.
-     */
     if (in->primed_decode != 0 &&
             in->announced_audio_frame_ms > 0 &&
             in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
-            dashcdg_audio_jitter_occupied_count(jb) >= (DASHCDG_AUDIO_JITTER_SLOT_COUNT - 2U)) {
+            dashcdg_audio_jitter_occupied_count(jb) >= (cap > 2U ? (cap - 2U) : cap)) {
         struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
 
         if (oldest != NULL && oldest->media_sequence > jb->next_media_sequence) {
@@ -223,16 +392,11 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
 
     if (in->have_sender_playback && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
-                    in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
+                    in->audio_buffered_ms >= startup_skip_ready_buffer_ms) &&
             (starvation_gate_open ||
-                    /*
-                     * If occupancy is near-full and the missing sequence never arrives, using the
-                     * jitter occupancy proxy as "buffered_ms" can keep the starvation gate closed
-                     * forever. Allow a guarded hole-skip so playout does not deadlock at full depth.
-                     */
                     (in->primed_decode != 0 &&
                             in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
-                            dashcdg_audio_jitter_occupied_count(jb) >= (DASHCDG_AUDIO_JITTER_SLOT_COUNT - 2U))) &&
+                            dashcdg_audio_jitter_occupied_count(jb) >= (cap > 2U ? (cap - 2U) : cap))) &&
             receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
         struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
 
@@ -252,35 +416,21 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
         } else if (in->primed_decode != 0) {
-            /*
-             * Nothing buffered ahead of next_media_sequence: advancing the sequence without a
-             * queued frame is only justified when sender media time proves this slot is very
-             * stale (severe loss after join). Join skew between clock_sync and jitter playback
-             * stays below this gap while packets drain.
-             */
             uint64_t skew = (receiver_playback_now_ms > jb->next_playback_ms)
                     ? (receiver_playback_now_ms - jb->next_playback_ms)
                     : 0U;
             uint64_t threshold = (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_MIN_SKEW_MS;
             uint64_t ms_since = in->ms_since_prior_audio_apply;
-
-            /*
-             * 0 = caller did not supply timing (treat like unknown: no hole shortcut).
-             * Bounded skew/ms ratio distinguishes real-time loss (skew tracks wall clock since
-             * last decode) from join transients (huge skew ms after a fresh apply).
-             */
             if (in->audio_stream_started && ms_since != 0U &&
                     ms_since >= (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MIN_WAIT_MS &&
                     skew > (uint64_t) in->late_grace_ms &&
                     skew <= (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_HOLE_MAX_SKEW_MS) {
                 uint64_t ratio_skew = skew * 4U;
                 uint64_t ratio_ms = ms_since * 15U;
-
                 if (ratio_skew <= ratio_ms) {
                     threshold = (uint64_t) DASHCDG_AUDIO_SKIP_EMPTY_HOLE_RECOVERY_SKEW_MS;
                 }
             }
-
             if (skew < threshold) {
                 return DASHCDG_AUDIO_DRAIN_STOP;
             }
@@ -293,14 +443,9 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         return DASHCDG_AUDIO_DRAIN_SKIP;
     }
 
-    /*
-     * Sender playback can lag jb->next_playback_ms after clock_sync/bootstrap realignment — the
-     * gate above never opens and skew stays 0. Same empty buffer + loss as hole recovery, but
-     * driven by wall time since last decode.
-     */
     if (in->primed_decode != 0 && in->announced_audio_frame_ms > 0 &&
             (in->audio_stream_started || in->audio_device_null != 0 ||
-                    in->audio_buffered_ms >= (uint32_t) in->announced_playout_delay_ms / 2U) &&
+                    in->audio_buffered_ms >= startup_skip_ready_buffer_ms) &&
             starvation_gate_open &&
             in->ms_since_prior_audio_apply != 0U &&
             in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&
@@ -322,8 +467,7 @@ void dashcdg_audio_jitter_note_applied(
     if (jb == NULL || slot == NULL || !slot->occupied) {
         return;
     }
-
     jb->next_media_sequence++;
     jb->next_playback_ms = slot->playback_ms + (uint64_t) effective_frame_ms;
-    memset(slot, 0, sizeof(*slot));
+    audio_jb_zero_slot(slot);
 }

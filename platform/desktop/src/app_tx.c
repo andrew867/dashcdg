@@ -2607,7 +2607,10 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
 ) {
     uint64_t sender_playback_now_ms;
     uint64_t projected_presented_ms;
-    int64_t projected_latency_ms;
+    int64_t playback_domain_latency_ms;
+    int64_t observed_domain_latency_ms = 0;
+    int have_observed_domain_latency = 0;
+    int64_t chosen_latency_ms;
     uint64_t receipt_age_ms;
     const struct dashcdg_v4_rx_stats_payload *stats;
 
@@ -2619,31 +2622,54 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
     }
     stats = &slot->stats;
     if (stats == NULL || latency_ms_out == NULL ||
-            stats->presented_audio_timestamp_ms == 0U ||
-            stats->sender_time_observed_ms == 0U) {
+            stats->presented_audio_timestamp_ms == 0U) {
         return 0;
     }
 
     receipt_age_ms = now_ms > slot->last_local_ms ? now_ms - slot->last_local_ms : 0U;
+    projected_presented_ms = (uint64_t) stats->presented_audio_timestamp_ms + receipt_age_ms;
+
     /*
-     * presented_audio_timestamp_ms is receiver playout timeline (playback_ms-domain), not sender wall clock.
-     * Compare against sender playback timeline and project by receipt age.
+     * presented_audio_timestamp_ms is receiver playout timeline (playback_ms-domain).
+     * Primary latency math must stay in playback timeline to avoid wall-clock epoch bleed-through.
      */
     {
         uint64_t net_playback_ms = dashcdg_tx_network_playback_ms_locked(now_ms);
         uint64_t wall_playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
 
         sender_playback_now_ms = net_playback_ms <= wall_playback_ms ? net_playback_ms : wall_playback_ms;
+        playback_domain_latency_ms = (int64_t) sender_playback_now_ms - (int64_t) projected_presented_ms;
     }
-    projected_presented_ms = (uint64_t) stats->presented_audio_timestamp_ms + receipt_age_ms;
-    projected_latency_ms = (int64_t) sender_playback_now_ms - (int64_t) projected_presented_ms;
 
-    if (projected_latency_ms > (int64_t) INT32_MAX) {
-        projected_latency_ms = INT32_MAX;
-    } else if (projected_latency_ms < (int64_t) INT32_MIN) {
-        projected_latency_ms = INT32_MIN;
+    if (stats->sender_time_observed_ms > 0U) {
+        uint64_t sender_observed_now_ms = (uint64_t) stats->sender_time_observed_ms + receipt_age_ms;
+
+        observed_domain_latency_ms = (int64_t) sender_observed_now_ms - (int64_t) projected_presented_ms;
+        have_observed_domain_latency = 1;
     }
-    *latency_ms_out = (int32_t) projected_latency_ms;
+
+    /*
+     * Accept whichever candidate is physically plausible for receiver control.
+     * If wall-clock-domain math explodes (for example 157,379,0xx ms), fall back to playback-domain.
+     */
+    chosen_latency_ms = playback_domain_latency_ms;
+    if (chosen_latency_ms < (int64_t) DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS - 2000LL ||
+            chosen_latency_ms > (int64_t) DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS + 20000LL) {
+        if (have_observed_domain_latency &&
+                observed_domain_latency_ms >= (int64_t) DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS - 2000LL &&
+                observed_domain_latency_ms <= (int64_t) DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS + 20000LL) {
+            chosen_latency_ms = observed_domain_latency_ms;
+        } else if (chosen_latency_ms < -60000LL || chosen_latency_ms > 60000LL) {
+            return 0;
+        }
+    }
+
+    if (chosen_latency_ms > (int64_t) INT32_MAX) {
+        chosen_latency_ms = INT32_MAX;
+    } else if (chosen_latency_ms < (int64_t) INT32_MIN) {
+        chosen_latency_ms = INT32_MIN;
+    }
+    *latency_ms_out = (int32_t) chosen_latency_ms;
     return 1;
 }
 
@@ -7363,7 +7389,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     {
         char build_line[256];
 
-        snprintf(build_line, sizeof(build_line), "[tx] build: %s\n", DASHCDG_BUILD_VERSION);
+        snprintf(build_line, sizeof(build_line), "[tx] build: %s (%s %s)\n", DASHCDG_BUILD_VERSION, __DATE__, __TIME__);
         build_line[sizeof(build_line) - 1U] = '\0';
         if (g_tx_logger_enabled) {
             dashcdg_async_logger_log_line(&g_tx_logger, DASHCDG_ASYNC_LOG_STDOUT, build_line);
