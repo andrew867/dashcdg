@@ -8,6 +8,8 @@ static uint16_t dashcdg_be16_to_host(uint16_t value) {
     return (uint16_t) (((value & 0x00FFU) << 8U) | ((value & 0xFF00U) >> 8U));
 }
 
+static struct dashcdg_cdg_pack_parity_stats s_pack_parity_stats;
+
 void dashcdg_cdg_state_raster_dirty_mark_full(struct dashcdg_cdg_state *s)
 {
     if (s == NULL) {
@@ -673,18 +675,26 @@ static int dashcdg_cdg_packet_counts_for_alignment(const uint8_t *data, size_t l
             continue;
         }
 
+        s_pack_parity_stats.packets_considered++;
+
         /*
          * Rips usually zero the six parity bytes after drive correction. When any
          * parity byte is present, require a valid R–W PACK RS codeword so misaligned
          * windows that accidentally match 0x09 + instruction are not over-scored.
          */
-        if (!dashcdg_cdg_parity_bytes_all_zero(pkt) && !dashcdg_cdg_subchannel_pack_rs_syndrome_ok(pkt)) {
-            continue;
+        if (!dashcdg_cdg_parity_bytes_all_zero(pkt)) {
+            s_pack_parity_stats.packets_checked++;
+            if (!dashcdg_cdg_subchannel_pack_rs_syndrome_ok(pkt)) {
+                s_pack_parity_stats.packets_parity_fail++;
+                continue;
+            }
+            s_pack_parity_stats.packets_parity_ok++;
         }
 
         good_h++;
         if (dashcdg_cdg_parity_bytes_all_zero(pkt)) {
             pz++;
+            s_pack_parity_stats.packets_parity_zero++;
         }
         if (dashcdg_cdg_packet_fields_plausible(pkt)) {
             good_f++;
@@ -720,6 +730,7 @@ void dashcdg_cdg_compute_subchannel_trims(const uint8_t *data, size_t scan_bytes
     if (data == NULL || out_trim_prefix == NULL || out_trim_suffix == NULL) {
         return;
     }
+    s_pack_parity_stats.trim_scans++;
 
     if (total_bytes < sizeof(struct dashcdg_subchannel_packet)) {
         *out_trim_suffix = total_bytes % sizeof(struct dashcdg_subchannel_packet);
@@ -827,4 +838,20 @@ void dashcdg_cdg_compute_subchannel_trims(const uint8_t *data, size_t scan_bytes
 
         *out_trim_suffix = body % sizeof(struct dashcdg_subchannel_packet);
     }
+    if (*out_trim_prefix > 0U || *out_trim_suffix > 0U) {
+        s_pack_parity_stats.trims_applied++;
+        s_pack_parity_stats.trim_prefix_bytes += *out_trim_prefix;
+        s_pack_parity_stats.trim_suffix_bytes += *out_trim_suffix;
+    }
+}
+
+void dashcdg_cdg_pack_parity_stats_reset(void) {
+    memset(&s_pack_parity_stats, 0, sizeof(s_pack_parity_stats));
+}
+
+void dashcdg_cdg_pack_parity_stats_snapshot(struct dashcdg_cdg_pack_parity_stats *out_stats) {
+    if (out_stats == NULL) {
+        return;
+    }
+    *out_stats = s_pack_parity_stats;
 }

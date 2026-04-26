@@ -103,6 +103,18 @@ struct dashcdg_cdg_reader {
     struct dashcdg_cdg_keyframe_list keyframes;
 };
 
+struct dashcdg_cdg_pack_parity_stats {
+    uint64_t trim_scans;
+    uint64_t packets_considered;
+    uint64_t packets_checked;
+    uint64_t packets_parity_ok;
+    uint64_t packets_parity_fail;
+    uint64_t packets_parity_zero;
+    uint64_t trims_applied;
+    uint64_t trim_prefix_bytes;
+    uint64_t trim_suffix_bytes;
+};
+
 void dashcdg_cdg_state_init(struct dashcdg_cdg_state *state);
 int dashcdg_cdg_state_process_packet(struct dashcdg_cdg_state *state, const struct dashcdg_subchannel_packet *pkt);
 
@@ -158,5 +170,8 @@ void dashcdg_cdg_subchannel_pack_rs_fill(struct dashcdg_subchannel_packet *pkt);
  */
 void dashcdg_cdg_compute_subchannel_trims(const uint8_t *data, size_t scan_bytes, size_t total_bytes,
                                           size_t *out_trim_prefix, size_t *out_trim_suffix);
+
+void dashcdg_cdg_pack_parity_stats_reset(void);
+void dashcdg_cdg_pack_parity_stats_snapshot(struct dashcdg_cdg_pack_parity_stats *out_stats);
 
 #endif
