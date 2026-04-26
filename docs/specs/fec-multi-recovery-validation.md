@@ -9,6 +9,29 @@ This matrix verifies that desktop RX and badge RX recover the same number of mis
 - TX summary line includes `fec=Lx p75=...`.
 - Repair symbol count `K` is encoded in repair-window reserved bits and consumed by RX.
 
+### Deterministic Interleave Policy
+
+- Data/member interleave index: `idx = (ordinal * stride(group_size)) % group_size`.
+- `stride(group_size)` is the first value starting at `5` that is coprime with `group_size` (fallback `1`).
+- The same mapping is used for parity send ordering, so data/parity sequencing is deterministic.
+- TX runs a startup self-test for sizes `2..DASHCDG_CDG_GROUP_SIZE` and logs:
+  - `[tx] interleave-policy: deterministic mapping enabled ...`
+  - or validation-failed fallback notice.
+
+### Required Soak Log Fields (automatic)
+
+- TX summary line includes:
+  - `nack=<rx>/<resent>`
+  - `unrec=<count>`
+  - `eff=<repair-rate>`
+- RX summary line includes:
+  - `nack_tx=<count>`
+  - `unrec=<count>`
+  - `eff=<repair-rate>`
+- Event lines:
+  - TX: `[tx] nack-repair: group=... mask=... resent=...`
+  - RX: `[rx] repair-nack: group=... size=... mask=...`
+
 ### Soak Cases
 
 1. Baseline no impairment
@@ -37,3 +60,4 @@ This matrix verifies that desktop RX and badge RX recover the same number of mis
 - `cdg_fec_failed / (cdg_fec_recovered + cdg_fec_failed)` decreases as FEC level increases in same network profile.
 - Badge and desktop report consistent recoverability trends.
 - No impossible UI loss values above 100%.
+- Interleave self-test passes and the deterministic mapping line appears in TX logs.

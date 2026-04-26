@@ -107,6 +107,7 @@
 #define DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS 250U
 #define DASHCDG_V4_CLOCK_SYNC_INTERVAL_MS 100U
 #define DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS 1000U
+#define DASHCDG_V4_PAUSE_ANIM_INTERVAL_MS 250U
 #define DASHCDG_V4_STARTUP_ANCHOR_MIN_MS 500U
 #define DASHCDG_V4_RESILIENT_STARTUP_PREROLL_MS 500U
 #define DASHCDG_TX_AUDIO_SLOW_READ_THRESHOLD_MS 25U
@@ -183,6 +184,50 @@ static uint16_t s_cdg_fec_last_p75_loss_x100 = 0U;
 static uint16_t s_cdg_fec_last_controller_samples = 0U;
 static uint64_t s_cdg_retx_last_ms = 0U;
 static size_t s_cdg_retx_last_batch_index = (size_t)-1;
+
+static uint8_t dashcdg_tx_interleave_stride(uint8_t group_size) {
+    uint8_t stride = 5U;
+    if (group_size <= 1U) {
+        return 1U;
+    }
+    while (stride < group_size) {
+        uint8_t a = group_size;
+        uint8_t b = stride;
+        while (b != 0U) {
+            uint8_t t = (uint8_t) (a % b);
+            a = b;
+            b = t;
+        }
+        if (a == 1U) {
+            return stride;
+        }
+        stride++;
+    }
+    return 1U;
+}
+
+static uint8_t dashcdg_tx_interleave_index(uint8_t group_size, uint8_t ordinal) {
+    uint8_t stride = dashcdg_tx_interleave_stride(group_size);
+    if (group_size <= 1U) {
+        return 0U;
+    }
+    return (uint8_t) (((uint16_t) ordinal * (uint16_t) stride) % group_size);
+}
+
+static int dashcdg_tx_interleave_policy_self_test(void) {
+    for (uint8_t group_size = 2U; group_size <= DASHCDG_CDG_GROUP_SIZE; ++group_size) {
+        uint8_t seen[16];
+        memset(seen, 0, sizeof(seen));
+        for (uint8_t ord = 0U; ord < group_size; ++ord) {
+            uint8_t idx = dashcdg_tx_interleave_index(group_size, ord);
+            if (idx >= group_size || seen[idx]) {
+                return 0;
+            }
+            seen[idx] = 1U;
+        }
+    }
+    return 1;
+}
 
 static void dashcdg_tx_set_cdg_fec_level(unsigned level) {
     s_cdg_fec_level = (uint8_t) level;
@@ -475,6 +520,11 @@ struct dashcdg_tx_state {
     uint64_t v4_rx_stats_reporters_degraded;
     uint64_t v4_rx_stats_reporters_stale;
     uint64_t v4_rx_stats_reporters_controller;
+    uint64_t v4_rx_nack_received;
+    uint64_t v4_rx_nack_resent_packets;
+    uint64_t v4_rx_unrecoverable_groups;
+    uint64_t v4_rx_cdg_recovered_packets;
+    uint64_t v4_rx_cdg_failed_packets;
     int32_t v4_rx_phase_error_min_ms;
     int32_t v4_rx_phase_error_max_ms;
     uint32_t v4_rx_group_target_latency_ms;
@@ -551,6 +601,7 @@ static void dashcdg_tx_logger_boot(const char *argv0) {
     time_t now_t;
     struct tm now_tm;
     char line[sizeof(log_path) + 32U];
+    DWORD tick_ms = GetTickCount();
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
@@ -586,7 +637,7 @@ static void dashcdg_tx_logger_boot(const char *argv0) {
     snprintf(
             log_path,
             sizeof(log_path),
-            "%s\\%s-%04d%02d%02d-%02d%02d%02d-p%lu.log",
+            "%s\\%s-%04d%02d%02d-%02d%02d%02d-p%lu-t%lu.log",
             dir_path,
             stem,
             now_tm.tm_year + 1900,
@@ -595,7 +646,8 @@ static void dashcdg_tx_logger_boot(const char *argv0) {
             now_tm.tm_hour,
             now_tm.tm_min,
             now_tm.tm_sec,
-            (unsigned long) GetCurrentProcessId()
+            (unsigned long) GetCurrentProcessId(),
+            (unsigned long) tick_ms
     );
     if (!dashcdg_async_logger_init(&g_tx_logger, log_path)) {
         return;
@@ -1929,6 +1981,11 @@ static void dashcdg_tx_reset_rx_reporters_locked(void) {
     g_tx_state.v4_rx_stats_reporters_degraded = 0U;
     g_tx_state.v4_rx_stats_reporters_stale = 0U;
     g_tx_state.v4_rx_stats_reporters_controller = 0U;
+    g_tx_state.v4_rx_nack_received = 0U;
+    g_tx_state.v4_rx_nack_resent_packets = 0U;
+    g_tx_state.v4_rx_unrecoverable_groups = 0U;
+    g_tx_state.v4_rx_cdg_recovered_packets = 0U;
+    g_tx_state.v4_rx_cdg_failed_packets = 0U;
     g_tx_state.v4_rx_phase_error_min_ms = 0;
     g_tx_state.v4_rx_phase_error_max_ms = 0;
     g_tx_state.v4_rx_group_target_latency_ms = 0U;
@@ -2994,6 +3051,8 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     uint32_t group_target_latency_ms = 0U;
     uint32_t best_buffer_ms = 0U;
     uint32_t worst_buffer_ms = 0U;
+    uint64_t cdg_recovered_sum = 0U;
+    uint64_t cdg_failed_sum = 0U;
     size_t i;
 
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
@@ -3025,6 +3084,8 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
             continue;
         }
         controller_count++;
+        cdg_recovered_sum += slot->stats.cdg_fec_recovered;
+        cdg_failed_sum += slot->stats.cdg_fec_failed;
         if (!have_phase) {
             best_buffer_ms = slot->stats.audio_buffer_ms;
             worst_buffer_ms = slot->stats.audio_buffer_ms;
@@ -3064,6 +3125,9 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     g_tx_state.v4_rx_group_target_latency_ms = group_target_latency_ms;
     g_tx_state.v4_rx_worst_buffer_ms = worst_buffer_ms;
     g_tx_state.v4_rx_best_buffer_ms = best_buffer_ms;
+    g_tx_state.v4_rx_cdg_recovered_packets = cdg_recovered_sum;
+    g_tx_state.v4_rx_cdg_failed_packets = cdg_failed_sum;
+    g_tx_state.v4_rx_unrecoverable_groups = cdg_failed_sum;
     if (have_phase) {
         g_tx_state.v4_rx_phase_error_min_ms = latency_min_ms - (int32_t) group_target_latency_ms;
         g_tx_state.v4_rx_phase_error_max_ms = latency_max_ms - (int32_t) group_target_latency_ms;
@@ -3077,11 +3141,14 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
 static void dashcdg_tx_emit_rx_summary_locked(void) {
     char line[256];
     size_t i;
+    uint64_t repair_total = g_tx_state.v4_rx_cdg_recovered_packets + g_tx_state.v4_rx_cdg_failed_packets;
+    uint32_t repair_rate_x100 = repair_total == 0U ? 0U
+        : (uint32_t) ((g_tx_state.v4_rx_cdg_recovered_packets * 10000ULL) / repair_total);
 
     snprintf(
             line,
             sizeof(line),
-            "[tx] v4-rx: pkts=%llu active=%llu healthy=%llu degraded=%llu stale=%llu ctl=%llu target=%ums phase=%d..%dms buf=%u..%ums fec=L%u p75=%u.%02u%% n=%u",
+            "[tx] v4-rx: pkts=%llu active=%llu healthy=%llu degraded=%llu stale=%llu ctl=%llu target=%ums phase=%d..%dms buf=%u..%ums fec=L%u p75=%u.%02u%% n=%u nack=%llu/%llu unrec=%llu eff=%u.%02u%%",
             (unsigned long long) g_tx_state.v4_rx_stats_packets_received,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_active,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_healthy,
@@ -3096,7 +3163,12 @@ static void dashcdg_tx_emit_rx_summary_locked(void) {
             (unsigned int) s_cdg_fec_level,
             (unsigned int) (s_cdg_fec_last_p75_loss_x100 / 100U),
             (unsigned int) (s_cdg_fec_last_p75_loss_x100 % 100U),
-            (unsigned int) s_cdg_fec_last_controller_samples
+            (unsigned int) s_cdg_fec_last_controller_samples,
+            (unsigned long long) g_tx_state.v4_rx_nack_received,
+            (unsigned long long) g_tx_state.v4_rx_nack_resent_packets,
+            (unsigned long long) g_tx_state.v4_rx_unrecoverable_groups,
+            (unsigned int) (repair_rate_x100 / 100U),
+            (unsigned int) (repair_rate_x100 % 100U)
     );
     TX_OUT( "%s\n", line);
     dashcdg_tx_sidecar_write_line(line);
@@ -3160,6 +3232,7 @@ static void dashcdg_tx_handle_v4_repair_nack_locked(
         }
     }
     if (resend_count > 0U) {
+        g_tx_state.v4_rx_nack_resent_packets += resend_count;
         TX_OUT("[tx] nack-repair: group=%u mask=0x%04x resent=%u\n", (unsigned int) nack->group_id,
                (unsigned int) nack->missing_member_mask, (unsigned int) resend_count);
     }
@@ -3268,6 +3341,8 @@ static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
     g_tx_state.last_v4_video_anchor_ms = 0U;
     g_tx_state.last_v4_video_anchor_chunk_ms = 0U;
     g_tx_state.last_v4_clock_sync_ms = 0U;
+    g_tx_state.last_v4_session_info_ms = 0U;
+    g_tx_state.last_v4_loading_screen_ms = 0U;
     if (paused) {
         g_tx_state.last_pause_state_update_ms = 0U;
         dashcdg_tx_render_pause_state_locked(now_ms);
@@ -4712,7 +4787,8 @@ static void dashcdg_tx_send_v4_cdg_multi_repair_locked(
     for (uint8_t si = 0U; si < symbols_to_send; ++si) {
         memset(parity_syms[si], 0, symbol_bytes);
     }
-    for (uint8_t i = 0U; i < group_size; ++i) {
+    for (uint8_t ord = 0U; ord < group_size; ++ord) {
+        uint8_t i = dashcdg_tx_interleave_index(group_size, ord);
         uint8_t sym[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
         memset(sym, 0, symbol_bytes);
         sym[0] = (uint8_t)lengths[i];
@@ -4733,7 +4809,7 @@ static void dashcdg_tx_send_v4_cdg_multi_repair_locked(
     }
 
     for (uint8_t send_ord = 0U; send_ord < symbols_to_send; ++send_ord) {
-        uint8_t si = (uint8_t) ((send_ord * 3U) % symbols_to_send); /* stagger wire order under burst loss */
+        uint8_t si = dashcdg_tx_interleave_index(symbols_to_send, send_ord);
         const uint8_t *sym = parity_syms[si];
         uint16_t dir = (send_ord & 1U) == 0U ? DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_FORWARD
                                              : DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_REVERSE;
@@ -5973,6 +6049,7 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
             pthread_mutex_unlock(&g_tx_state.mutex);
         } else if (view.header.type == DASHCDG_PACKET_V4_REPAIR_NACK) {
             pthread_mutex_lock(&g_tx_state.mutex);
+            g_tx_state.v4_rx_nack_received++;
             dashcdg_tx_handle_v4_repair_nack_locked(dashcdg_clock_now_ms(), &view.v4_repair_nack);
             pthread_mutex_unlock(&g_tx_state.mutex);
         }
@@ -6607,6 +6684,18 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     uint64_t send_deadline_ms = dashcdg_tx_media_send_deadline_ms_locked(now_ms);
     unsigned int video_sent = 0U;
     int startup_anchor_bootstrap_pending = 0;
+
+    if (g_tx_state.paused &&
+            (g_tx_state.last_pause_state_update_ms == 0U ||
+             now_ms - g_tx_state.last_pause_state_update_ms >= DASHCDG_V4_PAUSE_ANIM_INTERVAL_MS)) {
+        dashcdg_tx_render_pause_state_locked(now_ms);
+        free(g_tx_state.v4_video_anchor_bytes);
+        g_tx_state.v4_video_anchor_bytes = NULL;
+        g_tx_state.v4_video_anchor_size = 0U;
+        g_tx_state.v4_video_anchor_offset = 0U;
+        g_tx_state.last_v4_video_anchor_ms = 0U;
+        g_tx_state.last_v4_video_anchor_chunk_ms = 0U;
+    }
 
     if (g_tx_state.last_v4_session_info_ms == 0U ||
             now_ms - g_tx_state.last_v4_session_info_ms >= DASHCDG_V4_SESSION_INFO_INTERVAL_MS) {
@@ -7707,6 +7796,12 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     memset(&g_tx_state, 0, sizeof(g_tx_state));
     s_cdg_repair_symbol_accum = 0U;
     dashcdg_tx_set_cdg_fec_level(2U);
+    if (dashcdg_tx_interleave_policy_self_test()) {
+        TX_OUT("[tx] interleave-policy: deterministic mapping enabled (sizes 2..%u validated)\n",
+               (unsigned int) DASHCDG_CDG_GROUP_SIZE);
+    } else {
+        TX_OUT("[tx] interleave-policy: validation failed, fallback ordering may apply\n");
+    }
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;

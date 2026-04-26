@@ -322,6 +322,8 @@ struct receiver_state {
     uint64_t fec_audio_recovered;
     uint64_t fec_cdg_recovered;
     uint64_t fec_recovery_failures;
+    uint64_t cdg_unrecoverable_groups;
+    uint64_t repair_nack_tx;
     uint64_t last_logged_audio_queue_overflows;
     uint64_t last_logged_audio_missing_skips;
     uint64_t last_logged_live_missing_skips;
@@ -632,6 +634,7 @@ static void dashcdg_rx_logger_boot(const char *argv0) {
     time_t now_t;
     struct tm now_tm;
     char line[sizeof(log_path) + 32U];
+    DWORD tick_ms = GetTickCount();
 
     (void) argv0;
     if (GetModuleFileNameA(NULL, exe_path, (DWORD) sizeof(exe_path)) == 0 || exe_path[0] == '\0') {
@@ -667,7 +670,7 @@ static void dashcdg_rx_logger_boot(const char *argv0) {
     snprintf(
             log_path,
             sizeof(log_path),
-            "%s\\%s-%04d%02d%02d-%02d%02d%02d-p%lu.log",
+            "%s\\%s-%04d%02d%02d-%02d%02d%02d-p%lu-t%lu.log",
             dir_path,
             stem,
             now_tm.tm_year + 1900,
@@ -676,7 +679,8 @@ static void dashcdg_rx_logger_boot(const char *argv0) {
             now_tm.tm_hour,
             now_tm.tm_min,
             now_tm.tm_sec,
-            (unsigned long) GetCurrentProcessId()
+            (unsigned long) GetCurrentProcessId(),
+            (unsigned long) tick_ms
     );
     if (!dashcdg_async_logger_init(&g_rx_logger, log_path)) {
         return;
@@ -1254,6 +1258,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->fec_audio_recovered = 0;
     state->fec_cdg_recovered = 0;
     state->fec_recovery_failures = 0;
+    state->cdg_unrecoverable_groups = 0;
+    state->repair_nack_tx = 0;
     state->last_logged_audio_queue_overflows = 0;
     state->last_logged_audio_missing_skips = 0;
     state->last_logged_live_missing_skips = 0;
@@ -3657,6 +3663,7 @@ static void dashcdg_rx_try_recover_cdg_group_locked(
             }
             if (!dashcdg_rx_gf256_solve(miss_count, coeff_matrix, rhs, sol)) {
                 state->fec_recovery_failures++;
+                state->cdg_unrecoverable_groups++;
                 return;
             }
             for (uint8_t c = 0U; c < miss_count; ++c) {
@@ -3671,17 +3678,20 @@ static void dashcdg_rx_try_recover_cdg_group_locked(
             uint64_t psi;
             if (len == 0U || len > DASHCDG_MAX_FEC_PAYLOAD_BYTES - 1U || (len % DASHCDG_SUBCHANNEL_PACKET_BYTES) != 0U) {
                 state->fec_recovery_failures++;
+                state->cdg_unrecoverable_groups++;
                 return;
             }
             pc = (uint8_t) (len / DASHCDG_SUBCHANNEL_PACKET_BYTES);
             if (pc == 0U || pc > DASHCDG_MAX_CDG_BATCH_PACKETS) {
                 state->fec_recovery_failures++;
+                state->cdg_unrecoverable_groups++;
                 return;
             }
             bi = (uint64_t) group->group_id * (uint64_t) state->announced_cdg_fec_group_size + (uint64_t) mi;
             psi = bi * DASHCDG_MAX_CDG_BATCH_PACKETS;
             if (!dashcdg_rx_insert_cdg_pending_locked(state, psi, pc, &rec_syms[c][1], 0)) {
                 state->fec_recovery_failures++;
+                state->cdg_unrecoverable_groups++;
                 return;
             }
             group->member_present[mi] = 1;
@@ -5812,11 +5822,14 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
     }
     if (summary_due) {
         char line[256];
+        uint64_t repair_total = g_receiver.fec_cdg_recovered + g_receiver.fec_recovery_failures;
+        uint32_t repair_rate_x100 = repair_total == 0U ? 0U
+            : (uint32_t) ((g_receiver.fec_cdg_recovered * 10000ULL) / repair_total);
 
         snprintf(
                 line,
                 sizeof(line),
-                "[rx] v4-stats: seq=%u snd=%" DASHCDG_RX_PRIu64 "ms pts=%u buf=%ums tgt=%u/%u host=%u trim=%d stage=%u rec=%u/%u/%u idle=%u",
+                "[rx] v4-stats: seq=%u snd=%" DASHCDG_RX_PRIu64 "ms pts=%u buf=%ums tgt=%u/%u host=%u trim=%d stage=%u rec=%u/%u/%u idle=%u nack_tx=%" DASHCDG_RX_PRIu64 " unrec=%" DASHCDG_RX_PRIu64 " eff=%u.%02u%%",
                 (unsigned int) pl.report_seq,
                 (uint64_t) pl.sender_time_observed_ms,
                 (unsigned int) pl.presented_audio_timestamp_ms,
@@ -5829,7 +5842,11 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
                 (unsigned int) pl.recovery_host_underrun_count,
                 (unsigned int) pl.recovery_zero_buffer_count,
                 (unsigned int) pl.recovery_silent_stall_count,
-                (unsigned int) pl.source_idle_park_count
+                (unsigned int) pl.source_idle_park_count,
+                (uint64_t) g_receiver.repair_nack_tx,
+                (uint64_t) g_receiver.cdg_unrecoverable_groups,
+                (unsigned int) (repair_rate_x100 / 100U),
+                (unsigned int) (repair_rate_x100 % 100U)
         );
         dashcdg_rx_async_stdout_line(line);
     }
@@ -5881,6 +5898,7 @@ static void dashcdg_rx_send_v4_repair_nack_locked(
         s_last_nack_ms = now_ms;
         s_last_nack_group_id = group_id;
         s_last_nack_mask = missing_mask;
+        g_receiver.repair_nack_tx++;
         RX_OUT("[rx] repair-nack: group=%u size=%u mask=0x%04x\n", (unsigned int) group_id,
                (unsigned int) observed_group_size, (unsigned int) missing_mask);
     }
