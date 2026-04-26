@@ -116,6 +116,7 @@
 #define DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS 12U
 #define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 8U
 #define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 64U
+#define DASHCDG_TX_AUDIO_ASSIST_CATCHUP_PACKETS 8U
 #define DASHCDG_TX_AUDIO_LATE_FILL_THRESHOLD_MS (DASHCDG_AUDIO_FRAME_MS * 2U)
 #define DASHCDG_TX_AUDIO_LOCK_WAIT_CAUSE_MS 20U
 #define DASHCDG_TX_AUDIO_SEND_BLOCK_CAUSE_MS 20U
@@ -6897,6 +6898,12 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
 
     if (g_tx_state.v4_anchor_first_full_delivery_done &&
             dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
+        (void) dashcdg_tx_send_due_audio_locked(
+                now_ms,
+                packet,
+                packet_size,
+                DASHCDG_TX_AUDIO_ASSIST_CATCHUP_PACKETS
+        );
         return;
     }
 
@@ -6927,6 +6934,12 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
 
     if (dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
+        (void) dashcdg_tx_send_due_audio_locked(
+                now_ms,
+                packet,
+                packet_size,
+                DASHCDG_TX_AUDIO_ASSIST_CATCHUP_PACKETS
+        );
         return;
     }
 
@@ -6976,16 +6989,10 @@ static unsigned int dashcdg_tx_compute_v4_sleep_ms_locked(uint64_t now_ms) {
     if (audio_lead_ms <= 0) {
         return 1U;
     }
-    if (audio_lead_ms <= 2) {
+    if (audio_lead_ms <= 4) {
         return 1U;
     }
-    if (audio_lead_ms <= 5) {
-        return 2U;
-    }
-    if (audio_lead_ms <= 10) {
-        return 3U;
-    }
-    return 4U;
+    return 2U;
 }
 
 static void *dashcdg_tx_audio_send_thread_main(void *unused) {

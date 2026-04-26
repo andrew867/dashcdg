@@ -8,7 +8,7 @@
 | Scope | Desktop TX (`desktop-tx.exe`, Win11 observations), v4 transport, multi-receiver soak. |
 | Primary evidence | `build/dist/dashcdg-windows-sneakernet/windows-x64/desktop-tx-20260426-012646-p12976.log` |
 | Impact | Audible risk: timeline jitter, silence/late fill concealment, downstream RX instability under sustained host timing jitter. |
-| Status | OPEN - RCA complete, fix design pending implementation. |
+| Status | MITIGATION IN PROGRESS - instrumentation confirms dominant wake-late path; scheduler assist patch shipped for soak validation. |
 
 ## Mission statement
 
@@ -22,6 +22,10 @@ Eliminate recurring TX-side audio timing misses without regressing video cadence
   - subsequent recurring gaps (`max=165ms`, `max=106ms`, `max=110ms`) with late-fill increments.
 - Queue depth around fault windows remains high (`q=183/184`), which indicates this is not simply producer starvation to zero.
 - Pattern repeats over time instead of appearing only at startup/warmup.
+- Instrumented causality in current soak runs shows repeated:
+  - `cause(wl/qe/sb/lw)=1/0/0/0`
+  - paired with timing lines like `wake_late(max/avg)=80ms/1ms` while queue remains high.
+  - This narrows dominant behavior to wake-late cadence misses rather than queue-empty or send-block primary events in those windows.
 
 ## System context
 
@@ -67,6 +71,18 @@ Eliminate recurring TX-side audio timing misses without regressing video cadence
    Evidence: fault pattern aligns with intermittent gap bursts rather than constant drift.
 3. **RC-3: sleep/wake jitter is under-accounted in due-time guard logic.**  
    Evidence: repeated small-to-medium gaps (100-220 ms) under otherwise stable run.
+
+## Implemented mitigation for upcoming soak
+
+1. **Media-thread audio assist when due-soon**
+   - `dashcdg_tx_tick_v4_locked` now proactively calls `dashcdg_tx_send_due_audio_locked(..., DASHCDG_TX_AUDIO_ASSIST_CATCHUP_PACKETS)` when due-soon gates trigger, instead of only returning and waiting for the audio thread.
+   - Goal: reduce missed release windows when the dedicated audio sender wakes late.
+
+2. **Tighter sender sleep cadence**
+   - `dashcdg_tx_compute_v4_sleep_ms_locked` now caps idle sleep at 2 ms (1 ms when lead is near), reducing long wake quantization tails.
+
+3. **Causality telemetry retained**
+   - Keep cause buckets and timing summaries active to verify whether wake-late incidence and max gap values trend down during soak.
 
 ## Non-causes / weak candidates
 
