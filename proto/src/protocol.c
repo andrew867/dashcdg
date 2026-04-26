@@ -11,6 +11,7 @@
 #define DASHCDG_V4_SESSION_INFO_PAYLOAD_SIZE (DASHCDG_MAX_SONG_ID + 1U + 1U + 1U + 1U + 2U + 1U + 1U + 2U + 2U + 1U + 1U + 1U + 1U + 1U + 1U + 4U + 8U)
 #define DASHCDG_V4_LOADING_SCREEN_PAYLOAD_SIZE (4U + 1U + 1U + 1U + 1U + 8U + DASHCDG_MAX_V4_LOADING_TEXT)
 #define DASHCDG_V4_CLOCK_SYNC_PAYLOAD_SIZE 24U
+#define DASHCDG_V4_REPAIR_NACK_PAYLOAD_SIZE 12U
 
 static void dashcdg_write_u16(uint8_t *dst, uint16_t value) {
     dst[0] = (uint8_t) ((value >> 8U) & 0xFFU);
@@ -884,6 +885,37 @@ size_t dashcdg_protocol_serialize_v4_rx_stats(
     return offset;
 }
 
+size_t dashcdg_protocol_serialize_v4_repair_nack(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_repair_nack_payload *payload
+) {
+    size_t offset;
+    if (payload == NULL || buffer_size < DASHCDG_PACKET_HEADER_SIZE + DASHCDG_V4_REPAIR_NACK_PAYLOAD_SIZE) {
+        return 0;
+    }
+    offset = dashcdg_write_header_version(
+            buffer,
+            buffer_size,
+            header,
+            DASHCDG_PROTOCOL_VERSION_V4,
+            DASHCDG_PACKET_V4_REPAIR_NACK,
+            DASHCDG_V4_REPAIR_NACK_PAYLOAD_SIZE
+    );
+    buffer[offset++] = payload->stream_type;
+    buffer[offset++] = payload->reserved_a;
+    dashcdg_write_u16(buffer + offset, payload->observed_group_size);
+    offset += 2U;
+    dashcdg_write_u32(buffer + offset, payload->group_id);
+    offset += 4U;
+    dashcdg_write_u16(buffer + offset, payload->missing_member_mask);
+    offset += 2U;
+    dashcdg_write_u16(buffer + offset, payload->reserved_b);
+    offset += 2U;
+    return offset;
+}
+
 int dashcdg_protocol_parse_packet(
         struct dashcdg_packet_view *view,
         const uint8_t *buffer,
@@ -1391,6 +1423,22 @@ int dashcdg_protocol_parse_packet(
                 view->v4_rx_stats.device_flags = dashcdg_read_u32(buffer + offset);
                 offset += 4U;
             }
+            return 1;
+
+        case DASHCDG_PACKET_V4_REPAIR_NACK:
+            if (view->header.version != DASHCDG_PROTOCOL_VERSION_V4 ||
+                    payload_length != DASHCDG_V4_REPAIR_NACK_PAYLOAD_SIZE) {
+                return 0;
+            }
+            view->v4_repair_nack.stream_type = buffer[offset++];
+            view->v4_repair_nack.reserved_a = buffer[offset++];
+            view->v4_repair_nack.observed_group_size = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->v4_repair_nack.group_id = dashcdg_read_u32(buffer + offset);
+            offset += 4U;
+            view->v4_repair_nack.missing_member_mask = dashcdg_read_u16(buffer + offset);
+            offset += 2U;
+            view->v4_repair_nack.reserved_b = dashcdg_read_u16(buffer + offset);
             return 1;
 
         default:

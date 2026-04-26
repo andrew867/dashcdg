@@ -49,7 +49,8 @@ enum dashcdg_packet_type {
     DASHCDG_PACKET_V4_REPAIR_WINDOW = 18,
     DASHCDG_PACKET_V4_BACKFILL_CHUNK = 19,
     DASHCDG_PACKET_V4_CLOCK_SYNC = 20,
-    DASHCDG_PACKET_V4_RX_STATS = 21
+    DASHCDG_PACKET_V4_RX_STATS = 21,
+    DASHCDG_PACKET_V4_REPAIR_NACK = 22
 };
 
 /*
@@ -403,6 +404,15 @@ struct dashcdg_v4_rx_stats_payload {
 };
 #pragma pack(pop)
 
+struct dashcdg_v4_repair_nack_payload {
+    uint8_t stream_type;
+    uint8_t reserved_a;
+    uint16_t observed_group_size;
+    uint32_t group_id;
+    uint16_t missing_member_mask;
+    uint16_t reserved_b;
+};
+
 struct dashcdg_packet_view {
     struct dashcdg_packet_header header;
     struct dashcdg_announce_payload announce;
@@ -425,6 +435,7 @@ struct dashcdg_packet_view {
     struct dashcdg_v4_backfill_chunk_payload v4_backfill_chunk;
     struct dashcdg_v4_clock_sync_payload v4_clock_sync;
     struct dashcdg_v4_rx_stats_payload v4_rx_stats;
+    struct dashcdg_v4_repair_nack_payload v4_repair_nack;
 };
 
 size_t dashcdg_protocol_serialize_announce(
@@ -565,6 +576,12 @@ size_t dashcdg_protocol_serialize_v4_rx_stats(
         size_t buffer_size,
         const struct dashcdg_packet_header *header,
         const struct dashcdg_v4_rx_stats_payload *payload
+);
+size_t dashcdg_protocol_serialize_v4_repair_nack(
+        uint8_t *buffer,
+        size_t buffer_size,
+        const struct dashcdg_packet_header *header,
+        const struct dashcdg_v4_repair_nack_payload *payload
 );
 
 int dashcdg_protocol_parse_packet(

@@ -35,6 +35,21 @@ static lv_obj_t *s_bar_m;
 static lv_obj_t *s_bar_c;
 static lv_obj_t *s_bar_d;
 static lv_obj_t *s_bar_line;
+static uint64_t s_last_buf_nonzero_ms;
+static uint64_t s_last_m_progress_ms;
+static uint64_t s_last_c_progress_ms;
+static uint64_t s_last_d_progress_ms;
+static uint64_t s_last_q_sample_ms;
+static uint64_t s_last_q_datagrams;
+static uint64_t s_last_q_wire_miss;
+static uint32_t s_last_q_cdg_miss;
+static uint32_t s_last_q_wire_reorder;
+static uint32_t s_last_q_miss_per_10k;
+static uint32_t s_last_q_reorder_per_10k;
+static uint32_t s_loss_hist_per_10k[5];
+static uint8_t s_loss_hist_count;
+static uint8_t s_loss_hist_head;
+static uint32_t s_loss_hist_sum_per_10k;
 
 typedef struct {
     lv_disp_t *disp;
@@ -51,6 +66,8 @@ static uint64_t s_status_slow_deadline_ms;
 static char s_mcast_modal_scratch[1536];
 /** Wi-Fi / bat label refresh interval (also bounds `platform_hw` ADC reads from this UI path). */
 #define KARAOKE_STATUS_SLOW_PERIOD_MS 2500U
+/** Loss smoothing window uses 2s quality samples x 5 entries (~10s rolling average). */
+#define KARAOKE_LOSS_AVG_SAMPLES      5U
 /** Gap (px) between the header row and the CDG slot; tune for spacing vs vertical budget. */
 #define KARAOKE_HEADER_TO_CDG_GAP_PX 10
 /** Decorative frame around the panel blit viewport (CDG paints on LCD, not inside this LVGL child). */
@@ -145,16 +162,112 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
     const lv_color_t idlec = lv_color_hex(0x556677);
     const lv_color_t badc = lv_color_hex(0xff8866);
 
-    const bool rx_on = st->rx_task_running != 0;
-    const bool joined = st->igmp_joined != 0;
-    const bool clock = st->have_clock != 0;
-    const bool buf_ok = (st->jb_pending_slots > 0U) && (st->v4_video_delta_count > 0U);
+    const bool rx_on = (st->rx_task_running != 0) ||
+                       (st->datagrams > 0U) ||
+                       (st->v4_clock_count > 0U) ||
+                       (st->v4_video_delta_count > 0U);
+    const bool joined = (st->igmp_joined != 0) || (st->datagrams > 0U);
+    const bool clock = (st->have_clock != 0) || (st->v4_clock_count > 0U);
+    uint64_t now_ms = dashcdg_clock_now_ms();
+    static uint64_t s_prev_datagrams;
+    static uint32_t s_prev_clock_count;
+    static uint32_t s_prev_delta_count;
+    uint32_t miss_per_10k = 0U;
+    uint32_t reorder_per_10k = 0U;
+    bool buf_recent;
+
+    if (st->datagrams > s_prev_datagrams) {
+        s_last_m_progress_ms = now_ms;
+    }
+    if (st->v4_clock_count > s_prev_clock_count) {
+        s_last_c_progress_ms = now_ms;
+    }
+    if (st->v4_video_delta_count > s_prev_delta_count) {
+        s_last_d_progress_ms = now_ms;
+    }
+    s_prev_datagrams = st->datagrams;
+    s_prev_clock_count = st->v4_clock_count;
+    s_prev_delta_count = st->v4_video_delta_count;
+
+    if (s_last_q_sample_ms == 0U) {
+        s_last_q_sample_ms = now_ms;
+        s_last_q_datagrams = st->datagrams;
+        s_last_q_wire_miss = st->wire_missing_estimate;
+        s_last_q_cdg_miss = st->cdg_missing_estimate;
+        s_last_q_wire_reorder = st->wire_reorder_events;
+    } else if ((now_ms - s_last_q_sample_ms) >= 2000U &&
+            st->datagrams >= s_last_q_datagrams &&
+            st->wire_missing_estimate >= s_last_q_wire_miss &&
+            st->cdg_missing_estimate >= s_last_q_cdg_miss &&
+            st->wire_reorder_events >= s_last_q_wire_reorder &&
+            st->datagrams > s_last_q_datagrams) {
+        uint64_t dg = st->datagrams - s_last_q_datagrams;
+        uint64_t miss = st->wire_missing_estimate - s_last_q_wire_miss;
+        uint32_t cdg_miss = st->cdg_missing_estimate - s_last_q_cdg_miss;
+        uint32_t reord = st->wire_reorder_events - s_last_q_wire_reorder;
+
+        miss_per_10k = (uint32_t)((miss * 10000ULL) / dg);
+        {
+            uint32_t cdg_miss_per_10k = (uint32_t)(((uint64_t)cdg_miss * 10000ULL) / dg);
+            if (cdg_miss_per_10k > miss_per_10k) {
+                miss_per_10k = cdg_miss_per_10k;
+            }
+        }
+        reorder_per_10k = (uint32_t)(((uint64_t)reord * 10000ULL) / dg);
+        if (miss_per_10k > 10000U) {
+            miss_per_10k = 10000U;
+        }
+        if (reorder_per_10k > 10000U) {
+            reorder_per_10k = 10000U;
+        }
+        s_last_q_miss_per_10k = miss_per_10k;
+        s_last_q_reorder_per_10k = reorder_per_10k;
+        if (s_loss_hist_count >= KARAOKE_LOSS_AVG_SAMPLES) {
+            uint8_t old_idx = s_loss_hist_head;
+            s_loss_hist_sum_per_10k -= s_loss_hist_per_10k[old_idx];
+        } else {
+            s_loss_hist_count++;
+        }
+        s_loss_hist_per_10k[s_loss_hist_head] = miss_per_10k;
+        s_loss_hist_sum_per_10k += miss_per_10k;
+        s_loss_hist_head = (uint8_t)((s_loss_hist_head + 1U) % KARAOKE_LOSS_AVG_SAMPLES);
+        s_last_q_sample_ms = now_ms;
+        s_last_q_datagrams = st->datagrams;
+        s_last_q_wire_miss = st->wire_missing_estimate;
+        s_last_q_cdg_miss = st->cdg_missing_estimate;
+        s_last_q_wire_reorder = st->wire_reorder_events;
+    } else if ((now_ms - s_last_q_sample_ms) >= 2000U) {
+        /* Counter reset/restart or no progress: re-baseline without producing a bogus spike. */
+        s_last_q_sample_ms = now_ms;
+        s_last_q_datagrams = st->datagrams;
+        s_last_q_wire_miss = st->wire_missing_estimate;
+        s_last_q_cdg_miss = st->cdg_missing_estimate;
+        s_last_q_wire_reorder = st->wire_reorder_events;
+    }
+    if (miss_per_10k == 0U && reorder_per_10k == 0U) {
+        miss_per_10k = s_last_q_miss_per_10k;
+        reorder_per_10k = s_last_q_reorder_per_10k;
+    }
+    /* Reorder-heavy periods often look like corruption even before strict missing estimate rises. */
+    if (miss_per_10k == 0U && reorder_per_10k > 0U) {
+        miss_per_10k = reorder_per_10k / 2U;
+    }
+
+    if (st->jb_pending_slots > 0U) {
+        s_last_buf_nonzero_ms = now_ms;
+    }
+    buf_recent = (s_last_buf_nonzero_ms != 0U) && ((now_ms - s_last_buf_nonzero_ms) <= 1800U);
+    const bool buf_ok = ((st->jb_pending_slots > 0U) || buf_recent) && (st->v4_video_delta_count > 0U);
     const bool stream_ok = clock && buf_ok && (st->cdg_heap_ok != 0);
 
     lv_color_t mc = idlec;
     if (!rx_on) {
         mc = idlec;
-    } else if (joined) {
+    } else if (!joined) {
+        mc = waitc;
+    } else if (miss_per_10k > 260U) {
+        mc = badc;
+    } else if (st->datagrams > 0U) {
         mc = okc;
     } else {
         mc = waitc;
@@ -167,7 +280,11 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         cc = idlec;
     } else if (!joined) {
         cc = idlec;
-    } else if (clock) {
+    } else if (!clock) {
+        cc = waitc;
+    } else if (miss_per_10k > 320U || (st->skew_ema_ms > 1500 || st->skew_ema_ms < -1500)) {
+        cc = badc;
+    } else if (st->v4_clock_count > 0U) {
         cc = okc;
     } else {
         cc = waitc;
@@ -178,6 +295,8 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
     lv_color_t dc = idlec;
     if (!rx_on || !joined || !clock) {
         dc = idlec;
+    } else if (miss_per_10k > 300U || reorder_per_10k > 450U) {
+        dc = badc;
     } else if (stream_ok) {
         dc = okc;
     } else if (st->cdg_heap_ok == 0) {
@@ -189,35 +308,44 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
     lv_label_set_text(s_bar_d, "D");
 
     const char *sym = LV_SYMBOL_REFRESH;
-    const char *msg = "...";
     lv_color_t lcol = waitc;
     if (!rx_on) {
         sym = LV_SYMBOL_PAUSE;
-        msg = "rx off";
         lcol = idlec;
     } else if (!joined) {
         sym = LV_SYMBOL_REFRESH;
-        msg = "mcast";
         lcol = waitc;
     } else if (!clock) {
         sym = LV_SYMBOL_REFRESH;
-        msg = "clock";
         lcol = waitc;
     } else if (st->cdg_heap_ok == 0) {
         sym = LV_SYMBOL_CLOSE;
-        msg = "mem";
         lcol = badc;
-    } else if (!buf_ok) {
+    } else if (miss_per_10k > 300U) {
+        sym = LV_SYMBOL_WARNING;
+        lcol = badc;
+    } else if (miss_per_10k > 80U || !buf_ok) {
         sym = LV_SYMBOL_REFRESH;
-        msg = "buffer";
         lcol = waitc;
     } else {
         sym = LV_SYMBOL_OK;
-        msg = "live";
         lcol = okc;
     }
     char line[48];
-    snprintf(line, sizeof(line), "%s %s", sym, msg);
+    if (!rx_on || !joined) {
+        snprintf(line, sizeof(line), "%s --.-%% loss", sym);
+    } else {
+        uint32_t loss_for_display = miss_per_10k;
+        if (s_loss_hist_count > 0U) {
+            loss_for_display = s_loss_hist_sum_per_10k / (uint32_t)s_loss_hist_count;
+        }
+        if (loss_for_display > 10000U) {
+            loss_for_display = 10000U;
+        }
+        uint32_t loss_tenths = (loss_for_display + 5U) / 10U; /* per-10k to percent with one decimal */
+        snprintf(line, sizeof(line), "%s %u.%u%% loss", sym, (unsigned)(loss_tenths / 10U), (unsigned)(loss_tenths % 10U));
+    }
+    karaoke_status_bar_set_pill(s_bar_line, lcol);
     lv_label_set_text(s_bar_line, line);
     lv_obj_set_style_text_color(s_bar_line, lcol, 0);
 }
@@ -267,6 +395,21 @@ void dashcdg_karaoke_ui_teardown(void)
     s_bar_c = NULL;
     s_bar_d = NULL;
     s_bar_line = NULL;
+    s_last_buf_nonzero_ms = 0U;
+    s_last_m_progress_ms = 0U;
+    s_last_c_progress_ms = 0U;
+    s_last_d_progress_ms = 0U;
+    s_last_q_sample_ms = 0U;
+    s_last_q_datagrams = 0U;
+    s_last_q_wire_miss = 0U;
+    s_last_q_cdg_miss = 0U;
+    s_last_q_wire_reorder = 0U;
+    s_last_q_miss_per_10k = 0U;
+    s_last_q_reorder_per_10k = 0U;
+    memset(s_loss_hist_per_10k, 0, sizeof(s_loss_hist_per_10k));
+    s_loss_hist_count = 0U;
+    s_loss_hist_head = 0U;
+    s_loss_hist_sum_per_10k = 0U;
     s_status_slow_deadline_ms = 0U;
 }
 

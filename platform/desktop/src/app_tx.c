@@ -136,6 +136,9 @@
 #define DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS 2U
 /* Slice 0/1 freeze: first-pass video repair window radius and alternating parity cadence metadata. */
 #define DASHCDG_V4_VIDEO_REPAIR_WINDOW_K 2U
+#define DASHCDG_TX_CDG_REDUNDANT_PACKET_MIN_COUNT 12U
+#define DASHCDG_TX_CDG_REDUNDANT_COPIES 1U
+#define DASHCDG_TX_DEFAULT_REPAIR_PORT 24686
 #define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 #define DASHCDG_TX_RX_REPORTER_SLOTS 32U
 #define DASHCDG_TX_RX_REPORTER_STALE_MS 8000U
@@ -145,6 +148,7 @@
 #define DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS (-80)
 #define DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS 4000
 #define DASHCDG_TX_RX_SUMMARY_INTERVAL_MS 2000U
+#define DASHCDG_TX_CDG_FEC_ADAPT_INTERVAL_MS 3000U
 
 static DASHCDG_TX_MAYBE_UNUSED void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
     uint64_t now_ms;
@@ -168,6 +172,45 @@ static DASHCDG_TX_MAYBE_UNUSED void dashcdg_frame_limit_wait(uint64_t *next_dead
         *next_deadline_ms += (uint64_t) frame_interval_ms;
     }
 }
+
+static uint32_t s_cdg_repair_symbol_accum;
+static uint8_t s_cdg_repair_overhead_pct = 22U;
+static uint8_t s_cdg_repair_symbol_cap = 3U;
+static uint8_t s_cdg_repair_min_symbols = 2U;
+static uint8_t s_cdg_fec_level = 2U;
+static uint64_t s_cdg_fec_last_adapt_ms = 0U;
+static uint16_t s_cdg_fec_last_p75_loss_x100 = 0U;
+static uint16_t s_cdg_fec_last_controller_samples = 0U;
+static uint64_t s_cdg_retx_last_ms = 0U;
+static size_t s_cdg_retx_last_batch_index = (size_t)-1;
+
+static void dashcdg_tx_set_cdg_fec_level(unsigned level) {
+    s_cdg_fec_level = (uint8_t) level;
+    switch (level) {
+        case 1U:
+            s_cdg_repair_overhead_pct = 15U;
+            s_cdg_repair_symbol_cap = 2U;
+            break;
+        case 2U:
+            s_cdg_repair_overhead_pct = 22U;
+            s_cdg_repair_symbol_cap = 3U;
+            break;
+        case 3U:
+            s_cdg_repair_overhead_pct = 33U;
+            s_cdg_repair_symbol_cap = 4U;
+            break;
+        case 4U:
+            s_cdg_repair_overhead_pct = 50U;
+            s_cdg_repair_symbol_cap = 5U;
+            break;
+        default:
+            s_cdg_repair_overhead_pct = 66U;
+            s_cdg_repair_symbol_cap = 6U;
+            break;
+    }
+}
+
+static void dashcdg_tx_update_adaptive_cdg_fec_locked(uint64_t now_ms);
 
 struct dashcdg_tx_audio_frame;
 enum dashcdg_tx_rx_peer_health {
@@ -205,6 +248,10 @@ static enum dashcdg_tx_rx_peer_health dashcdg_tx_classify_rx_reporter_locked(
 );
 static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms);
 static void dashcdg_tx_emit_rx_summary_locked(void);
+static void dashcdg_tx_handle_v4_repair_nack_locked(
+        uint64_t now_ms,
+        const struct dashcdg_v4_repair_nack_payload *nack
+);
 static int dashcdg_tx_build_encoded_silence_for_codec(
         uint8_t codec_id,
         uint8_t *encoded_bytes,
@@ -271,6 +318,8 @@ struct dashcdg_tx_state {
     dashcdg_socket_t sockfd;
     dashcdg_socket_t ptp_sockfd;
     struct sockaddr_in destination;
+    struct sockaddr_in repair_destination;
+    int use_repair_port_split;
     struct dashcdg_packet_header header;
     struct dashcdg_announce_payload announce;
     struct dashcdg_clock_beacon_payload beacon;
@@ -1943,25 +1992,25 @@ static int dashcdg_tx_select_v4_audio_codec_locked(uint8_t codec_id) {
 static void dashcdg_tx_print_usage(const char *argv0) {
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     TX_ERR(
-            "usage: %s [--help] [--v3] [--audio-profile=resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--v3] [--audio-profile=resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  (retro: v4 wire format by default; --v3 for legacy v3 only; SBC-like audio)\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
     TX_ERR(
-            "usage: %s [--help] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  (headless: v4 by default; --v3 for legacy v3. No GUI — use desktop-gdi-tx.exe or desktop-player tx for preview.)\n");
 #elif defined(DASHCDG_DESKTOP_TX_GDI_PREVIEW)
     TX_ERR(
-            "usage: %s [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--headless] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  v4 by default; --v3 for legacy v3. GDI preview on by default; --headless hides the window.\n");
 #else
     TX_ERR(
-            "usage: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
+            "usage: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] [endpoint-address] [port] [song-id] [file|folder] [warmup-ms]\n",
             argv0
     );
     TX_ERR( "  v4 by default; --v3 for legacy v3. OpenGL preview for desktop-player tx; --headless sends without a window.\n");
@@ -1987,14 +2036,14 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     TX_OUT( "%s — desktop transmitter (v4 by default)\n\n", prog);
 #if defined(DASHCDG_DESKTOP_RETRO_WINDOWS)
     TX_OUT(
-            "Synopsis: %s [--help] [--v3] [--audio-profile=resilience] [--tx-rx-stats-port <port>] [--v4-audio-codec=...] "
+            "Synopsis: %s [--help] [--v3] [--audio-profile=resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] [--v4-audio-codec=...] "
             "[endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
     TX_OUT( "Defaults: v4 wire, resilience profile, audio codec sbc-like (NB-IMA); no Opus in this build.\n");
 #elif defined(DASHCDG_DESKTOP_TX_HEADLESS)
     TX_OUT(
-            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] "
+            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] "
             "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
@@ -2004,7 +2053,7 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     );
 #else
     TX_OUT(
-            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] "
+            "Synopsis: %s [--help] [--headless] [--display] [--v3] [--audio-profile=quality|resilience] [--tx-rx-stats-port <port>] [--tx-repair-port <port>] [--tx-cdg-fec-level <1..5>] "
             "[--v4-audio-codec=...] [--badnet-v4] ... [endpoint] [port] [song-id] [file|folder] [warmup-ms]\n\n",
             prog
     );
@@ -2041,6 +2090,10 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
             "Use auto or a positive ms to lag the local preview vs wire tags; "
             "the transmitter PTP listener also counts v4 rx-stats packets from receivers "
             "(default port 24685, override with --tx-rx-stats-port).\n"
+    );
+    TX_OUT(
+            "Repair split/FEC: --tx-repair-port <port> (default 24686) sends CDG repair on a separate port; "
+            "--tx-cdg-fec-level <1..5> controls repair symbol density.\n"
     );
 }
 
@@ -2696,6 +2749,86 @@ static int dashcdg_tx_rx_reporter_has_valid_stats_locked(const struct dashcdg_tx
     return 1;
 }
 
+static void dashcdg_tx_update_adaptive_cdg_fec_locked(uint64_t now_ms) {
+    uint16_t samples[DASHCDG_TX_RX_REPORTER_SLOTS];
+    size_t count = 0U;
+    size_t i;
+    if (now_ms < s_cdg_fec_last_adapt_ms || (now_ms - s_cdg_fec_last_adapt_ms) < DASHCDG_TX_CDG_FEC_ADAPT_INTERVAL_MS) {
+        return;
+    }
+    s_cdg_fec_last_adapt_ms = now_ms;
+    for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
+        struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
+        uint16_t score;
+        if (!slot->occupied || !slot->controller_eligible || !dashcdg_tx_rx_reporter_has_valid_stats_locked(slot)) {
+            continue;
+        }
+        score = slot->stats.loss_pct_x100;
+        if (slot->stats.stats_generation >= 4U) {
+            if (slot->stats.v4_clock_rx_count == 0U) {
+                score = (uint16_t) (score + 800U);
+            }
+            if (slot->stats.video_jb_pending_slots == 0U) {
+                score = (uint16_t) (score + 500U);
+            }
+            if (slot->stats.clock_skew_ema_ms > 250 || slot->stats.clock_skew_ema_ms < -250) {
+                score = (uint16_t) (score + 300U);
+            }
+        }
+        {
+            uint32_t rec = slot->stats.cdg_fec_recovered;
+            uint32_t fail = slot->stats.cdg_fec_failed;
+            uint32_t attempts = rec + fail;
+            if (attempts >= 8U) {
+                uint32_t fail_pct_x100 = (uint32_t) ((((uint64_t) fail) * 10000ULL) / (uint64_t) attempts);
+                score = (uint16_t) (score + (uint16_t) (fail_pct_x100 / 2U));
+            }
+            if (fail > rec + 20U) {
+                score = (uint16_t) (score + 600U);
+            }
+        }
+        if (score > 10000U) {
+            score = 10000U;
+        }
+        samples[count++] = score;
+    }
+    if (count == 0U) {
+        s_cdg_fec_last_controller_samples = 0U;
+        return;
+    }
+    s_cdg_fec_last_controller_samples = (uint16_t) count;
+    for (i = 0U; i + 1U < count; ++i) {
+        size_t j;
+        for (j = i + 1U; j < count; ++j) {
+            if (samples[j] < samples[i]) {
+                uint16_t t = samples[i];
+                samples[i] = samples[j];
+                samples[j] = t;
+            }
+        }
+    }
+    {
+        uint16_t p75 = samples[(count * 3U) / 4U];
+        uint8_t target = s_cdg_fec_level;
+        s_cdg_fec_last_p75_loss_x100 = p75;
+        if (p75 >= 5000U) {
+            target = 5U;
+        } else if (p75 >= 3500U) {
+            target = 4U;
+        } else if (p75 >= 2200U) {
+            target = 3U;
+        } else if (p75 <= 900U) {
+            target = 1U;
+        } else {
+            target = 2U;
+        }
+        if (target != s_cdg_fec_level) {
+            dashcdg_tx_set_cdg_fec_level(target);
+            TX_OUT("[tx] adaptive cdg fec: p75_loss_x100=%u level=%u\n", (unsigned int) p75, (unsigned int) s_cdg_fec_level);
+        }
+    }
+}
+
 static void dashcdg_tx_format_ipv4_be(uint32_t ipv4_be, char *buffer, size_t buffer_size) {
     uint32_t host_order;
 
@@ -2938,6 +3071,7 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
         g_tx_state.v4_rx_phase_error_min_ms = 0;
         g_tx_state.v4_rx_phase_error_max_ms = 0;
     }
+    dashcdg_tx_update_adaptive_cdg_fec_locked(now_ms);
 }
 
 static void dashcdg_tx_emit_rx_summary_locked(void) {
@@ -2947,7 +3081,7 @@ static void dashcdg_tx_emit_rx_summary_locked(void) {
     snprintf(
             line,
             sizeof(line),
-            "[tx] v4-rx: pkts=%llu active=%llu healthy=%llu degraded=%llu stale=%llu ctl=%llu target=%ums phase=%d..%dms buf=%u..%ums",
+            "[tx] v4-rx: pkts=%llu active=%llu healthy=%llu degraded=%llu stale=%llu ctl=%llu target=%ums phase=%d..%dms buf=%u..%ums fec=L%u p75=%u.%02u%% n=%u",
             (unsigned long long) g_tx_state.v4_rx_stats_packets_received,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_active,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_healthy,
@@ -2958,7 +3092,11 @@ static void dashcdg_tx_emit_rx_summary_locked(void) {
             (int) g_tx_state.v4_rx_phase_error_min_ms,
             (int) g_tx_state.v4_rx_phase_error_max_ms,
             (unsigned int) g_tx_state.v4_rx_best_buffer_ms,
-            (unsigned int) g_tx_state.v4_rx_worst_buffer_ms
+            (unsigned int) g_tx_state.v4_rx_worst_buffer_ms,
+            (unsigned int) s_cdg_fec_level,
+            (unsigned int) (s_cdg_fec_last_p75_loss_x100 / 100U),
+            (unsigned int) (s_cdg_fec_last_p75_loss_x100 % 100U),
+            (unsigned int) s_cdg_fec_last_controller_samples
     );
     TX_OUT( "%s\n", line);
     dashcdg_tx_sidecar_write_line(line);
@@ -2996,6 +3134,34 @@ static void dashcdg_tx_emit_rx_summary_locked(void) {
         );
         TX_OUT( "%s\n", line);
         dashcdg_tx_sidecar_write_line(line);
+    }
+}
+
+static void dashcdg_tx_handle_v4_repair_nack_locked(
+        uint64_t now_ms,
+        const struct dashcdg_v4_repair_nack_payload *nack
+) {
+    uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
+    uint8_t resend_count = 0U;
+    if (nack == NULL || nack->stream_type != DASHCDG_STREAM_TYPE_CDG || nack->missing_member_mask == 0U) {
+        return;
+    }
+    for (uint8_t i = 0U; i < DASHCDG_CDG_GROUP_SIZE; ++i) {
+        size_t batch_index;
+        if ((nack->missing_member_mask & (uint16_t) (1U << i)) == 0U) {
+            continue;
+        }
+        batch_index = (size_t) nack->group_id * (size_t) DASHCDG_CDG_GROUP_SIZE + (size_t) i;
+        if (batch_index >= g_tx_state.cdg_batch_count) {
+            continue;
+        }
+        if (dashcdg_tx_send_v4_video_delta_locked(now_ms, &g_tx_state.cdg_batches[batch_index], packet, sizeof(packet))) {
+            resend_count++;
+        }
+    }
+    if (resend_count > 0U) {
+        TX_OUT("[tx] nack-repair: group=%u mask=0x%04x resent=%u\n", (unsigned int) nack->group_id,
+               (unsigned int) nack->missing_member_mask, (unsigned int) resend_count);
     }
 }
 
@@ -4413,7 +4579,34 @@ static int dashcdg_tx_send_v4_repair_window_locked(
     g_tx_state.header.sequence = g_tx_state.sequence++;
     g_tx_state.header.sender_time_ms = now_ms;
     packet_size = dashcdg_protocol_serialize_v4_repair_window(packet, sizeof(packet), &g_tx_state.header, &payload);
-    if (!dashcdg_tx_send_serialized_packet_locked(packet, packet_size, &g_tx_state.v4_repair_window_packets_sent, now_ms)) {
+    if (g_tx_state.use_repair_port_split) {
+        int sent_ok = 0;
+        dashcdg_socket_t sockfd = g_tx_state.sockfd;
+        struct sockaddr_in dest = g_tx_state.repair_destination;
+        pthread_mutex_unlock(&g_tx_state.mutex);
+        {
+            int sent = (int) sendto(
+                    sockfd,
+                    (const char *) packet,
+                    (int) packet_size,
+                    0,
+                    (struct sockaddr *) &dest,
+                    (socklen_t) sizeof(dest)
+            );
+            sent_ok = (sent == (int) packet_size);
+        }
+        pthread_mutex_lock(&g_tx_state.mutex);
+        if (!sent_ok) {
+            g_tx_state.send_failures++;
+            return 0;
+        }
+        g_tx_state.datagrams_sent++;
+        g_tx_state.bytes_sent += packet_size;
+        g_tx_state.v4_repair_window_packets_sent++;
+        if (g_tx_state.transport_v4_enabled) {
+            dashcdg_tx_update_v4_window_locked(now_ms, packet_size);
+        }
+    } else if (!dashcdg_tx_send_serialized_packet_locked(packet, packet_size, &g_tx_state.v4_repair_window_packets_sent, now_ms)) {
         return 0;
     }
     return 1;
@@ -4439,7 +4632,7 @@ static void dashcdg_tx_send_v4_repair_parity_locked(
         if (startup_only && group_id >= DASHCDG_V4_STARTUP_VIDEO_REPAIR_GROUPS) {
             return;
         }
-        copies = 1U;
+        copies = DASHCDG_V4_VIDEO_REPAIR_WINDOW_K;
     } else {
         return;
     }
@@ -4466,6 +4659,96 @@ static void dashcdg_tx_send_v4_repair_parity_locked(
                 payload_bytes,
                 payload_length,
                 reserved
+        );
+    }
+}
+
+static uint8_t dashcdg_tx_gf256_mul(uint8_t a, uint8_t b) {
+    uint8_t p = 0U;
+    for (uint8_t i = 0U; i < 8U; ++i) {
+        if ((b & 1U) != 0U) {
+            p ^= a;
+        }
+        if ((a & 0x80U) != 0U) {
+            a = (uint8_t)((a << 1U) ^ 0x1DU);
+        } else {
+            a <<= 1U;
+        }
+        b >>= 1U;
+    }
+    return p;
+}
+
+static void dashcdg_tx_send_v4_cdg_multi_repair_locked(
+        uint64_t now_ms,
+        uint32_t group_id,
+        uint8_t group_size,
+        const uint8_t *payloads[],
+        const uint16_t lengths[]
+) {
+    uint8_t symbol_bytes = 1U;
+    uint8_t symbols_to_send = 0U;
+    uint8_t parity_syms[6][DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+
+    for (uint8_t i = 0U; i < group_size; ++i) {
+        if ((uint16_t)(lengths[i] + 1U) > symbol_bytes) {
+            symbol_bytes = (uint8_t)(lengths[i] + 1U);
+        }
+    }
+    if (symbol_bytes == 0U || symbol_bytes > DASHCDG_MAX_FEC_PAYLOAD_BYTES) {
+        return;
+    }
+    s_cdg_repair_symbol_accum += (uint32_t)group_size * s_cdg_repair_overhead_pct;
+    while (s_cdg_repair_symbol_accum >= 100U && symbols_to_send < s_cdg_repair_symbol_cap) {
+        s_cdg_repair_symbol_accum -= 100U;
+        symbols_to_send++;
+    }
+    if (symbols_to_send < s_cdg_repair_min_symbols) {
+        symbols_to_send = s_cdg_repair_min_symbols;
+    }
+    if (symbols_to_send > 6U) {
+        symbols_to_send = 6U;
+    }
+    for (uint8_t si = 0U; si < symbols_to_send; ++si) {
+        memset(parity_syms[si], 0, symbol_bytes);
+    }
+    for (uint8_t i = 0U; i < group_size; ++i) {
+        uint8_t sym[DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+        memset(sym, 0, symbol_bytes);
+        sym[0] = (uint8_t)lengths[i];
+        memcpy(sym + 1U, payloads[i], lengths[i]);
+        for (uint8_t si = 0U; si < symbols_to_send; ++si) {
+            uint8_t coeff = 1U;
+            if (si > 0U) {
+                uint8_t base = (uint8_t)(i + 1U);
+                coeff = 1U;
+                for (uint8_t p = 0U; p < si; ++p) {
+                    coeff = dashcdg_tx_gf256_mul(coeff, base);
+                }
+            }
+            for (uint8_t b = 0U; b < symbol_bytes; ++b) {
+                parity_syms[si][b] ^= dashcdg_tx_gf256_mul(coeff, sym[b]);
+            }
+        }
+    }
+
+    for (uint8_t send_ord = 0U; send_ord < symbols_to_send; ++send_ord) {
+        uint8_t si = (uint8_t) ((send_ord * 3U) % symbols_to_send); /* stagger wire order under burst loss */
+        const uint8_t *sym = parity_syms[si];
+        uint16_t dir = (send_ord & 1U) == 0U ? DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_FORWARD
+                                             : DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_REVERSE;
+        (void)dashcdg_tx_send_v4_repair_window_locked(
+                now_ms,
+                DASHCDG_STREAM_TYPE_CDG,
+                DASHCDG_V4_REPAIR_MODE_VIDEO_WINDOW_XOR,
+                si,
+                group_size,
+                group_id,
+                sym,
+                symbol_bytes,
+                (uint16_t)(dir |
+                           (((symbols_to_send > 7U ? 7U : symbols_to_send) << DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT) &
+                            DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_MASK))
         );
     }
 }
@@ -4592,15 +4875,16 @@ static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t gro
         }
     }
 
-    dashcdg_tx_send_fec_parity_locked(
-            now_ms,
-            DASHCDG_STREAM_TYPE_AUDIO,
-            group_id,
-            g_tx_state.audio_fec_group_size,
-            payloads,
-            g_tx_state.audio_fec_lengths
-    );
-    if (g_tx_state.transport_v4_enabled) {
+    if (!g_tx_state.transport_v4_enabled) {
+        dashcdg_tx_send_fec_parity_locked(
+                now_ms,
+                DASHCDG_STREAM_TYPE_AUDIO,
+                group_id,
+                g_tx_state.audio_fec_group_size,
+                payloads,
+                g_tx_state.audio_fec_lengths
+        );
+    } else {
         dashcdg_tx_send_v4_repair_parity_locked(
                 now_ms,
                 DASHCDG_STREAM_TYPE_AUDIO,
@@ -4655,17 +4939,10 @@ static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group
         }
     }
 
-    dashcdg_tx_send_fec_parity_locked(now_ms, DASHCDG_STREAM_TYPE_CDG, group_id, group_size, payloads, lengths);
-    if (g_tx_state.transport_v4_enabled) {
-        dashcdg_tx_send_v4_repair_parity_locked(
-                now_ms,
-                DASHCDG_STREAM_TYPE_CDG,
-                group_id,
-                group_size,
-                parity.payload_xor,
-                parity.payload_bytes,
-                0
-        );
+    if (!g_tx_state.transport_v4_enabled) {
+        dashcdg_tx_send_fec_parity_locked(now_ms, DASHCDG_STREAM_TYPE_CDG, group_id, group_size, payloads, lengths);
+    } else {
+        dashcdg_tx_send_v4_cdg_multi_repair_locked(now_ms, group_id, group_size, payloads, lengths);
     }
 }
 
@@ -5694,6 +5971,10 @@ static void *dashcdg_tx_ptp_thread_main(void *unused) {
                 dashcdg_tx_refresh_rx_measurements_locked(dashcdg_clock_now_ms());
             }
             pthread_mutex_unlock(&g_tx_state.mutex);
+        } else if (view.header.type == DASHCDG_PACKET_V4_REPAIR_NACK) {
+            pthread_mutex_lock(&g_tx_state.mutex);
+            dashcdg_tx_handle_v4_repair_nack_locked(dashcdg_clock_now_ms(), &view.v4_repair_nack);
+            pthread_mutex_unlock(&g_tx_state.mutex);
         }
     }
 
@@ -6410,6 +6691,15 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         if (send_group_fec) {
             dashcdg_tx_send_cdg_group_fec_locked(now_ms, batch->group_id);
         }
+        if (s_cdg_fec_last_p75_loss_x100 >= 3000U &&
+                batch->packet_count >= DASHCDG_TX_CDG_REDUNDANT_PACKET_MIN_COUNT &&
+                (s_cdg_retx_last_ms == 0U || now_ms - s_cdg_retx_last_ms >= 45U)) {
+            if (s_cdg_retx_last_batch_index != g_tx_state.next_cdg_batch_index - 1U) {
+                (void) dashcdg_tx_send_v4_video_delta_locked(now_ms, batch, packet, packet_size);
+                s_cdg_retx_last_ms = now_ms;
+                s_cdg_retx_last_batch_index = g_tx_state.next_cdg_batch_index - 1U;
+            }
+        }
         video_sent++;
     }
 
@@ -6810,6 +7100,20 @@ static void *dashcdg_tx_thread_main(void *unused) {
                 g_tx_state.datagrams_sent++;
                 g_tx_state.bytes_sent += packet_size;
                 g_tx_state.cdg_batch_packets_sent++;
+                if (batch->packet_count >= DASHCDG_TX_CDG_REDUNDANT_PACKET_MIN_COUNT) {
+                    for (uint8_t dup = 0U; dup < DASHCDG_TX_CDG_REDUNDANT_COPIES; ++dup) {
+                        g_tx_state.header.sequence = g_tx_state.sequence++;
+                        g_tx_state.header.sender_time_ms = now_ms;
+                        packet_size = dashcdg_protocol_serialize_cdg_batch(packet, sizeof(packet), &g_tx_state.header, &payload);
+                        if (packet_size > 0 && dashcdg_tx_send_packet(packet, packet_size)) {
+                            g_tx_state.datagrams_sent++;
+                            g_tx_state.bytes_sent += packet_size;
+                            g_tx_state.cdg_batch_packets_sent++;
+                        } else {
+                            g_tx_state.send_failures++;
+                        }
+                    }
+                }
             }
             g_tx_state.next_cdg_batch_index++;
             if (send_group_fec) {
@@ -7352,6 +7656,7 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     const char *warmup_value = NULL;
     int port = DASHCDG_DEFAULT_NETWORK_PORT;
     int rx_stats_port = DASHCDG_DEFAULT_NETWORK_STATS_PORT;
+    int tx_repair_port = DASHCDG_TX_DEFAULT_REPAIR_PORT;
     int positional_index = 0;
     int ttl = 1;
     unsigned char loopback = 1;
@@ -7400,6 +7705,8 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     }
 
     memset(&g_tx_state, 0, sizeof(g_tx_state));
+    s_cdg_repair_symbol_accum = 0U;
+    dashcdg_tx_set_cdg_fec_level(2U);
     g_tx_state.sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.ptp_sockfd = DASHCDG_INVALID_SOCKET;
     g_tx_state.preview_enabled = 1;
@@ -7554,6 +7861,40 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
                 return 1;
             }
             rx_stats_port = (int)parsed;
+            continue;
+        }
+        if (strcmp(argv[i], "--tx-repair-port") == 0) {
+            unsigned long parsed = 0UL;
+            if (i + 1 >= argc || !dashcdg_tx_is_number(argv[i + 1])) {
+                TX_ERR("%s: --tx-repair-port requires <1..65535>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            ++i;
+            parsed = strtoul(argv[i], NULL, 10);
+            if (parsed == 0UL || parsed > 65535UL) {
+                TX_ERR("%s: --tx-repair-port requires <1..65535>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            tx_repair_port = (int)parsed;
+            continue;
+        }
+        if (strcmp(argv[i], "--tx-cdg-fec-level") == 0) {
+            unsigned long parsed = 0UL;
+            if (i + 1 >= argc || !dashcdg_tx_is_number(argv[i + 1])) {
+                TX_ERR("%s: --tx-cdg-fec-level requires <1..5>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            ++i;
+            parsed = strtoul(argv[i], NULL, 10);
+            if (parsed < 1UL || parsed > 5UL) {
+                TX_ERR("%s: --tx-cdg-fec-level requires <1..5>\n", argv[0]);
+                dashcdg_tx_cleanup();
+                return 1;
+            }
+            dashcdg_tx_set_cdg_fec_level((unsigned)parsed);
             continue;
         }
         if (strcmp(argv[i], "--audio-profile=quality") == 0) {
@@ -7773,6 +8114,11 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.destination.sin_family = AF_INET;
     g_tx_state.destination.sin_port = htons((uint16_t) port);
     g_tx_state.destination.sin_addr = destination_addr;
+    memset(&g_tx_state.repair_destination, 0, sizeof(g_tx_state.repair_destination));
+    g_tx_state.repair_destination.sin_family = AF_INET;
+    g_tx_state.repair_destination.sin_port = htons((uint16_t) ((tx_repair_port > 0) ? tx_repair_port : port));
+    g_tx_state.repair_destination.sin_addr = destination_addr;
+    g_tx_state.use_repair_port_split = (tx_repair_port > 0 && tx_repair_port != port) ? 1 : 0;
 
     g_tx_state.ptp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_tx_state.ptp_sockfd == DASHCDG_INVALID_SOCKET) {
@@ -7865,6 +8211,11 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     TX_OUT( "[tx] broadcasting to %s:%d\n", endpoint_address, port);
     TX_OUT("[tx] rx-stats/PTP listen port: %d\n", rx_stats_port);
     TX_OUT( "[tx] transport mode: %s\n", g_tx_state.transport_v4_enabled ? "v4 (default)" : "v3 (--v3)");
+    if (g_tx_state.use_repair_port_split) {
+        TX_OUT("[tx] repair-port split enabled: media=%d repair=%d\n", port, (int)ntohs(g_tx_state.repair_destination.sin_port));
+    }
+    TX_OUT("[tx] cdg fec level: overhead=%u%% min_sym=%u cap=%u\n", (unsigned)s_cdg_repair_overhead_pct,
+           (unsigned)s_cdg_repair_min_symbols, (unsigned)s_cdg_repair_symbol_cap);
     if (g_tx_state.playlist_scan_running) {
         TX_OUT(
                 "[tx] startup seed: %zu paired tracks loaded / %zu .cdg files on disk (window start index %zu); background scan continues\n",
