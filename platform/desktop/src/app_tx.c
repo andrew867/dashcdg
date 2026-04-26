@@ -6305,6 +6305,8 @@ static void dashcdg_tx_format_status_bar_locked(char *buffer, size_t buffer_size
     size_t rows = 0U;
     size_t cols = 0U;
     char title[64];
+    uint64_t repair_total = 0U;
+    uint32_t repair_eff_x100 = 0U;
 
     if (buffer == NULL || buffer_size == 0U) {
         return;
@@ -6316,11 +6318,15 @@ static void dashcdg_tx_format_status_bar_locked(char *buffer, size_t buffer_size
         snprintf(title, sizeof(title), "<no track>");
     }
     dashcdg_tx_refresh_rx_measurements_locked(now_ms);
+    repair_total = g_tx_state.v4_rx_cdg_recovered_packets + g_tx_state.v4_rx_cdg_failed_packets;
+    if (repair_total > 0U) {
+        repair_eff_x100 = (uint32_t)((g_tx_state.v4_rx_cdg_recovered_packets * 10000ULL) / repair_total);
+    }
 
     snprintf(
             buffer,
             buffer_size,
-            "[tx] %zu/%zu %s %s %llums/%llums lib=%zu/%zu CDG lead a=%lld v=%lld start=%llums rx=%llu h=%llu d=%llu s=%llu ctl=%llu ph=%d..%d %s",
+            "[tx] %zu/%zu %s %s %llums/%llums lib=%zu/%zu CDG lead a=%lld v=%lld start=%llums rx=%llu h=%llu d=%llu s=%llu ctl=%llu n=%llu/%llu u=%llu e=%u.%02u%% ph=%d..%d %s",
             g_tx_state.playlist.count == 0U ? 0U : g_tx_state.playlist.current_index + 1U,
             g_tx_state.playlist.count,
             g_tx_state.paused ? "paused" : "playing",
@@ -6337,6 +6343,11 @@ static void dashcdg_tx_format_status_bar_locked(char *buffer, size_t buffer_size
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_degraded,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_stale,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_controller,
+            (unsigned long long) g_tx_state.v4_rx_nack_received,
+            (unsigned long long) g_tx_state.v4_rx_nack_resent_packets,
+            (unsigned long long) g_tx_state.v4_rx_unrecoverable_groups,
+            (unsigned int) (repair_eff_x100 / 100U),
+            (unsigned int) (repair_eff_x100 % 100U),
             (int) g_tx_state.v4_rx_phase_error_min_ms,
             (int) g_tx_state.v4_rx_phase_error_max_ms,
             g_tx_state.playlist_scan_running ? "| p/n/b/u/r/c/s/q" : "| p/n/b/u/r/c/s/q"
@@ -7353,11 +7364,17 @@ static void dashcdg_tx_preview_display(void) {
         int64_t cdg_lead_ms;
         const struct dashcdg_tx_track *track = NULL;
         uint32_t available_prefix_bytes = 0;
+        uint64_t repair_total = 0U;
+        uint32_t repair_eff_x100 = 0U;
         uint64_t hud_pv_lag_ms = dashcdg_tx_preview_delay_effective_ms_locked();
         uint64_t hud_pv_raster_ms =
                 g_tx_state.paused ? 0ULL : (playback_ms > hud_pv_lag_ms ? playback_ms - hud_pv_lag_ms : 0ULL);
 
         fec_overhead_pct = dashcdg_tx_fec_overhead_pct_locked();
+        repair_total = g_tx_state.v4_rx_cdg_recovered_packets + g_tx_state.v4_rx_cdg_failed_packets;
+        if (repair_total > 0U) {
+            repair_eff_x100 = (uint32_t)((g_tx_state.v4_rx_cdg_recovered_packets * 10000ULL) / repair_total);
+        }
         audio_lead_ms = dashcdg_tx_next_audio_lead_ms_locked(dashcdg_tx_current_playback_ms_locked(now_ms));
         cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(dashcdg_tx_current_playback_ms_locked(now_ms));
         track = dashcdg_tx_current_track();
@@ -7370,7 +7387,7 @@ static void dashcdg_tx_preview_display(void) {
         snprintf(
                 hud_line_a,
                 sizeof(hud_line_a),
-                "TX dg:%llu fail:%llu live:%llu aud:%llu snap:%llu fec:%llu/%llu ovh:%u%% prefix:%u/%u",
+                "TX dg:%llu fail:%llu live:%llu aud:%llu snap:%llu fec:%llu/%llu ovh:%u%% n:%llu/%llu u:%llu e:%u.%02u%%",
                 (unsigned long long) g_tx_state.datagrams_sent,
                 (unsigned long long) g_tx_state.send_failures,
                 (unsigned long long) g_tx_state.cdg_batch_packets_sent,
@@ -7379,13 +7396,16 @@ static void dashcdg_tx_preview_display(void) {
                 (unsigned long long) g_tx_state.fec_audio_packets_sent,
                 (unsigned long long) g_tx_state.fec_cdg_packets_sent,
                 (unsigned int) fec_overhead_pct,
-                (unsigned int) available_prefix_bytes,
-                (unsigned int) g_tx_state.beacon.total_asset_bytes
+                (unsigned long long) g_tx_state.v4_rx_nack_received,
+                (unsigned long long) g_tx_state.v4_rx_nack_resent_packets,
+                (unsigned long long) g_tx_state.v4_rx_unrecoverable_groups,
+                (unsigned int) (repair_eff_x100 / 100U),
+                (unsigned int) (repair_eff_x100 % 100U)
         );
         snprintf(
                 hud_line_b,
                 sizeof(hud_line_b),
-                "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s |pv r:%llu lag:%llu pb:%llu",
+                "loops:%llu off:%zu snap:%zu lead:%lld/%lldms prof:%u/%u %s pref:%u/%u |pv r:%llu lag:%llu pb:%llu",
                 (unsigned long long) g_tx_state.asset_loops_completed,
                 g_tx_state.next_asset_offset,
                 g_tx_state.cdg_snapshot_offset,
@@ -7394,6 +7414,8 @@ static void dashcdg_tx_preview_display(void) {
                 (unsigned int) g_tx_state.announce.audio_fec_group_size,
                 (unsigned int) g_tx_state.announce.cdg_fec_group_size,
                 track != NULL && track->mp3_path != NULL ? "MP3+G (live net audio)" : "CDG-only",
+                (unsigned int) available_prefix_bytes,
+                (unsigned int) g_tx_state.beacon.total_asset_bytes,
                 (unsigned long long) hud_pv_raster_ms,
                 (unsigned long long) hud_pv_lag_ms,
                 (unsigned long long) playback_ms

@@ -6380,6 +6380,8 @@ static void dashcdg_rx_fill_hud_lines_locked(
     int hud_clock_skew_ms = 0;
     uint64_t hud_dac_playback_ms = 0U;
     uint64_t hud_snd_playback_ms = 0U;
+    uint64_t repair_total = 0U;
+    uint32_t repair_eff_x100 = 0U;
     char hud_skew_str[20];
 
     if (hud_line_a == NULL || hud_line_a_size == 0U || hud_line_b == NULL || hud_line_b_size == 0U) {
@@ -6401,6 +6403,10 @@ static void dashcdg_rx_fill_hud_lines_locked(
 
     dashcdg_rx_format_audio_gate_locked(&g_receiver, local_now_ms, audio_gate, sizeof(audio_gate));
     dashcdg_rx_format_render_gate_locked(&g_receiver, render_gate, sizeof(render_gate));
+    repair_total = g_receiver.fec_cdg_recovered + g_receiver.fec_recovery_failures;
+    if (repair_total > 0U) {
+        repair_eff_x100 = (uint32_t)((g_receiver.fec_cdg_recovered * 10000ULL) / repair_total);
+    }
 
     if (dashcdg_rx_local_audio_playback_now_locked(&hud_dac_playback_ms) &&
             dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &hud_snd_playback_ms)) {
@@ -6413,14 +6419,18 @@ static void dashcdg_rx_fill_hud_lines_locked(
     snprintf(
             hud_line_a,
             hud_line_a_size,
-            "v%u dg:%u parse:%u a:%u v:%u rec:%u/%u",
+            "v%u dg:%u parse:%u a:%u v:%u rec:%u/%u n:%u u:%u e:%u.%02u%%",
             (unsigned int) g_receiver.announced_transport_version,
             (unsigned int) (g_receiver.datagrams_received & 0xffffffffU),
             (unsigned int) (g_receiver.parse_failures & 0xffffffffU),
             (unsigned int) (g_receiver.v4_audio_chunk_packets & 0xffffffffU),
             (unsigned int) (g_receiver.v4_video_delta_packets & 0xffffffffU),
             (unsigned int) (g_receiver.fec_audio_recovered & 0xffffffffU),
-            (unsigned int) (g_receiver.fec_cdg_recovered & 0xffffffffU)
+            (unsigned int) (g_receiver.fec_cdg_recovered & 0xffffffffU),
+            (unsigned int) (g_receiver.repair_nack_tx & 0xffffffffU),
+            (unsigned int) (g_receiver.cdg_unrecoverable_groups & 0xffffffffU),
+            (unsigned int) (repair_eff_x100 / 100U),
+            (unsigned int) (repair_eff_x100 % 100U)
     );
     snprintf(
             hud_line_b,
