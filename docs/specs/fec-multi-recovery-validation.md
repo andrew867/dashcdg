@@ -61,3 +61,11 @@ This matrix verifies that desktop RX and badge RX recover the same number of mis
 - Badge and desktop report consistent recoverability trends.
 - No impossible UI loss values above 100%.
 - Interleave self-test passes and the deterministic mapping line appears in TX logs.
+
+### Completion Sign-Off (mark complete after soak)
+
+- [ ] Soak matrix cases 1-5 completed with archived TX/RX/badge logs.
+- [ ] Multi-symbol decode (`m > 2`) validated on desktop RX and badge RX with matching recovery trends.
+- [ ] NACK loop validated (`nack`, `nack_tx`, `resent`) with observed reduction in unrecoverable groups.
+- [ ] Deterministic interleave policy active and startup config snapshots captured in each run.
+- [ ] Final pass recorded: work item "multi-symbol + NACK + interleave" marked complete.

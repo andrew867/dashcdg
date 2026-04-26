@@ -8236,6 +8236,15 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.repair_destination.sin_port = htons((uint16_t) ((tx_repair_port > 0) ? tx_repair_port : port));
     g_tx_state.repair_destination.sin_addr = destination_addr;
     g_tx_state.use_repair_port_split = (tx_repair_port > 0 && tx_repair_port != port) ? 1 : 0;
+    TX_OUT("[tx] config: fec=L%u min=%u cap=%u ovh=%u%% group=%u interleave=coprime-stride>=5 repair_port=%d split=%s "
+           "nack_cooldown_ms=rx-side\n",
+           (unsigned int) s_cdg_fec_level,
+           (unsigned int) s_cdg_repair_min_symbols,
+           (unsigned int) s_cdg_repair_symbol_cap,
+           (unsigned int) s_cdg_repair_overhead_pct,
+           (unsigned int) DASHCDG_CDG_GROUP_SIZE,
+           (tx_repair_port > 0) ? tx_repair_port : port,
+           g_tx_state.use_repair_port_split ? "yes" : "no");
 
     g_tx_state.ptp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_tx_state.ptp_sockfd == DASHCDG_INVALID_SOCKET) {

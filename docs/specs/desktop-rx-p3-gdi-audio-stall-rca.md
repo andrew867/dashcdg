@@ -83,7 +83,7 @@ PortAudio’s `outputBufferDacTime - currentTime` can **jitter by a few ms per b
 
 ### Issue E - WinMM/GDI stall around ~190 s, no recovery until track change/restart
 
-**Status: OPEN (2026-04)** — still reproduced after the mitigations below; audio can remain dead **until track change or RX restart**. Treat soak item 4 as a **known failure mode**, not a pass criterion, until a verified same-track recovery exists.
+**Status: SOAK CANDIDATE (2026-04-26)** - targeted mitigations landed across RX recovery logic, XP-safe logging paths, and TX/RX observability. Closure requires soak evidence that same-track playback remains stable through prior failure windows.
 
 - Symptom: on P3/GDI/WinMM path, audio can drop out after a long run (~190 s reported) and **not** recover on the **current** track.
 - Contributing factors (historical; partially addressed):
@@ -96,6 +96,36 @@ PortAudio’s `outputBufferDacTime - currentTime` can **jitter by a few ms per b
   3. WaveOut builds force legacy-safe recovery fallback in RX (stop + flush + re-prime).
   4. Output readiness for WinMM now requires live `hwo` (not just non-null ctx pointer).
 - Next investigation angles: long-run WinMM `waveOut*` state (device reset, buffer completion stalls), GDI/message-pump interaction starving the media thread, and whether stall correlates with **buffer index / queue depth** rather than wall time alone.
+
+### Soak metrics fields required for closeout
+
+Capture the following fields in every run so Issue E can be closed with evidence instead of symptom notes:
+
+- TX summary line (`[tx] v4-rx:`):
+  - `fec=Lx`, `p75=...`, `n=<controller-samples>`
+  - `nack=<rx>/<resent>`
+  - `unrec=<count>`
+  - `eff=<repair-rate>`
+- RX summary line (`[rx] v4-stats:`):
+  - `nack_tx=<count>`
+  - `unrec=<count>`
+  - `eff=<repair-rate>`
+  - `buf=`, `tgt=`, `stage=`, `pts=` around any recovery boundary
+- Event lines:
+  - TX: `[tx] nack-repair: group=... mask=... resent=...`
+  - RX: `[rx] repair-nack: group=... size=... mask=...`
+- Startup snapshots (self-describing run config):
+  - TX: `[tx] config: ...`
+  - RX: `[rx] config: ...`
+
+### Final closure criteria
+
+Issue E can be marked closed when all of the following are true in soak logs:
+
+1. No persistent same-track audio death through and beyond the historical ~190 s window.
+2. No repeating short-cadence re-prime churn after recovery.
+3. `unrec` trend is bounded/declining at adaptive FEC levels with non-zero `eff`.
+4. NACK path is active (`nack` and `nack_tx` increment under impairment) and correlates with fewer visible corruption bursts.
 
 ### Issue F - RX peer `age=` drifts upward instead of staying low
 

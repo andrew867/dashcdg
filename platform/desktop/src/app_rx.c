@@ -94,6 +94,7 @@
 #define DASHCDG_STREAM_LOSS_RECONNECT_MS 18000U
 #define DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS 2000U
 #define DASHCDG_RX_STATS_SUMMARY_INTERVAL_MS 2000U
+#define DASHCDG_RX_REPAIR_NACK_COOLDOWN_MS 120U
 #define DASHCDG_RX_DEFAULT_TOTAL_LATENCY_MS 480U
 #define DASHCDG_RX_OUTPUT_LATENCY_FALLBACK_MS 120U
 #define DASHCDG_RX_APP_RING_SAFETY_MS 40U
@@ -5872,7 +5873,7 @@ static void dashcdg_rx_send_v4_repair_nack_locked(
     }
     if (s_last_nack_group_id == group_id && s_last_nack_mask == missing_mask &&
             s_last_nack_ms != 0U && now_ms > s_last_nack_ms &&
-            now_ms - s_last_nack_ms < 120U) {
+            now_ms - s_last_nack_ms < DASHCDG_RX_REPAIR_NACK_COOLDOWN_MS) {
         return;
     }
     memset(&hdr, 0, sizeof(hdr));
@@ -6952,6 +6953,13 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     }
     g_rx_stats_port = stats_port;
     g_rx_repair_port = (repair_port > 0 && repair_port != port) ? repair_port : 0;
+    RX_OUT("[rx] config: stats_ms=%u stats_port=%d repair_port=%d codec=%s hud=%s nack_cooldown=%ums\n",
+           (unsigned int) g_rx_stats_interval_ms,
+           g_rx_stats_port,
+           g_rx_repair_port > 0 ? g_rx_repair_port : port,
+           g_audio_decode_disabled ? "drop-audio" : "decode-audio",
+           g_hud_visible ? "on" : "off",
+           (unsigned int) DASHCDG_RX_REPAIR_NACK_COOLDOWN_MS);
 
 #if DASHCDG_RX_HAVE_GLUT
     if (g_headless && g_rx_use_win_gdi) {
