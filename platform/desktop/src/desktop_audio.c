@@ -266,6 +266,41 @@ static int dashcdg_pa_latency_ms_from_timeinfo(
     return (int) (sec * 1000.0 + 0.5);
 }
 
+/*
+ * Per-callback time_info spans roughly this buffer; negotiated host outputLatency (WASAPI) is
+ * often ~250–300 ms. Using only the smaller value makes timestamp_ms lead heard audio and CDG
+ * graphics look early — take the max so RX lip-sync tracks the full device queue.
+ */
+static int dashcdg_pa_effective_output_latency_ms(
+        struct dashcdg_desktop_audio *audio,
+        const PaStreamCallbackTimeInfo *time_info,
+        int fallback_ms
+) {
+    int latency_ms = dashcdg_pa_latency_ms_from_timeinfo(time_info, fallback_ms);
+    const PaStreamInfo *psi;
+
+    if (audio == NULL || audio->stream == NULL) {
+        return latency_ms;
+    }
+    psi = Pa_GetStreamInfo(audio->stream);
+    if (psi != NULL && psi->outputLatency > 0.0) {
+        double host_ms_d = psi->outputLatency * 1000.0;
+        int host_ms;
+
+        if (host_ms_d >= 1000.0) {
+            host_ms = 1000;
+        } else if (host_ms_d > 0.0) {
+            host_ms = (int) (host_ms_d + 0.5);
+        } else {
+            host_ms = 0;
+        }
+        if (host_ms > latency_ms) {
+            latency_ms = host_ms;
+        }
+    }
+    return latency_ms;
+}
+
 static int dashcdg_pa_callback(
         const void *input_buffer,
         void *output_buffer,
@@ -294,7 +329,7 @@ static int dashcdg_pa_callback(
             return paAbort;
         }
 
-        latency_ms = dashcdg_pa_latency_ms_from_timeinfo(time_info, 80);
+        latency_ms = dashcdg_pa_effective_output_latency_ms(audio, time_info, 80);
         consumed_frames = dashcdg_stream_buffer_consume(audio, frame_count, (int16_t *) output_buffer);
         total_samples = (size_t) frame_count * (size_t) audio->stream_channels;
         if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
@@ -330,7 +365,7 @@ static int dashcdg_pa_callback(
         DASHCDG_ATOMIC_SET(audio->seek_to_sample, -1);
     }
 
-    latency_ms = dashcdg_pa_latency_ms_from_timeinfo(time_info, 40);
+    latency_ms = dashcdg_pa_effective_output_latency_ms(audio, time_info, 40);
     audio_ts = dashcdg_desktop_audio_get_pos_ms(audio) - latency_ms;
     DASHCDG_ATOMIC_SET(audio->timestamp_ms, audio_ts < 0 ? 0 : audio_ts);
 
@@ -627,8 +662,8 @@ const char *dashcdg_desktop_audio_last_stream_open_error(void) {
 #define DASHCDG_WINMM_STREAM_CHUNK_MS 30U
 #define DASHCDG_WINMM_BUFFERS_FILE 4U
 #define DASHCDG_WINMM_BUFFERS_STREAM 4U
-/* ~½ peak driver queue (chunk × buffers) for timestamp_ms / HUD alignment with heard audio. */
-#define DASHCDG_WINMM_STREAM_PIPELINE_LATENCY_MS ((DASHCDG_WINMM_STREAM_CHUNK_MS * DASHCDG_WINMM_BUFFERS_STREAM) / 2U)
+/* Most of peak driver queue (chunk × buffers) for timestamp_ms / HUD vs heard audio (~120 ms). */
+#define DASHCDG_WINMM_STREAM_PIPELINE_LATENCY_MS (((DASHCDG_WINMM_STREAM_CHUNK_MS * DASHCDG_WINMM_BUFFERS_STREAM) * 4U) / 5U)
 
 struct dashcdg_winmm_ctx {
     HWAVEOUT hwo;
