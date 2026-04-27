@@ -6,6 +6,7 @@ did something rude.
 
 **New here?** Read [`fork-manifesto.md`](fork-manifesto.md) (why this exists),
 then [`CONTRIBUTING.md`](CONTRIBUTING.md) (build, tests, how to land changes).
+For the latest release snapshot, see [`releases/v0.2.0.md`](releases/v0.2.0.md).
 
 The **canonical** desktop Windows story (OpenGL vs GDI, retro, USB sneakernet)
 lives in **`specs/desktop-platform-support.md`** and

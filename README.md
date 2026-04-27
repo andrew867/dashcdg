@@ -16,6 +16,7 @@ probably in the right place.
 - **Attitude, on purpose:** [docs/fork-manifesto.md](docs/fork-manifesto.md)  
 - **Contribute / build / tests:** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)  
 - **Long-form doc index:** [docs/README.md](docs/README.md)  
+- **Latest release notes:** [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md)  
 - **Receiver + debugging handoff:** [AGENTS.md](AGENTS.md)
 
 ---
