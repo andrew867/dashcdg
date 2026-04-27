@@ -14,4 +14,6 @@ If something is **possible** but **rough**, it still ships here behind a flag, a
 or a README honest paragraph. If you need a quiet life and a vendor SLA, buy a black
 box; if you want to **see the wires move**, you are in the right place.
 
-For the boring index of specs and tests, see [`README.md`](README.md).
+For the index of specs and tests, see [`README.md`](README.md). For **build, test, and
+commit** expectations, see [`CONTRIBUTING.md`](CONTRIBUTING.md) — the boring part,
+but the part that keeps midnight multicast demos reproducible.

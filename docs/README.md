@@ -1,18 +1,33 @@
 # dashcdg documentation
 
-Start here for navigation. The **canonical** desktop Windows story (builds,
-OpenGL vs GDI, retro, USB bundle) lives in **`specs/desktop-platform-support.md`**
-and **`specs/windows-legacy-mingw-build.md`**.
+Welcome. This folder is the **map**: architecture, wire formats, Windows build
+matrices, soak plans, and the occasional postmortem written at 2 a.m. when UDP
+did something rude.
 
-**Why this fork exists** (short, opinionated): [`fork-manifesto.md`](fork-manifesto.md).
+**New here?** Read [`fork-manifesto.md`](fork-manifesto.md) (why this exists),
+then [`CONTRIBUTING.md`](CONTRIBUTING.md) (build, tests, how to land changes).
+
+The **canonical** desktop Windows story (OpenGL vs GDI, retro, USB sneakernet)
+lives in **`specs/desktop-platform-support.md`** and
+**`specs/windows-legacy-mingw-build.md`**.
+
+## Normative vs historical
+
+- **Tables below** point to **current** architecture and specs you should follow
+  when changing code.
+- Files named `*-rca.md` (root cause analysis), `*-brief.md`, one-off soak notes,
+  or `*-implementation-plan.md` are often **snapshots in time**. They stay in the
+  tree for archaeology, but may not reflect *today’s* code — check the primary
+  sources (`app_rx.c`, `app_tx.c`, `AGENTS.md`) when in doubt.
 
 ## Architecture
 
 | Document | Contents |
 | --- | --- |
 | [`architecture/desktop-streaming.md`](architecture/desktop-streaming.md) | End‑to‑end TX/RX topology, jitter, snapshots, **OpenGL + Win32 GDI** receiver paths |
+| [`architecture/tx-audio-isolation.md`](architecture/tx-audio-isolation.md) | **TX** audio domain mutex, batched v4 RX stats ingest, wire sequence, deadline logs (2026) |
 | [`architecture/transport-and-playout-modules.md`](architecture/transport-and-playout-modules.md) | Module map (`libdashcdg_*`, desktop objects, UDP) |
-| [`architecture/threaded-streaming-runtime.md`](architecture/threaded-streaming-runtime.md) | Thread / queue ownership for the desktop runtime |
+| [`architecture/threaded-streaming-runtime.md`](architecture/threaded-streaming-runtime.md) | Thread / queue ownership for the desktop runtime (target vs implemented) |
 | [`architecture/bad-network-startup-path.md`](architecture/bad-network-startup-path.md) | v4 “badnet” startup behavior |
 | [`architecture/baseline-seams.md`](architecture/baseline-seams.md) | Portable vs desktop seams |
 | [`architecture/portable-core.md`](architecture/portable-core.md) | Core/proto boundaries |
@@ -31,6 +46,7 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`specs/cdg-batch-jitter-playout-boundary.md`](specs/cdg-batch-jitter-playout-boundary.md) | CDG batch jitter + snapshot deferral rules |
 | [`specs/cpu-rgba-raster-contract.md`](specs/cpu-rgba-raster-contract.md) | `dashcdg_cdg_state_to_rgba8` contract (shared by GL and GDI) |
 | [`specs/receiver-progress-invariants.md`](specs/receiver-progress-invariants.md) | RX progress / preroll invariants |
+| [`specs/v4-display-audio-sync.md`](specs/v4-display-audio-sync.md) | TX preview delay, RX drain order, **DAC vs graphics** time |
 | [`specs/tx-cdg-source-model.md`](specs/tx-cdg-source-model.md) | TX CDG source / memory model |
 | [`specs/remaining-tranches-roadmap.md`](specs/remaining-tranches-roadmap.md) | **Remaining work index** (soak, track stress, bad-network phases, CD+G regression, observability) |
 | [`specs/bad-network-transport-next-phases.md`](specs/bad-network-transport-next-phases.md) | Bad-network transport **implementation phases** (companion) |
@@ -59,10 +75,15 @@ and **`specs/windows-legacy-mingw-build.md`**.
 | [`test/tx-cdg-source-late-join-regression-plan.md`](test/tx-cdg-source-late-join-regression-plan.md) | **TX CD+G** source slimdown — late-join / switch regression |
 | Other `test/*.md` | Feature‑specific plans and reports |
 
-## Hardware & ops
+## Hardware, embedded & ops
 
-- [`embedded/`](embedded/) — embedded/FreeRTOS handoff set: Windows desktop reference, protocol v4 porting guide, ESP32 task plan, codec/rendering matrix
-- [`hardware/`](hardware/) — ESP32 / BOM / bringup notes (desktop **v4** A/V + codec switching is the reference contract for firmware — see [`AGENTS.md`](../AGENTS.md), [`specs/embedded-rx-audio-profile.md`](specs/embedded-rx-audio-profile.md))  
-- [`ops/quality-gates.md`](ops/quality-gates.md) — Release criteria  
-- [`ops/audio-codec-direction-notes.md`](ops/audio-codec-direction-notes.md) — operator/runtime codec decisions, including the EVRC retirement note and weird-codec backlog
-- [`ops/v4-video-repair-implementation-checklist.md`](ops/v4-video-repair-implementation-checklist.md) — TX/RX/proto/test execution slices for Tranche C.4
+- [`embedded/`](embedded/) — FreeRTOS / ESP32 handoff: Windows reference, v4 porting guide, task plans, codec matrix (`embedded/README.md` starts the tour).
+- [`hardware/`](hardware/) — ESP32 boards, BOM, bringup (desktop v4 is still the **behavioral reference** for firmware).
+- [`ops/quality-gates.md`](ops/quality-gates.md) — Release criteria
+- [`ops/audio-codec-direction-notes.md`](ops/audio-codec-direction-notes.md) — operator/runtime codec decisions
+- [`ops/v4-video-repair-implementation-checklist.md`](ops/v4-video-repair-implementation-checklist.md) — Tranche C.4-style execution checklist
+
+## Meta
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, test, and document
+- [`../AGENTS.md`](../AGENTS.md) — agent / developer handoff for **desktop-rx** debugging

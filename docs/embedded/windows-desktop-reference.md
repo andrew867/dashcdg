@@ -1,5 +1,9 @@
 # Windows desktop implementation reference
 
+For **2026 TX** behavior (separate **audio** mutex, **batched** v4 RX stats
+ingest, unified wire sequence, deadline logs), also read
+[`../architecture/tx-audio-isolation.md`](../architecture/tx-audio-isolation.md).
+
 This document describes the current Windows desktop implementation as the behavioral reference for an embedded v4 receiver. It intentionally maps runtime behavior to source functions so firmware work can preserve semantics without copying desktop-specific PortAudio, GLUT, Win32, or pthread details.
 
 ## Executables and build flavors

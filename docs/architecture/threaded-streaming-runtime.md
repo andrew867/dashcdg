@@ -19,10 +19,18 @@ Parts of this target runtime already exist in the desktop proof:
 - a bounded `tx_audio_ready` queue between audio production and packet pacing
 - RX audio queue-driven PortAudio playout
 
+**Update (2026, desktop TX):** v4 **audio send** and **wire pacing** for media
+use a dedicated **audio domain** mutex and mirrored session fields
+(`g_tx_ad` in `app_tx.c`) so the **audio send thread** does not take the
+full **`g_tx_state`**. **V4_RX_STATS** from the PTP/stats path is **queued and
+batched** on the main thread instead of updating RX reporter state under
+`g_tx_state` from the PTP thread. See
+[`tx-audio-isolation.md`](tx-audio-isolation.md).
+
 Still not fully split today:
 
-- TX video production and network pacing are still largely coupled in one main
-  scheduler loop
+- TX **video** production and **network pacing** (announce/anchor/video chunks)
+  are still largely coupled in one main scheduler loop
 - RX packet receive, live media progression, and render publication are not yet
   fully separated into the ideal task boundaries below
 

@@ -6,7 +6,17 @@ Last consolidated from session work (2026). Use this to resume debugging or impl
 
 Windows **desktop-rx** / **desktop-tx** with **v4 multicast**: codec hot-swap (**Opus** + narrowband family **ids 2–7**), **cold join** (RX before TX), **idle RX then TX starts**, and **pause / unpause** are exercised in development with **stable A/V** after several remediation passes. User validation targets **win-x64** sneakernet builds (`windows-x64/desktop-rx.exe`, `desktop-tx.exe` from the same tree).
 
-Treat **`platform/desktop/src/app_rx.c`**, **`platform/desktop/src/app_tx.c`**, **`platform/desktop/src/pcm_rate_convert.c`**, **`platform/desktop/src/opus_codec.c`**, **`core/src/audio_jitter.c`**, and **`core/src/cdg_batch_jitter.c`** as the primary runtime seams.
+Treat **`platform/desktop/src/app_rx.c`**, **`platform/desktop/src/app_tx.c`**, **`platform/desktop/src/desktop_audio.c`**, **`platform/desktop/src/pcm_rate_convert.c`**, **`platform/desktop/src/opus_codec.c`**, **`core/src/audio_jitter.c`**, and **`core/src/cdg_batch_jitter.c`** as the primary runtime seams.
+
+**TX (2026):** Audio send uses **`g_tx_ad`** (dedicated mutex + mirrored session
+fields) and unified **wire** **`dashcdg_tx_next_wire_sequence()`**; **V4_RX_STATS**
+ingests on the PTP thread and **applies in batch** on the main loop — see
+**`docs/architecture/tx-audio-isolation.md`**. Periodic logs include
+**`thread_deadline_miss`** and **`v4_rx_stats_drop`**.
+
+**RX / HUD time:** `desktop_audio` updates **`timestamp_ms`** using
+**`max`(`time_info` span, `Pa_GetStreamInfo` `outputLatency`)** on PortAudio so
+on-screen CDG is not a few hundred ms **ahead** of heard audio on Windows/WASAPI.
 
 v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from TX; `session_info.startup_backfill_mode` is **0**; RX does not assemble a local file from `V4_BACKFILL_CHUNK` and does not `calloc` the full CDG on v4 `session_info` join (`asset_size` remains metadata-only). The **first** decoded v4 anchor must still **`apply_snapshot_locked`** when `cdg_snapshots_applied == 0` so **`dashcdg_cdg_batch_jitter_apply_snapshot_seek`** runs before any CDG deltas — **`dashcdg_rx_should_apply_v4_anchor_locked`** must not require `cdg_batch_jitter.initialized` first (that deadlocked late join).
 

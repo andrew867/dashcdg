@@ -34,6 +34,19 @@ Implementation: `dashcdg_tx_preview_delay_effective_ms_locked()` in `platform/de
 
 Headless TX does not render; the setting is ignored.
 
+## RX: DAC time from PortAudio (display clock)
+
+Graphics and HUD that follow **heard** audio use **`g_audio->timestamp_ms`**
+(updated in the PortAudio / WinMM output path). The callback no longer uses only
+**`outputBufferDacTime - currentTime`** (roughly one host buffer) as the latency
+to subtract: it also takes the **maximum** with **`Pa_GetStreamInfo()->outputLatency`**
+on WASAPI, where the **negotiated** queue is often **~250–300 ms**. Otherwise the
+playhead was **too far ahead** of the room, and **lyrics looked early** relative
+to the speakers. See **`dashcdg_pa_effective_output_latency_ms()`** in
+`platform/desktop/src/desktop_audio.c` and
+[`../architecture/tx-audio-isolation.md`](../architecture/tx-audio-isolation.md)
+for the TX side of the same “don’t let control plane block audio” story.
+
 ## RX: single clock for A/V
 
 1. **Drain order** (`dashcdg_rx_drain_media_locked`): **audio jitter is drained before CDG**. If the PCM ring is full, CDG does not advance that tick — avoids graphics leading audio by the entire buffer depth.

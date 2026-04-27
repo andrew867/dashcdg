@@ -8,6 +8,7 @@ Start here:
 | --- | --- |
 | [`esp-idf-setup.md`](esp-idf-setup.md) | Clone ESP-IDF locally, build `dashcdg_badge`, flash UART (COM), offline/toolchain notes. |
 | [`windows-desktop-reference.md`](windows-desktop-reference.md) | Current Windows TX/RX implementation map, threads, data ownership, and important functions. |
+| [`../architecture/tx-audio-isolation.md`](../architecture/tx-audio-isolation.md) | **TX (2026):** audio domain mutex, batched v4 RX stats, wire sequence, deadline logs — for parity with `app_tx.c`. |
 | [`protocol-v4-porting-guide.md`](protocol-v4-porting-guide.md) | Wire protocol v4 packet families, receiver state machine, timing, FEC, and embedded parsing rules. |
 | [`freertos-esp32-implementation-plan.md`](freertos-esp32-implementation-plan.md) | FreeRTOS task model, queues, memory budgets, scheduler priorities, and staged implementation plan. |
 | [`codec-rendering-portability-matrix.md`](codec-rendering-portability-matrix.md) | Codec support matrix, DSP cost notes, renderer choices, and low-end CPU lessons from WinXP/P3. |
