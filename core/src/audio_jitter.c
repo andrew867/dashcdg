@@ -212,6 +212,16 @@ void dashcdg_audio_jitter_release(struct dashcdg_audio_jitter_buffer *jb) {
     }
     memset(jb, 0, sizeof(*jb));
 }
+#else
+int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t slot_count) {
+    (void) jb;
+    (void) slot_count;
+    return 0;
+}
+
+void dashcdg_audio_jitter_release(struct dashcdg_audio_jitter_buffer *jb) {
+    (void) jb;
+}
 #endif
 
 struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_find(

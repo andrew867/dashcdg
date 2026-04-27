@@ -11,6 +11,12 @@
 #define DASHCDG_PROTOCOL_VERSION_V5 5U
 #define DASHCDG_MAX_SONG_ID 64U
 #define DASHCDG_MAX_PACKET_SIZE 1400U
+/**
+ * Multicast group used only for v4_repair_nack (port = stats port, default 24685).
+ * v4_rx_stats stays on the primary session multicast (e.g. 239.255.77.77) so all receivers can converge;
+ * NACKs use this separate group so desktop-rx players are not flooded (TX joins both).
+ */
+#define DASHCDG_V4_REPAIR_NACK_MCAST_ADDR_STR "239.255.77.78"
 #define DASHCDG_MAX_ASSET_CHUNK 1024U
 #define DASHCDG_MAX_AUDIO_FRAME_BYTES 255U
 #define DASHCDG_MAX_CDG_BATCH_PACKETS 6U
@@ -109,7 +115,7 @@ enum dashcdg_v4_repair_mode {
 #define DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_FORWARD 0x0001U
 #define DASHCDG_V4_REPAIR_WINDOW_RESERVED_DIR_REVERSE 0x0002U
 #define DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT 2U
-#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_MASK (0x0007U << DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT)
+#define DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_MASK (0x000FU << DASHCDG_V4_REPAIR_WINDOW_RESERVED_K_SHIFT)
 
 struct dashcdg_packet_header {
     uint32_t magic;

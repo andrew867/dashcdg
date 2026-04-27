@@ -35,6 +35,8 @@ typedef struct {
     int have_clock;
     uint64_t jb_next_packet_index;
     size_t jb_pending_slots;
+    /** Audio jitter occupied slots (same instant as jb_pending_slots snapshot). */
+    uint32_t audio_jb_pending_slots;
     uint64_t live_missing_skips;
     /** Estimated missing wire packets from header.sequence gaps (all packet types). */
     uint64_t wire_missing_estimate;
@@ -72,6 +74,14 @@ typedef struct {
     uint32_t v4_video_repair_rx_forward;
     uint32_t v4_video_repair_rx_reverse;
     uint32_t v4_repair_nack_tx;
+    /** repair-nack send attempts (includes coalesced / failed sends). */
+    uint32_t v4_repair_nack_attempt;
+    /** sendto failures or short writes when sending repair-nack. */
+    uint32_t v4_repair_nack_send_fail;
+    /** Skipped sends due to adaptive min-spacing throttle (RSSI-aware when enabled in Kconfig). */
+    uint32_t v4_repair_nack_throttled;
+    /** v4 RLE anchors not applied because packet_index trailed jitter cursor beyond slack. */
+    uint32_t v4_anchor_rejected_behind;
     uint32_t v4_video_repair_recovered;
     uint32_t v4_video_repair_failed;
     /** Runtime jitter capacities (slots). */
@@ -87,12 +97,22 @@ typedef struct {
     uint32_t memory_profile_resize_video_dropped;
     uint32_t memory_profile_adaptive_grows;
     uint32_t memory_profile_adaptive_shrinks;
+    /** NVS: request CDG repair parity from TX (v4_repair_nack). */
+    uint8_t repair_nack_enabled;
+    /** NVS: send periodic v4_rx_stats to TX listener (reduces multicast airtime when off). */
+    uint8_t v4_stats_tx_enabled;
+    /** IGMP + bind succeeded on CDG FEC repair port (24686 when TX uses split repair). */
+    uint8_t v4_repair_rx_socket_ok;
+    /** Dedicated send-only socket for v4_rx_stats + repair-nack (never the media 24684 socket). */
+    uint8_t v4_control_uplink_ok;
 } dashcdg_badge_rx_stats_t;
 
 void dashcdg_badge_rx_start(void);
 void dashcdg_badge_rx_stop(void);
 void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on);
 void dashcdg_badge_rx_get_decode_enabled(bool *video_on, bool *audio_on);
+/** Reload NVS tuning flags (repair NACK, v4 stats uplink). Safe before/during RX task. */
+void dashcdg_badge_rx_apply_rx_tuning_prefs(void);
 /** After LVGL freed widgets / heap settled, try calloc CDG+jitter again (no-op if already ok). */
 void dashcdg_badge_rx_try_upgrade_cdg_heap(void);
 void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out);

@@ -1005,7 +1005,8 @@ static void test_audio_jitter_long_stall_bypasses_starvation_gate(void) {
     din.ms_since_prior_audio_apply = 950U;
     assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_SKIP);
     assert(miss == 1U);
-    assert(jb.next_media_sequence == 11U);
+    /* Empty-buffer stall-loss SKIP advances the read cursor (seq 10 applied → 11, then miss → 12). */
+    assert(jb.next_media_sequence == 12U);
 }
 
 static void test_cdg_raster_rgba_matches_memory_preset(void) {

@@ -10,6 +10,8 @@ DASHCDG_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 
 DASHCDG_GIT_HASH ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || printf 'unknown')
 DASHCDG_BUILD_VERSION ?= dev-$(DASHCDG_GIT_BRANCH)-g$(DASHCDG_GIT_HASH)
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
+# Heap-backed audio + CDG jitter: adaptive grow/shrink in desktop `app_rx.c`; core and tests use the same layout.
+CFLAGS += -DDASHCDG_AUDIO_JITTER_HEAP_BACKED=1 -DDASHCDG_CDG_BATCH_JITTER_HEAP_BACKED=1
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 # Opus / PortAudio link flags (expanded after MINGW_ARCH is known on Windows). Linux: set DASHCDG_OPUS_VENDOR=1 and prefixes if needed.
@@ -299,13 +301,14 @@ CFLAGS += -include $(BUILD_DIR)/dashcdg_build_version_gen.h
 $(shell mkdir -p '$(BUILD_DIR)' 2>/dev/null && printf '%s\n' 'Xdefine DASHCDG_BUILD_VERSION "$(DASHCDG_BUILD_VERSION)"' | sed '1s/^X/#/' > '$(BUILD_DIR)/dashcdg_build_version_gen.h')
 
 # Merge prerequisite into every object rule under $(OBJ_DIR) (empty recipe = prerequisite only).
-$(OBJ_DIR)/%.o: $(BUILD_DIR)/dashcdg_build_version_gen.h ;
+$(OBJ_DIR)/%.o: $(BUILD_DIR)/dashcdg_build_version_gen.h Makefile ;
 
 CORE_LIB := $(LIB_DIR)/libdashcdg_core.a
 PROTO_LIB := $(LIB_DIR)/libdashcdg_proto.a
 DESKTOP_LIB := $(LIB_DIR)/libdashcdg_desktop.a
 
 TEST_BIN := $(BIN_DIR)/test-core
+CDG_NETWORK_PROFILE_BIN := $(BIN_DIR)/cdg-network-profile
 TEST_TRANSPORT_UDP_BIN := $(BIN_DIR)/test-transport-udp
 TEST_PCM_RATE_CONVERT_BIN := $(BIN_DIR)/test-pcm-rate-convert
 TEST_OPUS_ROUNDTRIP_BIN := $(BIN_DIR)/test-opus-roundtrip
@@ -336,7 +339,7 @@ ifneq ($(RETRO_RX_BIN),)
 DESKTOP_RETRO_BINS := $(RETRO_RX_BIN) $(RETRO_TX_BIN)
 endif
 
-.PHONY: all debug dirs libs test desktop-apps bundle-runtime check-mingw32-p3-implib \
+.PHONY: all debug dirs libs test desktop-apps bundle-runtime cdg-network-profile check-mingw32-p3-implib \
 	vendor-mingw32-p3-runtime vendor-soxr verify-mingw32-p3-dlls verify-p3-mingw32-all \
 	verify-sneakernet-mingw32-p3 \
 	package package-x64 package-x86 \
@@ -356,7 +359,7 @@ all: CFLAGS += -O2
 all: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN)
 
 debug: CFLAGS += -DDEBUG -g
-debug: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
+debug: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(TEST_BIN) $(TX_BIN) $(PLAYER_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS) $(CDG_NETWORK_PROFILE_BIN)
 
 desktop-apps: check-mingw32-p3-implib dirs $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_LIB) $(PLAYER_BIN) $(TX_BIN) $(RX_BIN) $(DESKTOP_RX_GDI_TARGET) $(DESKTOP_TX_GDI_TARGET) $(DESKTOP_RETRO_BINS)
 
@@ -538,6 +541,14 @@ $(OBJ_DIR)/desktop_app_rx_retro_gdi.o: platform/desktop/src/app_rx.c
 
 $(OBJ_DIR)/test_core.o: tests/test_core.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/cdg_network_profile.o: tools/cdg_network_profile.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(CDG_NETWORK_PROFILE_BIN): $(OBJ_DIR)/cdg_network_profile.o $(CORE_LIB)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/cdg_network_profile.o $(CORE_LIB)
+
+cdg-network-profile: dirs $(CORE_LIB) $(CDG_NETWORK_PROFILE_BIN)
 
 $(OBJ_DIR)/test_transport_udp.o: tests/test_transport_udp.c
 	$(CC) $(CFLAGS) -c -o $@ $<

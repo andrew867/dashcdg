@@ -20,6 +20,7 @@
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
 #include "esp_rom_sys.h"
+#include "esp_wifi.h"
 #include "lvgl.h"
 
 #include "lwip/inet.h"
@@ -42,6 +43,8 @@ static const char *TAG = "badge_rx";
 
 #define BADGE_RX_MCAST_ADDR "239.255.77.77"
 #define BADGE_RX_PORT       24684
+/* Same as desktop `DASHCDG_TX_DEFAULT_REPAIR_PORT`: v4 CDG FEC repair when TX uses split port. */
+#define BADGE_RX_REPAIR_PORT 24686
 /* Receiver stats multicast on same group, separate port so peers can observe each other. */
 #define BADGE_RX_TX_STATS_PORT 24685
 /* AMR-WB decode + vendor C stack + recv path: 8 KiB overflowed; keep headroom. */
@@ -74,6 +77,15 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_ENABLE_TX_V4_STATS 1
 /** Keep this many jitter slots free; evict furthest-ahead batches when tighter. */
 #define BADGE_RX_JB_HEADROOM 6U
+#ifndef CONFIG_DASHCDG_BADGE_CDG_JB_HEADROOM_EXTRA
+#define CONFIG_DASHCDG_BADGE_CDG_JB_HEADROOM_EXTRA 0
+#endif
+#define BADGE_RX_JB_HEADROOM_EFFECTIVE ((size_t)BADGE_RX_JB_HEADROOM + (size_t)CONFIG_DASHCDG_BADGE_CDG_JB_HEADROOM_EXTRA)
+/*
+ * If an anchor arrives slightly behind the CDG jitter cursor (reorder), still apply when within
+ * this many subchannel packet indices — apply_snapshot_seek drops overlapped batches only.
+ */
+#define BADGE_RX_ANCHOR_APPLY_SLACK_PACKETS ((uint64_t)DASHCDG_MAX_CDG_BATCH_PACKETS * 8ULL)
 /* When audio decode is off, preserve fewer free slots so video uses more of the ring. */
 #define BADGE_RX_JB_HEADROOM_VIDEO_PRIORITY 1U
 #define BADGE_RX_AUDIO_SLOTS_BALANCED 30U
@@ -112,8 +124,9 @@ typedef enum {
 #define BADGE_RX_CDG_REPAIR_GROUP_SIZE 9U
 #define BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX 144U
 #define BADGE_RX_VIDEO_REPAIR_SYMBOL_MAX (BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX + 1U)
-#define BADGE_RX_VIDEO_REPAIR_REDUNDANCY_MAX 6U
+#define BADGE_RX_VIDEO_REPAIR_REDUNDANCY_MAX 8U
 #define BADGE_RX_PRE_ANCHOR_DRAIN_GRACE_MS 1800U
+#define BADGE_RX_PRE_ANCHOR_PALETTE_GRACE_MS 4200U
 /*
  * Keep full-height blits for correctness. Partial-height pressure clipping produced visible banding/
  * stale lower scanlines (wrong palette stripes + bottom held color) under current overlay path.
@@ -150,6 +163,9 @@ struct badge_rx_video_repair_group {
 static TaskHandle_t s_rx_task;
 static volatile int s_sock = -1;
 static volatile int s_stats_sock = -1;
+static volatile int s_repair_sock = -1;
+/** Send-only: v4_rx_stats + repair-nack to stats port (isolates control from media RX socket). */
+static volatile int s_uplink_sock = -1;
 static volatile int s_run;
 
 static SemaphoreHandle_t s_mtx;
@@ -176,6 +192,10 @@ static uint8_t s_announced_audio_codec_id;
 static uint8_t s_announced_audio_profile_id;
 static uint8_t s_audio_decode_enabled = 1U;
 static uint8_t s_video_decode_enabled = 1U;
+/** NVS-tunable: CDG repair NACK requests to TX (default on). */
+static volatile uint8_t s_repair_nack_enabled = 1U;
+/** NVS-tunable: periodic v4_rx_stats to TX (default on). */
+static volatile uint8_t s_v4_stats_tx_enabled = 1U;
 static int s_audio_decode_primed;
 static uint64_t s_last_audio_jitter_apply_local_ms;
 /* Last sender-timeline playback_ms we actually pushed to DAC (for v4_rx_stats latency on TX). */
@@ -216,7 +236,7 @@ static struct badge_rx_video_repair_group s_video_repair_groups[BADGE_RX_TRACKED
 /** Clip CDG panel blit to Y in [0, max); full frame when not under jitter pressure. */
 static uint16_t s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
 /** Runtime CDG jitter reserve; adjusted by decode mode (audio on/off). */
-static size_t s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM;
+static size_t s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM_EFFECTIVE;
 /** Last successfully locked v4 stats payload snapshot (used if mutex is busy). */
 static struct dashcdg_v4_rx_stats_payload s_v4_stats_snapshot;
 static uint8_t s_v4_stats_snapshot_valid;
@@ -249,6 +269,7 @@ static uint32_t s_v4_anchor_asm_total_bytes;
 static size_t s_v4_anchor_asm_received_bytes;
 static uint8_t s_v4_anchor_chunk_seen[BADGE_RX_V4_ANCHOR_CHUNK_COUNT];
 static uint32_t s_cdg_snapshots_applied;
+static uint8_t s_pre_anchor_palette_mask;
 
 static void drain_cdg_to_idle(uint64_t local_now_ms);
 static void badge_rx_amr_decoder_reset(void);
@@ -656,15 +677,22 @@ static void badge_rx_handle_v4_loading_screen(const struct dashcdg_packet_view *
 static int badge_rx_should_apply_v4_anchor(uint64_t anchor_packet_index)
 {
     if (s_cdg_snapshots_applied == 0U) {
-        if (s_jb != NULL && s_jb->initialized && anchor_packet_index < s_jb->next_packet_index) {
-            return 0;
-        }
+        /*
+         * First anchor must always be accepted: intro-style tracks often emit key clear/title
+         * content very early, and if early deltas advanced jitter cursors we still want this
+         * canonical canvas snapshot instead of rejecting it as "old".
+         */
         return 1;
     }
     if (s_jb == NULL || !s_jb->initialized) {
         return 0;
     }
     if (anchor_packet_index < s_jb->next_packet_index) {
+        uint64_t gap = s_jb->next_packet_index - anchor_packet_index;
+        if (gap <= BADGE_RX_ANCHOR_APPLY_SLACK_PACKETS) {
+            return 1;
+        }
+        s_stats.v4_anchor_rejected_behind++;
         return 0;
     }
     return 1;
@@ -701,6 +729,7 @@ static int badge_rx_try_apply_assembled_v4_anchor(void)
 
         dashcdg_cdg_batch_jitter_apply_snapshot_seek(s_jb, s_v4_anchor_asm_packet_index);
         s_jitter_cdg_primed = 1;
+        s_pre_anchor_palette_mask = 0x3U;
         s_last_cdg_apply_local_ms = dashcdg_clock_now_ms();
         s_cdg_snapshots_applied++;
         s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
@@ -774,9 +803,79 @@ static void badge_rx_ensure_receiver_instance_id(void)
     s_badge_receiver_instance_inited = 1;
 }
 
-static void badge_rx_maybe_send_v4_stats(int sockfd, uint64_t now_ms)
+/** Outbound UDP to TX stats listener (unicast when TX source is known; else multicast). */
+static int badge_rx_open_uplink_socket(void)
 {
-    if (!BADGE_RX_ENABLE_TX_V4_STATS) {
+    int s;
+    int reuse = 1;
+    uint8_t ttl = 32;
+    struct in_addr if_addr;
+
+    memset(&if_addr, 0, sizeof(if_addr));
+    {
+        esp_netif_t *na = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (na != NULL) {
+            esp_netif_ip_info_t ipi;
+            if (esp_netif_get_ip_info(na, &ipi) == ESP_OK && ipi.ip.addr != 0) {
+                if_addr.s_addr = ipi.ip.addr;
+            }
+        }
+    }
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (s < 0) {
+        snprintf(s_stats.last_error, sizeof(s_stats.last_error), "uplink socket errno=%d", errno);
+        return -1;
+    }
+    (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    if (if_addr.s_addr != 0) {
+        if (setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, &if_addr, sizeof(if_addr)) != 0) {
+            ESP_LOGW(TAG, "uplink IP_MULTICAST_IF errno=%d (STA IP may not be ready yet)", errno);
+        }
+    }
+    (void)setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+    return s;
+}
+
+/** FD for v4_rx_stats + repair-nack only (never media 24684). */
+static int badge_rx_control_tx_fd(void)
+{
+    if ((int)s_uplink_sock >= 0) {
+        return (int)s_uplink_sock;
+    }
+    if ((int)s_stats_sock >= 0) {
+        return (int)s_stats_sock;
+    }
+    return -1;
+}
+
+/** v4_rx_stats: primary session multicast so all receivers + TX see reports (timing convergence). */
+static void badge_rx_fill_v4_rx_stats_mcast_dst(struct sockaddr_in *dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->sin_family = AF_INET;
+    dst->sin_port = htons(BADGE_RX_TX_STATS_PORT);
+    dst->sin_addr.s_addr = inet_addr(BADGE_RX_MCAST_ADDR);
+}
+
+/**
+ * v4_repair_nack: unicast to last seen TX when known (no player fan-out); else dedicated NACK multicast
+ * (TX joins DASHCDG_V4_REPAIR_NACK_MCAST_ADDR_STR on the stats port; not the primary stats group).
+ */
+static void badge_rx_fill_v4_repair_nack_dst(struct sockaddr_in *dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->sin_family = AF_INET;
+    dst->sin_port = htons(BADGE_RX_TX_STATS_PORT);
+    if (s_v4_tx_src_ipv4 != 0U) {
+        dst->sin_addr.s_addr = s_v4_tx_src_ipv4;
+    } else {
+        dst->sin_addr.s_addr = inet_addr(DASHCDG_V4_REPAIR_NACK_MCAST_ADDR_STR);
+    }
+}
+
+static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
+{
+    if (!BADGE_RX_ENABLE_TX_V4_STATS || s_v4_stats_tx_enabled == 0U) {
         return;
     }
     uint8_t pkt[DASHCDG_MAX_PACKET_SIZE];
@@ -786,7 +885,7 @@ static void badge_rx_maybe_send_v4_stats(int sockfd, uint64_t now_ms)
     size_t sz;
     ssize_t sent;
 
-    if (sockfd < 0) {
+    if (badge_rx_control_tx_fd() < 0) {
         return;
     }
     if (s_last_v4_stats_sent_ms != 0U && (now_ms - s_last_v4_stats_sent_ms) < (uint64_t)BADGE_RX_STATS_INTERVAL_MS) {
@@ -899,12 +998,15 @@ static void badge_rx_maybe_send_v4_stats(int sockfd, uint64_t now_ms)
         return;
     }
 
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(BADGE_RX_TX_STATS_PORT);
-    dst.sin_addr.s_addr = inet_addr(BADGE_RX_MCAST_ADDR);
+    badge_rx_fill_v4_rx_stats_mcast_dst(&dst);
 
-    sent = sendto(sockfd, pkt, sz, 0, (struct sockaddr *)&dst, sizeof(dst));
+    {
+        int tx_fd = badge_rx_control_tx_fd();
+        if (tx_fd < 0) {
+            return;
+        }
+        sent = sendto(tx_fd, pkt, sz, 0, (struct sockaddr *)&dst, sizeof(dst));
+    }
     if (sent == (ssize_t)sz) {
         if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(5)) == pdTRUE) {
             s_stats.v4_rx_stats_sent++;
@@ -916,10 +1018,43 @@ static void badge_rx_maybe_send_v4_stats(int sockfd, uint64_t now_ms)
     }
 }
 
-static void badge_rx_send_v4_repair_nack(int sockfd, uint64_t now_ms, uint32_t group_id, uint16_t observed_group_size,
-                                         uint16_t missing_mask)
+#if CONFIG_DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+static uint32_t badge_rx_repair_nack_min_gap_ms(void)
+{
+    uint32_t base = (uint32_t)CONFIG_DASHCDG_BADGE_REPAIR_NACK_MIN_GAP_MS;
+    const uint32_t max_gap = (uint32_t)CONFIG_DASHCDG_BADGE_REPAIR_NACK_MAX_GAP_MS;
+    const int ref_db = CONFIG_DASHCDG_BADGE_REPAIR_NACK_RSSI_REF_DB;
+    const int per_db = CONFIG_DASHCDG_BADGE_REPAIR_NACK_RSSI_EXTRA_MS_PER_DB;
+    const int cap = CONFIG_DASHCDG_BADGE_REPAIR_NACK_RSSI_EXTRA_CAP_MS;
+    wifi_ap_record_t ap;
+    int extra = 0;
+
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        int rssi = (int)ap.rssi;
+        if (rssi < ref_db) {
+            extra = (ref_db - rssi) * per_db;
+            if (extra < 0) {
+                extra = 0;
+            }
+            if (extra > cap) {
+                extra = cap;
+            }
+        }
+    }
+    {
+        uint32_t gap = base + (uint32_t)extra;
+        if (gap > max_gap) {
+            gap = max_gap;
+        }
+        return gap;
+    }
+}
+#endif
+
+static void badge_rx_send_v4_repair_nack(uint64_t now_ms, uint32_t group_id, uint16_t observed_group_size, uint16_t missing_mask)
 {
     static uint64_t s_last_nack_ms;
+    static uint64_t s_last_nack_attempt_ms;
     static uint32_t s_last_nack_group_id;
     static uint16_t s_last_nack_mask;
     struct dashcdg_packet_header hdr;
@@ -928,13 +1063,28 @@ static void badge_rx_send_v4_repair_nack(int sockfd, uint64_t now_ms, uint32_t g
     uint8_t pkt[DASHCDG_MAX_PACKET_SIZE];
     size_t sz;
     ssize_t sent;
-    if (sockfd < 0 || missing_mask == 0U) {
+    int fd;
+    if (s_repair_nack_enabled == 0U) {
+        return;
+    }
+    fd = badge_rx_control_tx_fd();
+    if (fd < 0 || missing_mask == 0U) {
         return;
     }
     if (s_last_nack_group_id == group_id && s_last_nack_mask == missing_mask &&
         s_last_nack_ms != 0U && now_ms > s_last_nack_ms && now_ms - s_last_nack_ms < 120U) {
         return;
     }
+#if CONFIG_DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+    {
+        const uint32_t min_gap = badge_rx_repair_nack_min_gap_ms();
+        if (min_gap > 0U && s_last_nack_attempt_ms != 0U && now_ms > s_last_nack_attempt_ms &&
+            now_ms - s_last_nack_attempt_ms < min_gap) {
+            s_stats.v4_repair_nack_throttled++;
+            return;
+        }
+    }
+#endif
     memset(&hdr, 0, sizeof(hdr));
     memset(&pl, 0, sizeof(pl));
     hdr.sequence = ++s_rx_stats_seq;
@@ -947,11 +1097,10 @@ static void badge_rx_send_v4_repair_nack(int sockfd, uint64_t now_ms, uint32_t g
     if (sz == 0U) {
         return;
     }
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(BADGE_RX_TX_STATS_PORT);
-    dst.sin_addr.s_addr = inet_addr(BADGE_RX_MCAST_ADDR);
-    sent = sendto(sockfd, pkt, sz, 0, (struct sockaddr *)&dst, sizeof(dst));
+    s_stats.v4_repair_nack_attempt++;
+    s_last_nack_attempt_ms = now_ms;
+    badge_rx_fill_v4_repair_nack_dst(&dst);
+    sent = sendto(fd, pkt, sz, 0, (struct sockaddr *)&dst, sizeof(dst));
     if (sent == (ssize_t)sz) {
         s_stats.v4_repair_nack_tx++;
         s_last_nack_ms = now_ms;
@@ -959,6 +1108,9 @@ static void badge_rx_send_v4_repair_nack(int sockfd, uint64_t now_ms, uint32_t g
         s_last_nack_mask = missing_mask;
         ESP_LOGI(TAG, "repair-nack group=%u size=%u mask=0x%04x", (unsigned)group_id, (unsigned)observed_group_size,
                  (unsigned)missing_mask);
+    } else {
+        s_stats.v4_repair_nack_send_fail++;
+        ESP_LOGD(TAG, "repair-nack sendto fail fd=%d sent=%d errno=%d", fd, (int)sent, errno);
     }
 }
 
@@ -1056,6 +1208,23 @@ static void badge_rx_cdg_blit_relax_pressure_clip(void)
     }
 }
 
+static uint8_t badge_rx_cdg_packet_palette_mask(const struct dashcdg_subchannel_packet *pkt)
+{
+    uint8_t insn;
+
+    if (pkt == NULL || (pkt->command & 0x3FU) != 0x09U) {
+        return 0U;
+    }
+    insn = (uint8_t)(pkt->instruction & 0x3FU);
+    if (insn == DASHCDG_INSN_LOAD_COLOR_TABLE_00) {
+        return 0x1U;
+    }
+    if (insn == DASHCDG_INSN_LOAD_COLOR_TABLE_08) {
+        return 0x2U;
+    }
+    return 0U;
+}
+
 static void apply_cdg_batch(const struct dashcdg_cdg_batch_jitter_frame *batch)
 {
     if (batch == NULL || s_cdg == NULL || s_jb == NULL) {
@@ -1065,6 +1234,7 @@ static void apply_cdg_batch(const struct dashcdg_cdg_batch_jitter_frame *batch)
         const uint8_t *p = batch->packet_bytes + (size_t)i * DASHCDG_SUBCHANNEL_PACKET_BYTES;
         struct dashcdg_subchannel_packet pkt;
         memcpy(&pkt, p, sizeof(pkt));
+        s_pre_anchor_palette_mask |= badge_rx_cdg_packet_palette_mask(&pkt);
         (void)dashcdg_cdg_state_process_packet(s_cdg, &pkt);
     }
     dashcdg_cdg_batch_jitter_note_applied(s_jb, (struct dashcdg_cdg_batch_jitter_frame *)batch);
@@ -1084,6 +1254,14 @@ static void drain_cdg_to_idle(uint64_t local_now_ms)
          * During a fresh session, prefer waiting briefly for the first anchor instead of applying
          * whatever mid-stream deltas arrived first. This reduces missed-clear/title-overlap artifacts.
          */
+        return;
+    }
+    if (s_cdg_snapshots_applied == 0U &&
+        s_pre_anchor_palette_mask != 0x3U &&
+        s_active_session_local_start_ms != 0U &&
+        local_now_ms > s_active_session_local_start_ms &&
+        (local_now_ms - s_active_session_local_start_ms) < BADGE_RX_PRE_ANCHOR_PALETTE_GRACE_MS) {
+        /* Keep startup frame stable until both color-table halves arrive or first anchor lands. */
         return;
     }
     int guard = 0;
@@ -1281,7 +1459,7 @@ static void badge_rx_apply_memory_profile_locked(void)
          */
         badge_rx_free_audio_jitter();
     } else {
-        s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM;
+        s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM_EFFECTIVE;
         (void)badge_rx_ensure_audio_jitter();
 #ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
         if (s_audio_jb != NULL) {
@@ -1710,6 +1888,7 @@ static void handle_session_info(const struct dashcdg_packet_view *view)
     s_active_session_valid = 1;
 
     s_cdg_snapshots_applied = 0U;
+    s_pre_anchor_palette_mask = 0U;
     badge_rx_v4_anchor_asm_reset();
     memset(s_video_repair_groups, 0, sizeof(s_video_repair_groups));
 
@@ -1809,8 +1988,34 @@ static void badge_rx_video_repair_try_recover_group(struct badge_rx_video_repair
     uint8_t parity_count = 0U;
     uint8_t known[BADGE_RX_VIDEO_REPAIR_REDUNDANCY_MAX][BADGE_RX_VIDEO_REPAIR_SYMBOL_MAX];
 
-    if (g == NULL || !g->occupied || g->expected_group_size <= 1U || g->parity_symbol_bytes == 0U ||
-        g->parity_symbol_bytes > BADGE_RX_VIDEO_REPAIR_SYMBOL_MAX) {
+    if (g == NULL || !g->occupied || g->expected_group_size <= 1U) {
+        return;
+    }
+    if (g->parity_symbol_bytes > BADGE_RX_VIDEO_REPAIR_SYMBOL_MAX) {
+        return;
+    }
+    /*
+     * Missing members + NACK do not require parity yet; parity arrives on the repair port (24686)
+     * when TX uses split. Previously parity_symbol_bytes==0 returned here so NACK/repair counters
+     * stayed at zero forever on the badge.
+     */
+    for (uint8_t i = 0U; i < g->expected_group_size; ++i) {
+        if (!g->member_present[i] && missing_count < BADGE_RX_CDG_REPAIR_GROUP_SIZE) {
+            missing_indices[missing_count++] = (int)i;
+        }
+    }
+    if (missing_count > 0U) {
+        uint16_t missing_mask = 0U;
+        for (uint8_t m = 0U; m < missing_count; ++m) {
+            if (missing_indices[m] >= 0 && missing_indices[m] < 16) {
+                missing_mask |= (uint16_t)(1U << (uint8_t)missing_indices[m]);
+            }
+        }
+        if (missing_mask != 0U && s_repair_nack_enabled != 0U) {
+            badge_rx_send_v4_repair_nack(dashcdg_clock_now_ms(), g->group_id, g->expected_group_size, missing_mask);
+        }
+    }
+    if (g->parity_symbol_bytes == 0U) {
         return;
     }
     symbol_bytes = g->parity_symbol_bytes;
@@ -1831,20 +2036,6 @@ static void badge_rx_video_repair_try_recover_group(struct badge_rx_video_repair
                     known[pid][b] ^= badge_rx_gf256_mul(coeff, sym[b]);
                 }
             }
-        } else if (missing_count < BADGE_RX_CDG_REPAIR_GROUP_SIZE) {
-            missing_indices[missing_count++] = (int)i;
-        }
-    }
-    if (missing_count > 0U) {
-        uint16_t missing_mask = 0U;
-        for (uint8_t m = 0U; m < missing_count; ++m) {
-            if (missing_indices[m] >= 0 && missing_indices[m] < 16) {
-                missing_mask |= (uint16_t)(1U << (uint8_t)missing_indices[m]);
-            }
-        }
-        if (missing_mask != 0U) {
-            badge_rx_send_v4_repair_nack((int)s_stats_sock, dashcdg_clock_now_ms(), g->group_id, g->expected_group_size,
-                                         missing_mask);
         }
     }
     if (missing_count == 0U || parity_count < missing_count || missing_count > BADGE_RX_VIDEO_REPAIR_REDUNDANCY_MAX) {
@@ -1878,6 +2069,7 @@ static void badge_rx_video_repair_try_recover_group(struct badge_rx_video_repair
             uint8_t packet_count;
             uint64_t batch_index;
             uint64_t packet_start_index;
+            uint64_t tail;
             if (recovered_length == 0U || recovered_length > BADGE_RX_VIDEO_REPAIR_PAYLOAD_MAX ||
                 recovered_length > (uint16_t)(symbol_bytes - 1U) ||
                 (recovered_length % DASHCDG_SUBCHANNEL_PACKET_BYTES) != 0U) {
@@ -1887,8 +2079,27 @@ static void badge_rx_video_repair_try_recover_group(struct badge_rx_video_repair
             packet_count = (uint8_t)(recovered_length / DASHCDG_SUBCHANNEL_PACKET_BYTES);
             batch_index = (uint64_t)g->group_id * (uint64_t)BADGE_RX_CDG_REPAIR_GROUP_SIZE + (uint64_t)mi;
             packet_start_index = batch_index * (uint64_t)DASHCDG_MAX_CDG_BATCH_PACKETS;
-            if (packet_count == 0U || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS || s_jb == NULL ||
-                !dashcdg_cdg_batch_jitter_insert(s_jb, packet_start_index, packet_count, &rec_syms[c][1], 0)) {
+            if (packet_count == 0U || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS || s_jb == NULL) {
+                s_stats.v4_video_repair_failed++;
+                return;
+            }
+            /*
+             * Wi‑Fi often delivers repair after the jitter cursor has stepped past the gap. Insert then
+             * rejects (tail < next_packet_index). For a single missing batch, rewind once with
+             * apply_snapshot_seek (same contract as anchor seek / drain gap-fill). Multi-miss skips this:
+             * one seek could clear an earlier recovered batch in the same group.
+             */
+            if (missing_count == 1U && s_jb->initialized) {
+                tail = packet_start_index + (uint64_t)packet_count;
+                if (tail < s_jb->next_packet_index) {
+                    const uint64_t gap_packets = s_jb->next_packet_index - tail;
+                    const uint64_t max_gap_packets = (uint64_t)DASHCDG_MAX_CDG_BATCH_PACKETS * 8U;
+                    if (gap_packets <= max_gap_packets && dashcdg_cdg_batch_jitter_occupied_count(s_jb) <= 12U) {
+                        dashcdg_cdg_batch_jitter_apply_snapshot_seek(s_jb, packet_start_index);
+                    }
+                }
+            }
+            if (!dashcdg_cdg_batch_jitter_insert(s_jb, packet_start_index, packet_count, &rec_syms[c][1], 0)) {
                 s_stats.v4_video_repair_failed++;
                 return;
             }
@@ -2046,6 +2257,19 @@ static void handle_video_repair_window(const struct dashcdg_packet_view *view)
     badge_rx_video_repair_try_recover_group(g);
 }
 
+/** Repair/FEC datagrams on BADGE_RX_REPAIR_PORT (not counted in main `datagrams` / sequence loss). */
+static void badge_rx_process_repair_datagram(const uint8_t *buf, size_t buflen)
+{
+    struct dashcdg_packet_view view;
+
+    if (!dashcdg_protocol_parse_packet(&view, buf, buflen)) {
+        return;
+    }
+    if (view.header.type == DASHCDG_PACKET_V4_REPAIR_WINDOW && s_video_decode_enabled != 0U) {
+        handle_video_repair_window(&view);
+    }
+}
+
 static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
 {
     struct dashcdg_packet_view view;
@@ -2120,6 +2344,7 @@ static void badge_rx_task(void *arg)
         int rv;
         int fd = (int)s_sock;
         int stats_fd = (int)s_stats_sock;
+        int repair_fd = (int)s_repair_sock;
         int max_fd = fd;
 
         if (fd < 0) {
@@ -2132,6 +2357,12 @@ static void badge_rx_task(void *arg)
             FD_SET(stats_fd, &rfds);
             if (stats_fd > max_fd) {
                 max_fd = stats_fd;
+            }
+        }
+        if (repair_fd >= 0) {
+            FD_SET(repair_fd, &rfds);
+            if (repair_fd > max_fd) {
+                max_fd = repair_fd;
             }
         }
         tv.tv_sec = 0;
@@ -2153,11 +2384,12 @@ static void badge_rx_task(void *arg)
                 xSemaphoreGive(s_mtx);
             }
             dashcdg_platform_hw_karaoke_dac_pad_partial_chunk();
-            badge_rx_maybe_send_v4_stats(fd, idle_now_ms);
+            badge_rx_maybe_send_v4_stats(idle_now_ms);
             continue;
         }
-        if (!FD_ISSET(fd, &rfds) && !(stats_fd >= 0 && FD_ISSET(stats_fd, &rfds))) {
-            badge_rx_maybe_send_v4_stats(fd, dashcdg_clock_now_ms());
+        if (!FD_ISSET(fd, &rfds) && !(stats_fd >= 0 && FD_ISSET(stats_fd, &rfds)) &&
+            !(repair_fd >= 0 && FD_ISSET(repair_fd, &rfds))) {
+            badge_rx_maybe_send_v4_stats(dashcdg_clock_now_ms());
             continue;
         }
 
@@ -2204,6 +2436,25 @@ static void badge_rx_task(void *arg)
                 }
             }
         }
+        if (repair_fd >= 0 && FD_ISSET(repair_fd, &rfds)) {
+            for (;;) {
+                struct sockaddr_in src;
+                socklen_t srclen = (socklen_t)sizeof(src);
+                ssize_t n = recvfrom(repair_fd, buf, sizeof(buf), MSG_DONTWAIT, (struct sockaddr *)&src, &srclen);
+
+                if (n <= 0) {
+                    break;
+                }
+                if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
+                    continue;
+                }
+                if (src.sin_family == AF_INET && badge_rx_ipv4_is_unicast_src(src.sin_addr.s_addr)) {
+                    s_v4_tx_src_ipv4 = src.sin_addr.s_addr;
+                }
+                badge_rx_process_repair_datagram(buf, (size_t)n);
+                xSemaphoreGive(s_mtx);
+            }
+        }
         {
             const uint64_t post_burst_ms = dashcdg_clock_now_ms();
 
@@ -2213,7 +2464,7 @@ static void badge_rx_task(void *arg)
                 xSemaphoreGive(s_mtx);
             }
         }
-        badge_rx_maybe_send_v4_stats(fd, dashcdg_clock_now_ms());
+        badge_rx_maybe_send_v4_stats(dashcdg_clock_now_ms());
     }
 
     ESP_LOGI(TAG, "rx task exit");
@@ -2314,6 +2565,7 @@ void dashcdg_badge_rx_start(void)
     if (s_mtx == NULL) {
         s_mtx = xSemaphoreCreateMutex();
     }
+    dashcdg_badge_rx_apply_rx_tuning_prefs();
 
     memset(&s_stats, 0, sizeof(s_stats));
     {
@@ -2325,7 +2577,7 @@ void dashcdg_badge_rx_start(void)
         s_audio_decode_enabled = (a != 0U) ? 1U : 0U;
     }
     memset(s_stats.last_error, 0, sizeof(s_stats.last_error));
-    s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM;
+    s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM_EFFECTIVE;
     if (s_audio_decode_enabled) {
         (void)badge_rx_ensure_audio_jitter();
     } else {
@@ -2426,6 +2678,17 @@ void dashcdg_badge_rx_start(void)
         ESP_LOGW(TAG, "stats multicast socket open failed: %s", s_stats.last_error);
     }
 
+    s_uplink_sock = badge_rx_open_uplink_socket();
+    if (s_uplink_sock < 0) {
+        ESP_LOGW(TAG, "v4 control uplink socket failed (stats/NACK share stats recv socket if open): %s", s_stats.last_error);
+    }
+
+    s_repair_sock = open_multicast_rx_on_port((uint16_t)BADGE_RX_REPAIR_PORT);
+    if (s_repair_sock < 0) {
+        ESP_LOGW(TAG, "repair multicast socket open failed (FEC repair on split port will be missing): %s",
+                 s_stats.last_error);
+    }
+
     s_run = 1;
 #if CONFIG_FREERTOS_UNICORE
     if (xTaskCreate(badge_rx_task, "badge_rx", BADGE_RX_STACK, NULL, BADGE_RX_TASK_PRIO, &s_rx_task) != pdPASS) {
@@ -2440,11 +2703,20 @@ void dashcdg_badge_rx_start(void)
             close(s_stats_sock);
             s_stats_sock = -1;
         }
+        if (s_repair_sock >= 0) {
+            close(s_repair_sock);
+            s_repair_sock = -1;
+        }
+        if (s_uplink_sock >= 0) {
+            close(s_uplink_sock);
+            s_uplink_sock = -1;
+        }
         snprintf(s_stats.last_error, sizeof(s_stats.last_error), "xTaskCreate failed");
         ESP_LOGE(TAG, "%s", s_stats.last_error);
         badge_rx_free_heap();
     } else {
-        ESP_LOGI(TAG, "listening UDP %s:%d media, stats:%d", BADGE_RX_MCAST_ADDR, BADGE_RX_PORT, BADGE_RX_TX_STATS_PORT);
+        ESP_LOGI(TAG, "listening UDP %s:%d media, repair:%d, stats:%d", BADGE_RX_MCAST_ADDR, BADGE_RX_PORT,
+                 BADGE_RX_REPAIR_PORT, BADGE_RX_TX_STATS_PORT);
     }
 }
 
@@ -2465,6 +2737,17 @@ void dashcdg_badge_rx_stop(void)
     fd = (int)s_stats_sock;
     if (fd >= 0) {
         s_stats_sock = -1;
+        badge_rx_drop_multicast_membership(fd);
+        close(fd);
+    }
+    fd = (int)s_uplink_sock;
+    if (fd >= 0) {
+        s_uplink_sock = -1;
+        close(fd);
+    }
+    fd = (int)s_repair_sock;
+    if (fd >= 0) {
+        s_repair_sock = -1;
         badge_rx_drop_multicast_membership(fd);
         close(fd);
     }
@@ -2538,6 +2821,23 @@ void dashcdg_badge_rx_get_decode_enabled(bool *video_on, bool *audio_on)
     xSemaphoreGive(s_mtx);
 }
 
+void dashcdg_badge_rx_apply_rx_tuning_prefs(void)
+{
+    uint8_t n = 1U;
+    uint8_t stx = 1U;
+
+    (void)dashcdg_badge_prefs_load_karaoke_repair_nack(&n);
+    (void)dashcdg_badge_prefs_load_karaoke_v4_stats_tx(&stx);
+    if (s_mtx != NULL && xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) == pdTRUE) {
+        s_repair_nack_enabled = (n != 0U) ? 1U : 0U;
+        s_v4_stats_tx_enabled = (stx != 0U) ? 1U : 0U;
+        xSemaphoreGive(s_mtx);
+    } else {
+        s_repair_nack_enabled = (n != 0U) ? 1U : 0U;
+        s_v4_stats_tx_enabled = (stx != 0U) ? 1U : 0U;
+    }
+}
+
 void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
 {
     if (out == NULL) {
@@ -2551,11 +2851,22 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
             s_stats.jb_next_packet_index = 0;
             s_stats.jb_pending_slots = 0;
         }
+        if (s_audio_jb != NULL) {
+            s_stats.audio_jb_pending_slots = (uint32_t)dashcdg_audio_jitter_occupied_count(s_audio_jb);
+        } else {
+            s_stats.audio_jb_pending_slots = 0U;
+        }
+        s_stats.repair_nack_enabled = s_repair_nack_enabled;
+        s_stats.v4_stats_tx_enabled = s_v4_stats_tx_enabled;
+        s_stats.v4_repair_rx_socket_ok = (s_repair_sock >= 0) ? 1U : 0U;
+        s_stats.v4_control_uplink_ok = (s_uplink_sock >= 0) ? 1U : 0U;
         *out = s_stats;
         xSemaphoreGive(s_mtx);
     } else {
         *out = s_stats;
     }
+    out->v4_repair_rx_socket_ok = (s_repair_sock >= 0) ? 1U : 0U;
+    out->v4_control_uplink_ok = (s_uplink_sock >= 0) ? 1U : 0U;
     out->cdg_blit_max_y = s_cdg_blit_max_y;
     out->rx_task_running = (s_rx_task != NULL) ? 1U : 0U;
     snprintf(out->sta_ip, sizeof(out->sta_ip), "--");
@@ -2685,9 +2996,9 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
         "parse_fail %lu\n"
         "v4 session %lu  clock %lu\n"
         "audio rx %lu  out %lu  dec_fail %lu  dac_begin_fail %lu  unsup %lu\n"
-        "delta %lu  anchor %lu  load %lu\n"
+        "delta %lu  anchor %lu  anch_rej %lu  load %lu\n"
         "rwin %lu  fwd %lu  rev %lu\n"
-        "nack_tx %lu\n"
+        "nack ok %lu att %lu fail %lu thr %lu\n"
         "rrec %lu  rfail %lu\n"
         "wire miss_est %llu  reorder %lu\n"
         "miss by type a/c/clk/rep %lu/%lu/%lu/%lu\n"
@@ -2719,15 +3030,18 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
             ? "on (bss CDG+jitter + scratch)"
 #endif
             : "off",
-        (st.tx_stats_dest[0] && st.tx_stats_dest[0] != '-') ? st.tx_stats_dest : "(wire src?)", BADGE_RX_PORT,
+        (st.tx_stats_dest[0] && st.tx_stats_dest[0] != '-') ? st.tx_stats_dest : "(wire src?)", BADGE_RX_TX_STATS_PORT,
         (unsigned long)st.v4_rx_stats_sent, (unsigned)st.cdg_blit_max_y, (unsigned long)st.jb_evict_rounds,
         (unsigned long)st.cdg_delta_insert_fail, (unsigned long long)st.datagrams, (unsigned long)st.parse_failures,
         (unsigned long)st.v4_session_count, (unsigned long)st.v4_clock_count, (unsigned long)st.v4_audio_chunk_rx,
         (unsigned long)st.v4_audio_frames_out, (unsigned long)st.v4_audio_decode_fail,
         (unsigned long)st.v4_audio_dac_begin_fail, (unsigned long)st.v4_audio_unsupported_codec,
-        (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks, (unsigned long)st.v4_loading_screen_count,
+        (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks, (unsigned long)st.v4_anchor_rejected_behind,
+        (unsigned long)st.v4_loading_screen_count,
         (unsigned long)st.v4_video_repair_rx_packets, (unsigned long)st.v4_video_repair_rx_forward,
         (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long)st.v4_repair_nack_tx,
+        (unsigned long)st.v4_repair_nack_attempt, (unsigned long)st.v4_repair_nack_send_fail,
+        (unsigned long)st.v4_repair_nack_throttled,
         (unsigned long)st.v4_video_repair_recovered,
         (unsigned long)st.v4_video_repair_failed, (unsigned long long)st.wire_missing_estimate,
         (unsigned long)st.wire_reorder_events, (unsigned long)st.audio_missing_estimate, (unsigned long)st.cdg_missing_estimate,

@@ -126,8 +126,10 @@ flowchart TD
 The current RX includes a CPU isolation mode:
 
 - CLI: `--rx-drop-audio` or `--no-audio-decode`
-- Hotkey: `D`
+- Hotkey: `D` (toggles decode on/off each time)
 - Behavior: stop/flush audio output, clear audio jitter/FEC/decoder/SRC state, drop incoming audio chunks, keep video/sync alive.
+
+**Win32 GDI note:** `D` is a *toggle*. If decode-drop is left **on**, the HUD audio field shows `DROP(decode-off)` while datagram/audio counters can still advance (video and network stack stay live). A common trap was Windows **key-repeat**: the GDI preview used to forward every `WM_KEYDOWN`, so a slightly long press could fire **three** toggles from one physical tap and land on **decode disabled** — silence after a second or two while “everything else looked fine.” The Win32 GDI path now ignores autorepeat (first transition per physical key-down only).
 
 Embedded use:
 

@@ -65,10 +65,8 @@ enum dashcdg_cdg_batch_drain_step {
 
 void dashcdg_cdg_batch_jitter_init(struct dashcdg_cdg_batch_jitter_buffer *jb);
 void dashcdg_cdg_batch_jitter_clear(struct dashcdg_cdg_batch_jitter_buffer *jb);
-#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
 int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t slot_count);
 void dashcdg_cdg_batch_jitter_release(struct dashcdg_cdg_batch_jitter_buffer *jb);
-#endif
 size_t dashcdg_cdg_batch_jitter_capacity(const struct dashcdg_cdg_batch_jitter_buffer *jb);
 
 int dashcdg_cdg_batch_jitter_insert(

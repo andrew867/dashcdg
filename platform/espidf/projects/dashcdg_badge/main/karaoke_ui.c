@@ -23,6 +23,10 @@
 static const char *TAG = "karaoke_ui";
 
 static lv_timer_t *s_tick;
+/** Deferred lv_obj_del(modal): avoids LVGL reentrancy crashes closing from CLICKED. */
+static lv_timer_t *s_mcast_modal_close_timer;
+static lv_obj_t *s_mcast_modal_close_root;
+
 /** Modal dashboard cards; refreshed while open (NULL when closed). */
 static lv_obj_t *s_mcast_card_net;
 static lv_obj_t *s_mcast_card_stream;
@@ -49,6 +53,8 @@ static uint64_t s_last_q_datagrams;
 static uint64_t s_last_q_wire_miss;
 static uint32_t s_last_q_cdg_miss;
 static uint32_t s_last_q_wire_reorder;
+static uint32_t s_last_q_parse_fail;
+static uint32_t s_last_q_repair_fail;
 static uint32_t s_last_q_miss_per_10k;
 static uint32_t s_last_q_reorder_per_10k;
 static uint32_t s_loss_hist_per_10k[5];
@@ -168,8 +174,10 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
     const bool rx_on = (st->rx_task_running != 0) ||
                        (st->datagrams > 0U) ||
                        (st->v4_clock_count > 0U) ||
-                       (st->v4_video_delta_count > 0U);
-    const bool joined = (st->igmp_joined != 0) || (st->datagrams > 0U);
+                       (st->v4_video_delta_count > 0U) ||
+                       (st->parse_failures > 0U) ||
+                       (st->cdg_missing_estimate > 0U);
+    const bool joined = (st->igmp_joined != 0) || (st->datagrams > 0U) || (st->v4_clock_count > 0U);
     const bool clock = (st->have_clock != 0) || (st->v4_clock_count > 0U);
     uint64_t now_ms = dashcdg_clock_now_ms();
     static uint64_t s_prev_datagrams;
@@ -198,16 +206,23 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         s_last_q_wire_miss = st->wire_missing_estimate;
         s_last_q_cdg_miss = st->cdg_missing_estimate;
         s_last_q_wire_reorder = st->wire_reorder_events;
+        s_last_q_parse_fail = st->parse_failures;
+        s_last_q_repair_fail = st->v4_video_repair_failed;
     } else if ((now_ms - s_last_q_sample_ms) >= 2000U &&
             st->datagrams >= s_last_q_datagrams &&
             st->wire_missing_estimate >= s_last_q_wire_miss &&
             st->cdg_missing_estimate >= s_last_q_cdg_miss &&
             st->wire_reorder_events >= s_last_q_wire_reorder &&
+            st->parse_failures >= s_last_q_parse_fail &&
+            st->v4_video_repair_failed >= s_last_q_repair_fail &&
             st->datagrams > s_last_q_datagrams) {
         uint64_t dg = st->datagrams - s_last_q_datagrams;
         uint64_t miss = st->wire_missing_estimate - s_last_q_wire_miss;
         uint32_t cdg_miss = st->cdg_missing_estimate - s_last_q_cdg_miss;
         uint32_t reord = st->wire_reorder_events - s_last_q_wire_reorder;
+        uint32_t parse_fail = st->parse_failures - s_last_q_parse_fail;
+        uint32_t repair_fail = st->v4_video_repair_failed - s_last_q_repair_fail;
+        uint32_t decode_bad_per_10k = (uint32_t)((((uint64_t)parse_fail + (uint64_t)repair_fail) * 10000ULL) / dg);
 
         miss_per_10k = (uint32_t)((miss * 10000ULL) / dg);
         {
@@ -215,6 +230,9 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
             if (cdg_miss_per_10k > miss_per_10k) {
                 miss_per_10k = cdg_miss_per_10k;
             }
+        }
+        if (decode_bad_per_10k > miss_per_10k) {
+            miss_per_10k = decode_bad_per_10k;
         }
         reorder_per_10k = (uint32_t)(((uint64_t)reord * 10000ULL) / dg);
         if (miss_per_10k > 10000U) {
@@ -239,6 +257,8 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         s_last_q_wire_miss = st->wire_missing_estimate;
         s_last_q_cdg_miss = st->cdg_missing_estimate;
         s_last_q_wire_reorder = st->wire_reorder_events;
+        s_last_q_parse_fail = st->parse_failures;
+        s_last_q_repair_fail = st->v4_video_repair_failed;
     } else if ((now_ms - s_last_q_sample_ms) >= 2000U) {
         /* Counter reset/restart or no progress: re-baseline without producing a bogus spike. */
         s_last_q_sample_ms = now_ms;
@@ -246,6 +266,8 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         s_last_q_wire_miss = st->wire_missing_estimate;
         s_last_q_cdg_miss = st->cdg_missing_estimate;
         s_last_q_wire_reorder = st->wire_reorder_events;
+        s_last_q_parse_fail = st->parse_failures;
+        s_last_q_repair_fail = st->v4_video_repair_failed;
     }
     if (miss_per_10k == 0U && reorder_per_10k == 0U) {
         miss_per_10k = s_last_q_miss_per_10k;
@@ -254,6 +276,15 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
     /* Reorder-heavy periods often look like corruption even before strict missing estimate rises. */
     if (miss_per_10k == 0U && reorder_per_10k > 0U) {
         miss_per_10k = reorder_per_10k / 2U;
+    }
+    if (miss_per_10k == 0U && st->datagrams > 0U &&
+            (st->cdg_missing_estimate > 0U || st->parse_failures > 0U || st->v4_video_repair_failed > 0U)) {
+        uint64_t derived = (((uint64_t)st->cdg_missing_estimate + (uint64_t)st->parse_failures +
+                            (uint64_t)st->v4_video_repair_failed) * 10000ULL) / st->datagrams;
+        if (derived > 10000ULL) {
+            derived = 10000ULL;
+        }
+        miss_per_10k = (uint32_t)derived;
     }
 
     if (st->jb_pending_slots > 0U) {
@@ -334,11 +365,13 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         sym = LV_SYMBOL_OK;
         lcol = okc;
     }
-    char line[48];
+    char line[72];
     if (!rx_on || !joined) {
         snprintf(line, sizeof(line), "%s --.-%% loss", sym);
     } else {
         uint32_t loss_for_display = miss_per_10k;
+        unsigned ap = 0U;
+        unsigned vp = 0U;
         if (s_loss_hist_count > 0U) {
             loss_for_display = s_loss_hist_sum_per_10k / (uint32_t)s_loss_hist_count;
         }
@@ -346,18 +379,62 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
             loss_for_display = 10000U;
         }
         uint32_t loss_tenths = (loss_for_display + 5U) / 10U; /* per-10k to percent with one decimal */
-        snprintf(line, sizeof(line), "%s %u.%u%% loss", sym, (unsigned)(loss_tenths / 10U), (unsigned)(loss_tenths % 10U));
+        if (st->audio_slots_capacity > 0U) {
+            ap = (unsigned)((st->audio_jb_pending_slots * 100U) / (uint32_t)st->audio_slots_capacity);
+        }
+        if (st->video_slots_capacity > 0U) {
+            vp = (unsigned)(((uint32_t)st->jb_pending_slots * 100U) / (uint32_t)st->video_slots_capacity);
+        }
+        snprintf(line, sizeof(line), "%s %u.%u%% a%u%% v%u%%", sym, (unsigned)(loss_tenths / 10U),
+                 (unsigned)(loss_tenths % 10U), ap, vp);
     }
     karaoke_status_bar_set_pill(s_bar_line, lcol);
     lv_label_set_text(s_bar_line, line);
     lv_obj_set_style_text_color(s_bar_line, lcol, 0);
 }
 
-static void mcast_modal_close(void)
+static void mcast_modal_cancel_pending_close(void)
 {
-    if (s_mcast_modal_root && lv_obj_is_valid(s_mcast_modal_root)) {
-        lv_obj_del(s_mcast_modal_root);
+    if (s_mcast_modal_close_timer != NULL) {
+        lv_timer_del(s_mcast_modal_close_timer);
+        s_mcast_modal_close_timer = NULL;
     }
+    if (s_mcast_modal_close_root != NULL) {
+        if (lv_obj_is_valid(s_mcast_modal_close_root)) {
+            lv_obj_del(s_mcast_modal_close_root);
+        }
+        s_mcast_modal_close_root = NULL;
+    }
+}
+
+static void mcast_modal_close_timer_cb(lv_timer_t *t)
+{
+    lv_obj_t *r = s_mcast_modal_close_root;
+
+    s_mcast_modal_close_timer = NULL;
+    s_mcast_modal_close_root = NULL;
+    lv_timer_del(t);
+    if (r != NULL && lv_obj_is_valid(r)) {
+        lv_obj_del(r);
+    }
+    if (s_cdg_slot != NULL && lv_obj_is_valid(s_cdg_slot)) {
+        lv_obj_invalidate(s_cdg_slot);
+        lv_obj_t *fr = lv_obj_get_parent(s_cdg_slot);
+        if (fr != NULL && lv_obj_is_valid(fr)) {
+            lv_obj_invalidate(fr);
+        }
+    }
+}
+
+/** Close dashboard from a button/input callback: defer delete to the next LVGL timer tick. */
+static void mcast_modal_close_deferred(void)
+{
+    lv_obj_t *root = s_mcast_modal_root;
+
+    if (root == NULL) {
+        return;
+    }
+    mcast_modal_cancel_pending_close();
     s_mcast_modal_root = NULL;
     s_mcast_card_net = NULL;
     s_mcast_card_stream = NULL;
@@ -365,11 +442,33 @@ static void mcast_modal_close(void)
     s_mcast_card_memory = NULL;
     s_mcast_card_system = NULL;
     s_mcast_card_song = NULL;
-    /* CDG overlay blit bypasses LVGL; after close, ask LVGL to repaint the slot area. */
-    if (s_cdg_slot && lv_obj_is_valid(s_cdg_slot)) {
+    s_mcast_modal_body_ticks = 0U;
+    s_mcast_modal_close_root = root;
+    s_mcast_modal_close_timer = lv_timer_create(mcast_modal_close_timer_cb, 1, NULL);
+}
+
+/** Synchronous close (teardown / navigation): cancel any deferred delete then remove modal. */
+static void mcast_modal_close_sync(void)
+{
+    lv_obj_t *root;
+
+    mcast_modal_cancel_pending_close();
+    root = s_mcast_modal_root;
+    s_mcast_modal_root = NULL;
+    s_mcast_card_net = NULL;
+    s_mcast_card_stream = NULL;
+    s_mcast_card_repair = NULL;
+    s_mcast_card_memory = NULL;
+    s_mcast_card_system = NULL;
+    s_mcast_card_song = NULL;
+    s_mcast_modal_body_ticks = 0U;
+    if (root != NULL && lv_obj_is_valid(root)) {
+        lv_obj_del(root);
+    }
+    if (s_cdg_slot != NULL && lv_obj_is_valid(s_cdg_slot)) {
         lv_obj_invalidate(s_cdg_slot);
         lv_obj_t *fr = lv_obj_get_parent(s_cdg_slot);
-        if (fr && lv_obj_is_valid(fr)) {
+        if (fr != NULL && lv_obj_is_valid(fr)) {
             lv_obj_invalidate(fr);
         }
     }
@@ -378,15 +477,22 @@ static void mcast_modal_close(void)
 /** CDG is drawn with draw_bitmap on the panel; while the modal exists it must not run or it paints over the dialog. */
 static bool karaoke_mcast_modal_is_open(void)
 {
-    return s_mcast_modal_root != NULL && lv_obj_is_valid(s_mcast_modal_root);
+    if (s_mcast_modal_root != NULL && lv_obj_is_valid(s_mcast_modal_root)) {
+        return true;
+    }
+    /* Deferred close: root still on-screen until one-shot timer runs. */
+    if (s_mcast_modal_close_root != NULL && lv_obj_is_valid(s_mcast_modal_close_root)) {
+        return true;
+    }
+    return false;
 }
 
 void dashcdg_karaoke_ui_teardown(void)
 {
     dashcdg_platform_hw_set_cdg_stream_ok(false);
     dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_HOME);
-    mcast_modal_close();
     if (lvgl_port_lock(1000)) {
+        mcast_modal_close_sync();
         if (s_tick) {
             lv_timer_del(s_tick);
             s_tick = NULL;
@@ -412,6 +518,8 @@ void dashcdg_karaoke_ui_teardown(void)
     s_last_q_wire_miss = 0U;
     s_last_q_cdg_miss = 0U;
     s_last_q_wire_reorder = 0U;
+    s_last_q_parse_fail = 0U;
+    s_last_q_repair_fail = 0U;
     s_last_q_miss_per_10k = 0U;
     s_last_q_reorder_per_10k = 0U;
     memset(s_loss_hist_per_10k, 0, sizeof(s_loss_hist_per_10k));
@@ -421,47 +529,39 @@ void dashcdg_karaoke_ui_teardown(void)
     s_status_slow_deadline_ms = 0U;
 }
 
-static void on_mcast_scrim_clicked(lv_event_t *e)
-{
-    (void)e;
-    mcast_modal_close();
-}
-
-static void on_mcast_panel_clicked(lv_event_t *e)
-{
-    lv_event_stop_bubbling(e);
-}
-
 static void on_mcast_ok(lv_event_t *e)
 {
     (void)e;
-    mcast_modal_close();
+    mcast_modal_close_deferred();
 }
 
 static lv_obj_t *karaoke_mcast_dashboard_card(lv_obj_t *parent, const char *title)
 {
     lv_obj_t *card = lv_obj_create(parent);
-    lv_obj_set_width(card, lv_pct(48));
-    lv_obj_set_height(card, 84);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x0b1210), 0);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x0b1320), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(card, lv_color_hex(0x224c3d), 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_set_style_radius(card, 5, 0);
-    lv_obj_set_style_pad_all(card, 6, 0);
-    lv_obj_set_style_pad_row(card, 4, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x2f7cff), 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_set_style_pad_all(card, 9, 0);
+    lv_obj_set_style_pad_row(card, 6, 0);
+    lv_obj_set_style_shadow_width(card, 14, 0);
+    lv_obj_set_style_shadow_opa(card, LV_OPA_20, 0);
+    lv_obj_set_style_shadow_color(card, lv_color_hex(0x2266dd), 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     dashcdg_ui_no_scroll(card);
 
     lv_obj_t *hdr = lv_label_create(card);
     lv_label_set_text(hdr, title);
-    lv_obj_set_style_text_color(hdr, lv_color_hex(0x66ffcc), 0);
+    lv_obj_set_style_text_color(hdr, lv_color_hex(0x8fd8ff), 0);
 
     lv_obj_t *body = lv_label_create(card);
     lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_width(body, lv_pct(100));
-    lv_obj_set_style_text_color(body, lv_color_hex(0xbadccf), 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xd7f3ff), 0);
     lv_label_set_text(body, "--");
     return body;
 }
@@ -469,12 +569,13 @@ static lv_obj_t *karaoke_mcast_dashboard_card(lv_obj_t *parent, const char *titl
 static void karaoke_mcast_modal_update_dashboard(void)
 {
     dashcdg_badge_rx_stats_t st;
-    char line[224];
+    char line[288];
     unsigned loss_x100 = 0U;
     unsigned long heap_free = (unsigned long)esp_get_free_heap_size();
     unsigned long heap_min = (unsigned long)esp_get_minimum_free_heap_size();
     unsigned long int_largest = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    unsigned video_occ = 0U;
+    unsigned audio_occ_pct = 0U;
+    unsigned video_occ_pct = 0U;
     const char *profile = "bal";
 
     if (!(s_mcast_card_net && s_mcast_card_stream && s_mcast_card_repair && s_mcast_card_memory && s_mcast_card_system &&
@@ -489,7 +590,12 @@ static void karaoke_mcast_modal_update_dashboard(void)
         }
         loss_x100 = (unsigned)lx100;
     }
-    video_occ = st.video_slots_capacity > 0U ? (unsigned)st.jb_pending_slots : 0U;
+    if (st.audio_slots_capacity > 0U) {
+        audio_occ_pct = (unsigned)((st.audio_jb_pending_slots * 100U) / (uint32_t)st.audio_slots_capacity);
+    }
+    if (st.video_slots_capacity > 0U) {
+        video_occ_pct = (unsigned)(((uint32_t)st.jb_pending_slots * 100U) / (uint32_t)st.video_slots_capacity);
+    }
     switch (st.memory_profile) {
     case 0:
         profile = "min";
@@ -510,22 +616,29 @@ static void karaoke_mcast_modal_update_dashboard(void)
              st.igmp_joined ? "joined" : "no", (unsigned long)st.v4_rx_stats_sent, (unsigned long)st.v4_rx_stats_peer_packets);
     lv_label_set_text(s_mcast_card_net, line);
 
-    snprintf(line, sizeof(line), "loss %u.%02u%% reorder %lu\nclk %lu delta %lu anchor %lu\naudio rx/out %lu/%lu",
+    snprintf(line, sizeof(line), "loss %u.%02u%% reorder %lu\nclk %lu d %lu anch %lu rej %lu\naudio rx/out %lu/%lu",
              (unsigned)(loss_x100 / 100U), (unsigned)(loss_x100 % 100U), (unsigned long)st.wire_reorder_events,
              (unsigned long)st.v4_clock_count, (unsigned long)st.v4_video_delta_count, (unsigned long)st.v4_anchor_chunks,
-             (unsigned long)st.v4_audio_chunk_rx, (unsigned long)st.v4_audio_frames_out);
+             (unsigned long)st.v4_anchor_rejected_behind, (unsigned long)st.v4_audio_chunk_rx,
+             (unsigned long)st.v4_audio_frames_out);
     lv_label_set_text(s_mcast_card_stream, line);
 
-    snprintf(line, sizeof(line), "nack tx %lu\nrepair pkt f/r %lu/%lu\nrecover fail %lu/%lu\nmiss rep %lu",
-             (unsigned long)st.v4_repair_nack_tx, (unsigned long)st.v4_video_repair_rx_forward,
-             (unsigned long)st.v4_video_repair_rx_reverse, (unsigned long)st.v4_video_repair_recovered,
-             (unsigned long)st.v4_video_repair_failed, (unsigned long)st.repair_missing_estimate);
+    snprintf(line, sizeof(line), "ctl tx %s  fec %s\nnack ok %lu att %lu fail %lu thr %lu req %s\nrepair f/r %lu/%lu\nok/fail %lu/%lu\nmiss %lu",
+             st.v4_control_uplink_ok ? "ded" : "24685rx", st.v4_repair_rx_socket_ok ? "24686 ok" : "24686 off",
+             (unsigned long)st.v4_repair_nack_tx,
+             (unsigned long)st.v4_repair_nack_attempt, (unsigned long)st.v4_repair_nack_send_fail,
+             (unsigned long)st.v4_repair_nack_throttled,
+             st.repair_nack_enabled ? "on" : "off", (unsigned long)st.v4_video_repair_rx_forward,
+             (unsigned long)st.v4_video_repair_rx_reverse,
+             (unsigned long)st.v4_video_repair_recovered, (unsigned long)st.v4_video_repair_failed,
+             (unsigned long)st.repair_missing_estimate);
     lv_label_set_text(s_mcast_card_repair, line);
 
-    snprintf(line, sizeof(line), "profile %s sw %lu\nslots a/v %u/%u\npending v %u evict %lu\nresize fail %lu",
+    snprintf(line, sizeof(line), "profile %s sw %lu\nslots cap a/v %u/%u\njb fill a/v %u%%/%u%% pend %u/%zu\nevict %lu rsz fail %lu\nstats tx %s",
              profile, (unsigned long)st.memory_profile_switches, (unsigned)st.audio_slots_capacity,
-             (unsigned)st.video_slots_capacity, (unsigned)video_occ, (unsigned long)st.jb_evict_rounds,
-             (unsigned long)st.memory_profile_resize_failures);
+             (unsigned)st.video_slots_capacity, audio_occ_pct, video_occ_pct, (unsigned)st.audio_jb_pending_slots,
+             st.jb_pending_slots, (unsigned long)st.jb_evict_rounds, (unsigned long)st.memory_profile_resize_failures,
+             st.v4_stats_tx_enabled ? "on" : "off");
     lv_label_set_text(s_mcast_card_memory, line);
 
     snprintf(line, sizeof(line), "heap free/min %lu/%lu\nint largest %lu\nparse fail %lu\nseq %llu",
@@ -544,53 +657,67 @@ static void on_info_btn(lv_event_t *e)
     if (karaoke_mcast_modal_is_open()) {
         return;
     }
+    mcast_modal_cancel_pending_close();
 
     lv_obj_t *layer = lv_layer_top();
     lv_obj_t *root = lv_obj_create(layer);
     lv_obj_set_size(root, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x080a09), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(0x03060f), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     lv_obj_set_style_opa(root, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(root, 0, 0);
-    lv_obj_add_event_cb(root, on_mcast_scrim_clicked, LV_EVENT_CLICKED, NULL);
-    dashcdg_ui_no_scroll(root);
+    lv_obj_set_style_pad_all(root, 8, 0);
+    lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     s_mcast_modal_root = root;
 
-    lv_obj_t *panel = lv_obj_create(root);
-    lv_obj_set_width(panel, lv_pct(96));
-    lv_obj_set_height(panel, lv_pct(92));
-    lv_obj_center(panel);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05080a), 0);
-    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_opa(panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x00aa88), 0);
-    lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_pad_all(panel, 10, 0);
-    lv_obj_set_style_radius(panel, 4, 0);
-    lv_obj_set_style_shadow_width(panel, 0, 0);
-    lv_obj_add_event_cb(panel, on_mcast_panel_clicked, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(panel, 6, 0);
-    dashcdg_ui_no_scroll(panel);
-    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *hdr = lv_obj_create(root);
+    lv_obj_set_width(hdr, lv_pct(100));
+    lv_obj_set_height(hdr, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x081427), 0);
+    lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(hdr, lv_color_hex(0x2f7cff), 0);
+    lv_obj_set_style_border_width(hdr, 1, 0);
+    lv_obj_set_style_radius(hdr, 8, 0);
+    lv_obj_set_style_pad_all(hdr, 8, 0);
+    lv_obj_set_style_pad_column(hdr, 8, 0);
+    lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    dashcdg_ui_no_scroll(hdr);
 
-    lv_obj_t *mtitle = lv_label_create(panel);
-    lv_label_set_text(mtitle, "[ RX DASHBOARD ]");
-    lv_obj_set_style_text_color(mtitle, lv_color_hex(0x66ffcc), 0);
+    lv_obj_t *mtitle = lv_label_create(hdr);
+    lv_label_set_text(mtitle, LV_SYMBOL_EYE_OPEN " CDG RX LIVE DASHBOARD");
+    lv_obj_set_style_text_color(mtitle, lv_color_hex(0x8fd8ff), 0);
 
-    lv_obj_t *board = lv_obj_create(panel);
+    lv_obj_t *b = lv_button_create(hdr);
+    lv_obj_set_width(b, 92);
+    lv_obj_set_height(b, 32);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x132944), 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(0x6ab6ff), 0);
+    lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_t *bl = lv_label_create(b);
+    lv_label_set_text(bl, LV_SYMBOL_CLOSE " close");
+    lv_obj_set_style_text_color(bl, lv_color_hex(0xd7f3ff), 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(b, on_mcast_ok, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *board = lv_obj_create(root);
     lv_obj_set_width(board, lv_pct(100));
     lv_obj_set_flex_grow(board, 1);
     lv_obj_set_style_border_width(board, 0, 0);
-    lv_obj_set_style_bg_opa(board, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(board, 2, 0);
-    lv_obj_set_style_pad_row(board, 6, 0);
-    lv_obj_set_style_pad_column(board, 6, 0);
-    lv_obj_set_flex_flow(board, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(board, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    dashcdg_ui_no_scroll(board);
+    lv_obj_set_style_bg_opa(board, LV_OPA_10, 0);
+    lv_obj_set_style_bg_color(board, lv_color_hex(0x04101f), 0);
+    lv_obj_set_style_radius(board, 8, 0);
+    lv_obj_set_style_pad_all(board, 6, 0);
+    lv_obj_set_style_pad_row(board, 7, 0);
+    lv_obj_set_style_pad_right(board, 12, 0);
+    lv_obj_set_flex_flow(board, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(board, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scrollbar_mode(board, LV_SCROLLBAR_MODE_ACTIVE);
+    lv_obj_set_scroll_dir(board, LV_DIR_VER);
+    lv_obj_add_flag(board, LV_OBJ_FLAG_SCROLLABLE);
 
     s_mcast_card_net = karaoke_mcast_dashboard_card(board, "NET");
     s_mcast_card_stream = karaoke_mcast_dashboard_card(board, "STREAM");
@@ -599,30 +726,7 @@ static void on_info_btn(lv_event_t *e)
     s_mcast_card_system = karaoke_mcast_dashboard_card(board, "SYSTEM");
     s_mcast_card_song = karaoke_mcast_dashboard_card(board, "SONG");
     karaoke_mcast_modal_update_dashboard();
-
-    lv_obj_t *row = lv_obj_create(panel);
-    lv_obj_set_width(row, lv_pct(100));
-    lv_obj_set_height(row, 32);
-    lv_obj_set_flex_grow(row, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *b = lv_button_create(row);
-    lv_obj_set_width(b, 72);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x0a1510), 0);
-    lv_obj_set_style_border_color(b, lv_color_hex(0x338866), 0);
-    lv_obj_set_style_border_width(b, 1, 0);
-    lv_obj_set_style_radius(b, 3, 0);
-    lv_obj_t *bl = lv_label_create(b);
-    lv_label_set_text(bl, "> ok");
-    lv_obj_set_style_text_color(bl, lv_color_hex(0x66ffcc), 0);
-    lv_obj_center(bl);
-    lv_obj_add_event_cb(b, on_mcast_ok, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_update_layout(panel);
+    lv_obj_update_layout(root);
     lv_obj_move_foreground(root);
 }
 

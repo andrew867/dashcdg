@@ -116,10 +116,8 @@ enum dashcdg_audio_drain_step {
 
 void dashcdg_audio_jitter_init(struct dashcdg_audio_jitter_buffer *jb);
 void dashcdg_audio_jitter_clear(struct dashcdg_audio_jitter_buffer *jb);
-#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
 int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t slot_count);
 void dashcdg_audio_jitter_release(struct dashcdg_audio_jitter_buffer *jb);
-#endif
 size_t dashcdg_audio_jitter_capacity(const struct dashcdg_audio_jitter_buffer *jb);
 
 int dashcdg_audio_jitter_insert(

@@ -29,3 +29,10 @@ esp_err_t dashcdg_badge_prefs_load_karaoke_video_decode(uint8_t *out_on);
 esp_err_t dashcdg_badge_prefs_save_karaoke_video_decode(uint8_t on);
 esp_err_t dashcdg_badge_prefs_load_karaoke_audio_decode(uint8_t *out_on);
 esp_err_t dashcdg_badge_prefs_save_karaoke_audio_decode(uint8_t on);
+
+/** v4 CDG repair: request parity retransmit from TX (default on). */
+esp_err_t dashcdg_badge_prefs_load_karaoke_repair_nack(uint8_t *out_on);
+esp_err_t dashcdg_badge_prefs_save_karaoke_repair_nack(uint8_t on);
+/** v4_rx_stats uplink to TX (default on; off saves airtime for soak tests). */
+esp_err_t dashcdg_badge_prefs_load_karaoke_v4_stats_tx(uint8_t *out_on);
+esp_err_t dashcdg_badge_prefs_save_karaoke_v4_stats_tx(uint8_t on);

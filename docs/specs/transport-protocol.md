@@ -333,6 +333,8 @@ Current implementation status:
 Desktop endpoint defaults:
 
 - TX and RX default to `239.255.77.77:24684`
+- `V4_RX_STATS` and PTP use the primary multicast group on the stats port (default `239.255.77.77:24685`) so all receivers can observe peers
+- `V4_REPAIR_NACK` uses multicast `239.255.77.78` on the same stats port when unicast to the encoder is unavailable (TX joins this group in multicast mode); embedded senders prefer unicast to the last seen media/repair source address
 - desktop tools also accept explicit IPv4 broadcast endpoints such as `192.168.0.255`
 
 ## Receiver behavior

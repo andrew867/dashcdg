@@ -67,6 +67,24 @@ static void on_audio_decode_sw(lv_event_t *e)
     apply_decode_toggles();
 }
 
+static void on_repair_nack_sw(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    dashcdg_platform_hw_notify_activity();
+    (void)dashcdg_badge_prefs_save_karaoke_repair_nack(on ? 1U : 0U);
+    dashcdg_badge_rx_apply_rx_tuning_prefs();
+}
+
+static void on_v4_stats_tx_sw(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    dashcdg_platform_hw_notify_activity();
+    (void)dashcdg_badge_prefs_save_karaoke_v4_stats_tx(on ? 1U : 0U);
+    dashcdg_badge_rx_apply_rx_tuning_prefs();
+}
+
 esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
 {
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_ERR_INVALID_ARG, TAG, "disp");
@@ -131,7 +149,7 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
     lv_obj_set_style_text_color(title, lv_color_hex(0xe8f0ec), 0);
 
     lv_obj_t *hint = lv_label_create(scroll);
-    lv_label_set_text(hint, "Disable audio/video decode to isolate Wi-Fi ingest, clock, and stats.");
+    lv_label_set_text(hint, "Decode off isolates Wi-Fi + clock. RX tuning: repair NACKs need TX FEC; stats uplink feeds desktop HUD.");
     lv_obj_set_width(hint, lv_pct(98));
     lv_label_set_long_mode(hint, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x6a7d74), 0);
@@ -152,8 +170,12 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
 
     uint8_t pref_video = 1U;
     uint8_t pref_audio = 1U;
+    uint8_t pref_nack = 1U;
+    uint8_t pref_stx = 1U;
     (void)dashcdg_badge_prefs_load_karaoke_video_decode(&pref_video);
     (void)dashcdg_badge_prefs_load_karaoke_audio_decode(&pref_audio);
+    (void)dashcdg_badge_prefs_load_karaoke_repair_nack(&pref_nack);
+    (void)dashcdg_badge_prefs_load_karaoke_v4_stats_tx(&pref_stx);
 
     lv_obj_t *video_row = lv_obj_create(box);
     lv_obj_set_width(video_row, lv_pct(100));
@@ -199,11 +221,69 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
     }
     lv_obj_add_event_cb(audio_sw, on_audio_decode_sw, LV_EVENT_VALUE_CHANGED, NULL);
 
+    lv_obj_t *tune_title = lv_label_create(scroll);
+    lv_label_set_text(tune_title, LV_SYMBOL_WIFI "  RX tuning (reliability)");
+    lv_obj_set_style_text_color(tune_title, lv_color_hex(0xe8f0ec), 0);
+
+    lv_obj_t *tune_box = lv_obj_create(scroll);
+    lv_obj_set_width(tune_box, lv_pct(100));
+    lv_obj_set_height(tune_box, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(tune_box, 12, 0);
+    lv_obj_set_style_border_width(tune_box, 1, 0);
+    lv_obj_set_style_border_color(tune_box, lv_color_hex(0x1e3a30), 0);
+    lv_obj_set_style_bg_color(tune_box, lv_color_hex(0x0a1012), 0);
+    lv_obj_set_style_bg_opa(tune_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(tune_box, 10, 0);
+    lv_obj_set_flex_flow(tune_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(tune_box, 12, 0);
+    ui_no_scroll(tune_box);
+
+    lv_obj_t *nack_row = lv_obj_create(tune_box);
+    lv_obj_set_width(nack_row, lv_pct(100));
+    lv_obj_set_height(nack_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(nack_row, 0, 0);
+    lv_obj_set_style_border_width(nack_row, 0, 0);
+    lv_obj_set_style_bg_opa(nack_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(nack_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(nack_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    ui_no_scroll(nack_row);
+    lv_obj_t *nack_lbl = lv_label_create(nack_row);
+    lv_label_set_text(nack_lbl, "CDG repair NACK");
+    lv_obj_set_style_text_color(nack_lbl, lv_color_hex(0xaabbcc), 0);
+    lv_obj_t *nack_sw = lv_switch_create(nack_row);
+    if (pref_nack != 0U) {
+        lv_obj_add_state(nack_sw, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(nack_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(nack_sw, on_repair_nack_sw, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *stx_row = lv_obj_create(tune_box);
+    lv_obj_set_width(stx_row, lv_pct(100));
+    lv_obj_set_height(stx_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(stx_row, 0, 0);
+    lv_obj_set_style_border_width(stx_row, 0, 0);
+    lv_obj_set_style_bg_opa(stx_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(stx_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(stx_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    ui_no_scroll(stx_row);
+    lv_obj_t *stx_lbl = lv_label_create(stx_row);
+    lv_label_set_text(stx_lbl, "TX stats uplink");
+    lv_obj_set_style_text_color(stx_lbl, lv_color_hex(0xaabbcc), 0);
+    lv_obj_t *stx_sw = lv_switch_create(stx_row);
+    if (pref_stx != 0U) {
+        lv_obj_add_state(stx_sw, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(stx_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(stx_sw, on_v4_stats_tx_sw, LV_EVENT_VALUE_CHANGED, NULL);
+
     lv_obj_update_layout(outer);
     lv_obj_invalidate(scr);
     lvgl_port_unlock();
 
     apply_decode_toggles();
+    dashcdg_badge_rx_apply_rx_tuning_prefs();
     dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_SETTINGS);
     return ESP_OK;
 }

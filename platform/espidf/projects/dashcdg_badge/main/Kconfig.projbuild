@@ -9,4 +9,52 @@ menu "DashCDG badge"
             reclaimed when leaving karaoke. Static .bss mode avoids that free and keeps buffers warm
             for quick re-entry; heap mode trades a bit of fragmentation risk for smaller idle firmware RAM.
 
+    config DASHCDG_BADGE_CDG_JB_HEADROOM_EXTRA
+        int "Extra CDG jitter headroom slots (0-12)"
+        range 0 12
+        default 0
+        help
+            Added to the CDG batch jitter headroom used for insert/evict pressure. Higher values keep
+            more empty slots for bursty Wi-Fi and reorder, at the cost of earlier evictions when the
+            ring is tight.
+
+    config DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+        bool "Adaptive throttle for v4 repair NACK uplink"
+        default y
+        help
+            Enforces a minimum time between repair NACK send attempts. The spacing grows when STA
+            RSSI is below a reference (weaker link), to cap uplink airtime and reduce self-induced
+            contention. PHY/MCS is not exposed on ESP32 in a portable way; RSSI is used as the link
+            quality proxy.
+
+    config DASHCDG_BADGE_REPAIR_NACK_MIN_GAP_MS
+        int "NACK min-spacing base (ms)"
+        depends on DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+        range 20 500
+        default 50
+
+    config DASHCDG_BADGE_REPAIR_NACK_MAX_GAP_MS
+        int "NACK min-spacing ceiling (ms)"
+        depends on DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+        range 50 800
+        default 400
+
+    config DASHCDG_BADGE_REPAIR_NACK_RSSI_REF_DB
+        int "RSSI reference (dBm); below this adds extra spacing"
+        depends on DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+        range -90 -40
+        default -65
+
+    config DASHCDG_BADGE_REPAIR_NACK_RSSI_EXTRA_MS_PER_DB
+        int "Extra ms per dB below RSSI reference"
+        depends on DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+        range 0 20
+        default 2
+
+    config DASHCDG_BADGE_REPAIR_NACK_RSSI_EXTRA_CAP_MS
+        int "Max extra ms from RSSI term"
+        depends on DASHCDG_BADGE_REPAIR_NACK_THROTTLE
+        range 0 400
+        default 200
+
 endmenu

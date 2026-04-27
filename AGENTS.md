@@ -22,9 +22,9 @@ v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from T
 
 4. **Narrowband DSP / switching** — Band-limited **48 kHz → 8 / 16 kHz** decimation, Lanczos / overlap SRC guards, startup skip-hold behavior for codec handoff vs cold join; **TX** ~80 Hz HPF + **~3 dB digital headroom** before narrowband encode; **Opus** encoder input uses the same Q15 gain for loudness parity; soft limiting on hot PCM where documented in **`pcm_rate_convert.c`**.
 
-5. **Playback timeline (`playback_base_*`)** — Cleared on cold audio reopen (**`!rx_audio_applied_valid`**), when session_info disables network audio, after **unpause resume**, and aligned with **`claim_audio_start`** so HUD does not sit at ~one frame (~20 ms) of queued audio.
+5. **Playback timeline (`playback_base_*`)** — Cleared on cold audio reopen (**`!rx_audio_applied_valid`**), when session_info disables network audio, and aligned with **`claim_audio_start`** so HUD does not sit at ~one frame (~20 ms) of queued audio.
 
-6. **Unpause** — **`dashcdg_rx_reset_live_media_after_resume_locked`** clears jitter, **re-seeks CDG reader into `live_state`** (snapshot gate otherwise blocked re-seed), resets decode priming, uses **warm** skip-hold, clears **`playback_base_*`**.
+6. **Unpause + stall recovery** — **`handle_v4_clock_sync` / `handle_clock_beacon`** call **`dashcdg_rx_rearm_live_video_after_unpause_locked`** plus **`dashcdg_rx_reprime_audio_after_host_underrun_locked`**. On **non-legacy** desktop builds, **dead backend**, **zero-buffer**, and **buffered-silent** auto-recovery use **`dashcdg_rx_rebuild_audio_decode_path_locked`** (same class of work as **`dashcdg_rx_configure_audio_locked`**: stop host stream, re-init ring, reopen device, re-prime jitter/decoders) so the RX does not stay silent until a manual **D** toggle.
 
 ## Observability
 

@@ -62,7 +62,15 @@ static LRESULT CALLBACK dashcdg_win32_gdi_wnd_proc(HWND hwnd, UINT msg, WPARAM w
             return 0;
         case WM_KEYDOWN:
             if (view != NULL && view->on_key != NULL) {
-                view->on_key(view->key_user, (unsigned) wparam, 1);
+                /*
+                 * Bit 30: previous key state (1 = key was already down). Windows sends WM_KEYDOWN
+                 * repeatedly while held; forwarding those repeats toggles RX debug keys (e.g. D =
+                 * decode-drop) multiple times per physical press, often leaving decode disabled with
+                 * counters still climbing (video path only).
+                 */
+                if ((lparam & (LPARAM) (1UL << 30)) == 0) {
+                    view->on_key(view->key_user, (unsigned) wparam, 1);
+                }
             }
             return 0;
         case WM_PAINT: {

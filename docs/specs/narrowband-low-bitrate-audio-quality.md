@@ -158,7 +158,7 @@ Operational fixes landed in **`platform/desktop`** and **`pcm_rate_convert.c`**:
 - **Alias / peaks:** Exact-ratio **FIR decimation** for **48 → 8 / 16 kHz** before vocoder encode; Lanczos-style upsampling with **soft saturation** toward **int16** on hot peaks; mono/stereo **overlap SRC** alignment clamp to avoid whole-frame silence at chunk boundaries.
 - **Levels:** **Q15 ~−3 dB** encode headroom (**`DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15`**) on speech-codec TX paths; **Opus** now bypasses that pad. **80 Hz HPF** remains TX-before-narrowband only; RX no longer stacks a second HPF on NB (avoid cascaded tilt).
 - **Transport feel:** **Warm** startup skip-hold when codec swaps mid-stream; **cold** idle→TX and **resume** clear **`playback_base_*`** so **`claim_audio_start`** and jitter see a consistent timeline.
-- **Unpause video:** **`dashcdg_rx_reset_live_media_after_resume_locked`** re-seeks **offline CDG reader** into **`live_state`** because **`cdg_snapshots_applied`** blocks the normal first-wire seed path.
+- **Unpause:** **`dashcdg_rx_rearm_live_video_after_unpause_locked`** restores **CDG bridge** / skip-hold toward **`live_state`**; **`dashcdg_rx_reprime_audio_after_host_underrun_locked`** clears audio jitter and stops the host stream so playout can re-prime cleanly.
 
 Related: **`docs/specs/opus-desktop-encoding-policy.md`**, **`AGENTS.md`**.
 
