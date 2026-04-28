@@ -87,6 +87,38 @@ int dashcdg_opus_decode_frame(
     return -1;
 }
 
+int dashcdg_opus_decode_packet_loss(
+        struct dashcdg_opus_decoder *decoder,
+        int16_t *pcm_output,
+        size_t pcm_output_samples
+) {
+    (void) pcm_output;
+    (void) pcm_output_samples;
+    if (decoder == NULL) {
+        return -1;
+    }
+    return -1;
+}
+
+int dashcdg_opus_probe_packet_channels(const uint8_t *packet, size_t packet_length)
+{
+    (void) packet;
+    (void) packet_length;
+    return -1;
+}
+
+int dashcdg_opus_probe_packet_samples_per_channel(
+        const uint8_t *packet,
+        size_t packet_length,
+        int sample_rate_hz
+)
+{
+    (void) packet;
+    (void) packet_length;
+    (void) sample_rate_hz;
+    return -1;
+}
+
 #else /* !DASHCDG_DESKTOP_NO_OPUS */
 
 int dashcdg_opus_encoder_init(
@@ -239,6 +271,54 @@ int dashcdg_opus_decode_frame(
             decoder->frame_size,
             0
     );
+}
+
+int dashcdg_opus_decode_packet_loss(
+        struct dashcdg_opus_decoder *decoder,
+        int16_t *pcm_output,
+        size_t pcm_output_samples
+) {
+    size_t minimum_samples;
+
+    if (decoder == NULL || decoder->decoder == NULL || pcm_output == NULL) {
+        return -1;
+    }
+
+    minimum_samples = (size_t) decoder->frame_size * (size_t) decoder->channels;
+    if (pcm_output_samples < minimum_samples) {
+        return -1;
+    }
+
+    return opus_decode(decoder->decoder, NULL, 0, pcm_output, decoder->frame_size, 0);
+}
+
+int dashcdg_opus_probe_packet_channels(const uint8_t *packet, size_t packet_length)
+{
+    int ch;
+
+    if (packet == NULL || packet_length < 1U) {
+        return -1;
+    }
+    ch = opus_packet_get_nb_channels(packet);
+    if (ch < 1 || ch > 2) {
+        return -1;
+    }
+    return ch;
+}
+
+int dashcdg_opus_probe_packet_samples_per_channel(
+        const uint8_t *packet,
+        size_t packet_length,
+        int sample_rate_hz
+)
+{
+    opus_int32 n;
+
+    if (packet == NULL || packet_length < 1U || sample_rate_hz <= 0) {
+        return -1;
+    }
+    n = opus_packet_get_nb_samples(packet, (opus_int32)packet_length, sample_rate_hz);
+    return (int)n;
 }
 
 #endif /* DASHCDG_DESKTOP_NO_OPUS */
