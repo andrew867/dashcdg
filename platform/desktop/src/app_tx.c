@@ -120,6 +120,12 @@
 #define DASHCDG_TX_AUDIO_SLOW_LOOP_THRESHOLD_MS 25U
 #define DASHCDG_TX_AUDIO_SEND_GAP_THRESHOLD_MS 80U
 #define DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS 12U
+/*
+ * If the next CDG batch's playback_ms lags live song position by more than this, the mixed TX tick
+ * must not return early for audio preemption — otherwise under CPU load audio keeps shipping while
+ * CDG stalls indefinitely (receiver sees graphics fall behind audio with no self-correction).
+ */
+#define DASHCDG_TX_CDG_STARVED_VS_AUDIO_MS 120U
 #define DASHCDG_TX_AUDIO_SEND_BURST_THRESHOLD_MS 8U
 #define DASHCDG_TX_AUDIO_SEND_MAX_CATCHUP_PACKETS 64U
 #define DASHCDG_TX_AUDIO_LATE_FILL_THRESHOLD_MS (DASHCDG_AUDIO_FRAME_MS * 2U)
@@ -515,6 +521,11 @@ struct dashcdg_tx_audio_domain {
     uint8_t v4_audio_profile_id;
     uint8_t v4_audio_codec_id;
     uint64_t audio_pipeline_generation;
+    /*
+     * Mirrored from g_tx_state.audio_frames_generated in dashcdg_tx_ad_sync_from_main_locked.
+     * The audio send thread must not take g_tx_state.mutex (main holds it while syncing g_tx_ad).
+     */
+    uint64_t audio_frames_generated;
 };
 
 struct dashcdg_tx_state {
@@ -866,6 +877,7 @@ static void dashcdg_tx_ad_sync_from_main_locked(void) {
     g_tx_ad.v4_audio_profile_id = g_tx_state.v4_audio_profile_id;
     g_tx_ad.v4_audio_codec_id = g_tx_state.v4_audio_codec_id;
     g_tx_ad.audio_pipeline_generation = g_tx_state.audio_pipeline_generation;
+    g_tx_ad.audio_frames_generated = g_tx_state.audio_frames_generated;
     (void) pthread_mutex_unlock(&g_tx_ad.mutex);
 }
 
@@ -4362,6 +4374,35 @@ static int64_t dashcdg_tx_next_cdg_lead_ms_locked(uint64_t playback_ms) {
     return (int64_t) g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms - (int64_t) playback_ms;
 }
 
+/*
+ * Next schedulable CDG batch is tagged far behind current playback — graphics emission is starving
+ * vs the audio timeline (mixed TX thread kept yielding to audio due-soon).
+ */
+static int dashcdg_tx_cdg_emit_starved_vs_audio_locked(uint64_t now_ms, uint64_t send_deadline_ms) {
+    uint64_t media_playback_ms;
+    int64_t cdg_lead_ms;
+
+    if (!g_tx_state.transport_v4_enabled || g_tx_state.paused ||
+            g_tx_state.next_cdg_batch_index >= g_tx_state.cdg_batch_count ||
+            g_tx_state.session_start_ms == 0U) {
+        return 0;
+    }
+
+    media_playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(media_playback_ms);
+    if (cdg_lead_ms >= -(int64_t) DASHCDG_TX_CDG_STARVED_VS_AUDIO_MS) {
+        return 0;
+    }
+    if (send_deadline_ms < g_tx_state.session_start_ms) {
+        return 0;
+    }
+    return (g_tx_state.session_start_ms +
+                    g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
+                    send_deadline_ms)
+                   ? 1
+                   : 0;
+}
+
 static size_t dashcdg_tx_collect_audio_fault_lines_locked(
         uint64_t now_ms,
         char lines[][256],
@@ -4692,20 +4733,6 @@ static int dashcdg_tx_send_audio_frame_locked(
     return 1;
 }
 
-/*
- * Until the producer has pushed at least one encoded frame for the active pipeline generation, an
- * empty audio_ready_queue is normal (MP3 open, FIFO priming, Opus init). Counting those polls as
- * starvation/silence-fill faults mislabels bootstrap as errors.
- */
-static int dashcdg_tx_audio_upstream_ready_for_fault_metrics_locked(void) {
-    int ready;
-
-    pthread_mutex_lock(&g_tx_state.mutex);
-    ready = g_tx_state.audio_frames_generated > 0U ? 1 : 0;
-    pthread_mutex_unlock(&g_tx_state.mutex);
-    return ready;
-}
-
 static unsigned int dashcdg_tx_send_due_audio_locked(
         uint64_t now_ms,
         uint8_t *packet,
@@ -4714,7 +4741,11 @@ static unsigned int dashcdg_tx_send_due_audio_locked(
 ) {
     uint64_t send_deadline_ms = now_ms + dashcdg_tx_audio_send_lead_ms_ad();
     unsigned int audio_sent = 0U;
-    int upstream_ready_faults = dashcdg_tx_audio_upstream_ready_for_fault_metrics_locked();
+    /*
+     * g_tx_ad.audio_frames_generated is mirrored from main (dashcdg_tx_ad_sync_from_main_locked).
+     * Do not read g_tx_state here: main may hold g_tx_state.mutex while syncing g_tx_ad → deadlock.
+     */
+    int upstream_ready_faults = g_tx_ad.audio_frames_generated > 0U ? 1 : 0;
 
     while (!g_tx_ad.paused &&
             send_deadline_ms >= g_tx_ad.session_start_ms &&
@@ -8195,7 +8226,8 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     }
 
     if (g_tx_state.v4_anchor_first_full_delivery_done &&
-            dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
+            dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS) &&
+            !dashcdg_tx_cdg_emit_starved_vs_audio_locked(now_ms, send_deadline_ms)) {
         return;
     }
     if (!dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
@@ -8228,7 +8260,8 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
         }
     }
 
-    if (dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS)) {
+    if (dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS) &&
+            !dashcdg_tx_cdg_emit_starved_vs_audio_locked(now_ms, send_deadline_ms)) {
         return;
     }
 

@@ -5328,6 +5328,9 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
          * inner loop exits with progressed=0 before any CDG step — WinMM/slow hosts keep the ring
          * pegged and CDG never advances (late join: audio ok, render_gate stuck on v4-startup/black).
          * Graphics timing still follows playback_ms / DAC clock from publish_render_snapshot.
+         *
+         * Core `dashcdg_cdg_batch_jitter_drain_step` includes timeline catch-up (hard resync / gap skip)
+         * when CDG falls behind the sender playback clock — same behavior as the ESP32 karaoke RX.
          */
         if (state->cdg_batch_jitter.initialized) {
             int cdg_skip_hold_active = 0;
