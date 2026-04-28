@@ -67,6 +67,13 @@ static void dashcdg_pcm_buffer_free(struct dashcdg_pcm_buffer *pcm) {
 #include <pa_win_wasapi.h>
 #endif
 static pthread_mutex_t g_dashcdg_pa_mutex = PTHREAD_MUTEX_INITIALIZER;
+/*
+ * Serializes Pa_OpenStream / Pa_StartStream vs Pa_StopStream / Pa_CloseStream / Pa_Terminate across
+ * threads. RX runs handle_v4_session_info -> configure_audio -> stop_stream on the network thread while
+ * the media thread opens/starts output without holding g_receiver.mutex — interleaving terminates the
+ * host between OpenStream and StartStream ("PortAudio not initialized [Pa_StartStream]" on Win11).
+ */
+static pthread_mutex_t g_dashcdg_pa_stream_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_dashcdg_pa_refcount = 0;
 static char g_dashcdg_pa_last_stream_open_fail[256];
 
@@ -447,9 +454,12 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     const PaDeviceInfo *dev_info;
     PaDeviceIndex out_dev;
     double host_latency_s;
+    int ok = 0;
 #if defined(_WIN32)
     PaWasapiStreamInfo wasapi_stream_info;
 #endif
+
+    pthread_mutex_lock(&g_dashcdg_pa_stream_mutex);
 
     dashcdg_pa_clear_stream_open_fail();
 
@@ -466,7 +476,7 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     }
 
     if (!dashcdg_pa_host_init()) {
-        return 0;
+        goto stream_done;
     }
 
     sample_rate = audio->mode == DASHCDG_AUDIO_MODE_STREAM ? (int) audio->stream_sample_rate : audio->file_info.hz;
@@ -478,21 +488,21 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
                 channels
         );
         dashcdg_pa_host_deinit();
-        return 0;
+        goto stream_done;
     }
 
     out_dev = dashcdg_pa_preferred_default_output_device();
     if (out_dev == paNoDevice) {
         dashcdg_pa_log_stream_open_failf("%s", "no default output device (preferred/WASAPI or Pa_GetDefaultOutputDevice)");
         dashcdg_pa_host_deinit();
-        return 0;
+        goto stream_done;
     }
 
     dev_info = Pa_GetDeviceInfo(out_dev);
     if (dev_info == NULL) {
         dashcdg_pa_log_stream_open_failf("%s", "Pa_GetDeviceInfo returned NULL for default output device");
         dashcdg_pa_host_deinit();
-        return 0;
+        goto stream_done;
     }
 
     if (channels > dev_info->maxOutputChannels) {
@@ -502,7 +512,7 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
                 dev_info->maxOutputChannels
         );
         dashcdg_pa_host_deinit();
-        return 0;
+        goto stream_done;
     }
 
     memset(&out_params, 0, sizeof(out_params));
@@ -571,7 +581,7 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
     if (err != paNoError) {
         dashcdg_pa_log_stream_open_paerr(err, "Pa_OpenStream");
         dashcdg_pa_host_deinit();
-        return 0;
+        goto stream_done;
     }
 
     if (audio->mode == DASHCDG_AUDIO_MODE_STREAM && dev_info != NULL) {
@@ -627,11 +637,14 @@ static int dashcdg_desktop_audio_create_stream(struct dashcdg_desktop_audio *aud
         Pa_CloseStream(audio->stream);
         audio->stream = NULL;
         dashcdg_pa_host_deinit();
-        return 0;
+        goto stream_done;
     }
 
     dashcdg_pa_clear_stream_open_fail();
-    return 1;
+    ok = 1;
+stream_done:
+    pthread_mutex_unlock(&g_dashcdg_pa_stream_mutex);
+    return ok;
 }
 
 const char *dashcdg_desktop_audio_last_stream_open_error(void) {
@@ -1383,12 +1396,14 @@ void dashcdg_desktop_audio_stop_stream(struct dashcdg_desktop_audio *audio) {
     }
 
 #if DASHCDG_HAVE_PORTAUDIO
+    pthread_mutex_lock(&g_dashcdg_pa_stream_mutex);
     if (audio->stream != NULL) {
         Pa_StopStream(audio->stream);
         Pa_CloseStream(audio->stream);
         audio->stream = NULL;
         dashcdg_pa_host_deinit();
     }
+    pthread_mutex_unlock(&g_dashcdg_pa_stream_mutex);
 #elif DASHCDG_DESKTOP_WIN32_WAVEOUT && defined(_WIN32)
     dashcdg_winmm_destroy_stream(audio);
 #endif
