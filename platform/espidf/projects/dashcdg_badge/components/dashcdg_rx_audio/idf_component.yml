@@ -1,0 +1,3 @@
+## Libopus for ESP-IDF (RX decode). Desktop TX default karaoke codec is Opus.
+dependencies:
+  78/esp-opus: "^1.0.5"

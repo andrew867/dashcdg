@@ -18,6 +18,14 @@
 #include "driver/ledc.h"
 #if CONFIG_IDF_TARGET_ESP32
 #include "driver/dac_continuous.h"
+#ifndef DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK
+/*
+ * ESP-IDF v5.5.x `dac_channel_mask_t` (see peripherals/dac.html): DAC_CHANNEL_MASK_CH0 = GPIO25,
+ * DAC_CHANNEL_MASK_CH1 = GPIO26. Intro text calls those "channel 1" / "channel 2" by pin order —
+ * IO26 is driver CH1, not "mask CH2" (there is no CH2 on ESP32).
+ */
+#define DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK DAC_CHANNEL_MASK_CH1
+#endif
 #endif
 #include "esp_check.h"
 #include "esp_log.h"
@@ -101,6 +109,8 @@ static bool s_wifi_ps_karaoke_saved_valid;
 static wifi_ps_type_t s_wifi_ps_karaoke_saved;
 
 static bool s_rgb_status_enabled = true;
+/** After hard-off, RGB pins are GPIO-driven high; re-bind LEDC before animating again. */
+static bool s_rgb_ledc_detached;
 static uint8_t s_rgb_status_pct = 100;
 static bool s_auto_sleep_enabled = true;
 
@@ -199,6 +209,10 @@ static uint8_t s_dac_lp_u8 = 128;
  * pad mid-frame with silence (512 did not divide 960 → audible "picket fence").
  */
 #define KARAOKE_DAC_PCM_CHUNK 320u
+/** Linear PCM → 8-bit DAC sample gain numerator (denominator 32768); higher = louder line-out. */
+#ifndef KARAOKE_DAC_PCM_GAIN_NUM
+#define KARAOKE_DAC_PCM_GAIN_NUM 200
+#endif
 static dac_continuous_handle_t s_karaoke_dac_handle;
 static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_PCM_CHUNK];
 static size_t s_karaoke_dac_fill;
@@ -449,8 +463,73 @@ static void pm_update_idle_locked(uint64_t now)
     }
 }
 
+/** Reattach RGB cathodes to LEDC timer (after GPIO force-off). Does not touch backlight channel. */
+static esp_err_t rgb_status_ledc_channels_rebind(void)
+{
+    const gpio_num_t pins[] = {DASHCDG_HW_GPIO_RGB_R, DASHCDG_HW_GPIO_RGB_G, DASHCDG_HW_GPIO_RGB_B};
+    const ledc_channel_t chans[] = {LEDC_CH_R, LEDC_CH_G, LEDC_CH_B};
+    esp_err_t err = ESP_OK;
+
+    for (unsigned i = 0; i < 3; i++) {
+        gpio_reset_pin(pins[i]);
+        ledc_channel_config_t ch = {0};
+        ch.gpio_num = pins[i];
+        ch.speed_mode = LEDC_MODE;
+        ch.channel = chans[i];
+        ch.intr_type = LEDC_INTR_DISABLE;
+        ch.timer_sel = LEDC_TIMER_RGB_BL;
+        ch.duty = 255;
+        ch.hpoint = 0;
+        err = ledc_channel_config(&ch);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "rgb ledc rebind: %s", esp_err_to_name(err));
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+/**
+ * Active-low cathodes to 3V3 through resistors: PWM "full duty off" still has tiny low phases → glow.
+ * Stop LEDC with idle high, then drive GPIO outputs solid high so no sink current.
+ */
+static void rgb_pins_force_off_active_low(void)
+{
+    (void)ledc_stop(LEDC_MODE, LEDC_CH_R, 1);
+    (void)ledc_stop(LEDC_MODE, LEDC_CH_G, 1);
+    (void)ledc_stop(LEDC_MODE, LEDC_CH_B, 1);
+
+    gpio_reset_pin(DASHCDG_HW_GPIO_RGB_R);
+    gpio_reset_pin(DASHCDG_HW_GPIO_RGB_G);
+    gpio_reset_pin(DASHCDG_HW_GPIO_RGB_B);
+
+    gpio_config_t io = {
+            .pin_bit_mask =
+                    (1ULL << DASHCDG_HW_GPIO_RGB_R) | (1ULL << DASHCDG_HW_GPIO_RGB_G) | (1ULL << DASHCDG_HW_GPIO_RGB_B),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+    };
+    (void)gpio_config(&io);
+    gpio_set_level(DASHCDG_HW_GPIO_RGB_R, 1);
+    gpio_set_level(DASHCDG_HW_GPIO_RGB_G, 1);
+    gpio_set_level(DASHCDG_HW_GPIO_RGB_B, 1);
+    s_rgb_ledc_detached = true;
+}
+
+static void rgb_ensure_ledc_attached(void)
+{
+    if (!s_rgb_ledc_detached) {
+        return;
+    }
+    (void)rgb_status_ledc_channels_rebind();
+    s_rgb_ledc_detached = false;
+}
+
 static void rgb_set_u8(uint8_t r, uint8_t g, uint8_t b)
 {
+    rgb_ensure_ledc_attached();
     /* GPIOs are active-low: higher LEDC duty => more time high => dimmer LED. */
     const uint32_t max_d = ((1U << 8) - 1U);
     uint32_t dr = max_d - (uint32_t)r;
@@ -476,7 +555,6 @@ static void rgb_set_u8(uint8_t r, uint8_t g, uint8_t b)
 static void rgb_apply_status(uint8_t r, uint8_t g, uint8_t b)
 {
     if (!s_rgb_status_enabled) {
-        rgb_set_u8(0, 0, 0);
         return;
     }
     uint32_t sc = (uint32_t)s_rgb_status_pct;
@@ -841,7 +919,7 @@ bool dashcdg_platform_hw_karaoke_dac_begin(void)
     (void)ledc_stop(LEDC_MODE, LEDC_CH_AUDIO, 0);
     {
         dac_continuous_config_t dcfg = {
-            .chan_mask = DAC_CHANNEL_MASK_CH1,
+            .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
             .desc_num = 8,
             .buf_size = KARAOKE_DAC_PCM_CHUNK,
             .freq_hz = 48000,
@@ -896,7 +974,7 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_
     amp_set_run(true);
     for (size_t i = 0U; i < samples; ++i) {
         int32_t s = (int32_t)pcm[i];
-        int32_t u = (s * 120) / 32768 + 128;
+        int32_t u = (s * (int32_t)KARAOKE_DAC_PCM_GAIN_NUM) / 32768 + 128;
         if (u < 16) {
             u = 16;
         }
@@ -1038,12 +1116,11 @@ static uint32_t battery_sample_period_ms(void)
 
 static void led_anim_frame(uint64_t now_ms)
 {
+    if (!s_rgb_status_enabled) {
+        return;
+    }
     if (s_pm_state == PM_SLEEP) {
         /* Deep standby: very dim slow blue "breath" so the badge still feels alive. */
-        if (!s_rgb_status_enabled) {
-            rgb_set_u8(0, 0, 0);
-            return;
-        }
         float t = (float)(now_ms % 7000ULL) * (2.0f * (float)M_PI / 7000.0f);
         float breathe = 0.35f + 0.25f * (0.5f + 0.5f * sinf(t));
         uint8_t v = (uint8_t)(14.0f * breathe);
@@ -1219,6 +1296,9 @@ esp_err_t dashcdg_platform_hw_init(void)
         s_touch_beep_on = (tb != 0);
     }
     bl_set_pct(s_bl_applied_pct);
+    if (!s_rgb_status_enabled) {
+        rgb_pins_force_off_active_low();
+    }
     s_activity_ms = dashcdg_clock_now_ms();
     s_pm_state = PM_ACTIVE;
     __atomic_store_n(&s_disp_pwrcmd, 0, __ATOMIC_SEQ_CST);
@@ -1411,6 +1491,12 @@ void dashcdg_platform_hw_set_rgb_status_enabled(bool on)
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
         s_rgb_status_enabled = on;
+        if (!on) {
+            rgb_pins_force_off_active_low();
+        } else if (s_rgb_ledc_detached) {
+            (void)rgb_status_ledc_channels_rebind();
+            s_rgb_ledc_detached = false;
+        }
         xSemaphoreGive(s_mtx);
     }
 }
@@ -1496,7 +1582,7 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
      * or IDF's `s_dac_wait_to_load_dma_data` halves alternate loads via a static split_flag
      * (motorboating / buzz). Match `LAB_DAC_PCM_CHUNK`. */
     dac_continuous_config_t dcfg = {
-        .chan_mask = DAC_CHANNEL_MASK_CH1,
+        .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
         .desc_num = 8,
         .buf_size = LAB_DAC_PCM_CHUNK,
         .freq_hz = (uint32_t)DASHCDG_LAB_PCM_FS_HZ,

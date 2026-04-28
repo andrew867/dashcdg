@@ -7,6 +7,7 @@ file(GLOB AMR_WB_DEC_SRCS "${AMR_VENDOR}/src/wb/dec_*.c")
 
 set(RX_AUDIO_SRCS
     "${DASHCDG_REPO_ROOT}/platform/desktop/src/amr_wb_codec.c"
+    "${DASHCDG_REPO_ROOT}/platform/desktop/src/opus_codec.c"
     "${DASHCDG_REPO_ROOT}/platform/desktop/src/pcm_rate_convert.c"
     "${AMR_VENDOR}/src/wb/if_rom.c"
     ${AMR_WB_DEC_SRCS}
@@ -21,6 +22,7 @@ idf_component_register(
         "${AMR_VENDOR}/src/wb"
     REQUIRES
         heap
+        esp-opus
 )
 
 set(_rx_audio_warn

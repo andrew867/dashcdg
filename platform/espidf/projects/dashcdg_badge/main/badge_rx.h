@@ -26,6 +26,10 @@ typedef struct {
     uint32_t v4_audio_chunk_rx;
     uint32_t v4_audio_frames_out;
     uint32_t v4_audio_decode_fail;
+    /** Calls to degraded filler (LFSR): decode fail, PLC fail, or scratch/init failures — sounds like fuzz. */
+    uint32_t v4_audio_degraded_push;
+    /** Audio jitter drain entered SKIP (holes → PLC/degraded); not the same as `v4_audio_decode_fail`. */
+    uint32_t v4_audio_jitter_skip_events;
     uint32_t v4_audio_dac_begin_fail;
     uint32_t v4_audio_unsupported_codec;
     uint32_t v4_audio_codec_switches;

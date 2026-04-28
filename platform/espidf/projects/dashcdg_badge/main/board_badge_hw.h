@@ -34,6 +34,12 @@
  */
 #define DASHCDG_HW_GPIO_AUDIO_PWM GPIO_NUM_26
 
+/*
+ * Native DAC routing (ESP-IDF 5.5 `dac_channel_mask_t`): DAC_CHANNEL_MASK_CH0 -> GPIO25,
+ * DAC_CHANNEL_MASK_CH1 -> GPIO26. Datasheet-style "DAC channel 2" / IO26 == driver CH1 mask.
+ * Override only if the analog net taps GPIO25: -DDASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK=DAC_CHANNEL_MASK_CH0
+ */
+
 /** External I2C bus (no devices registered yet; bus is parked ready). */
 #define DASHCDG_HW_GPIO_I2C_SDA GPIO_NUM_32
 #define DASHCDG_HW_GPIO_I2C_SCL GPIO_NUM_25
