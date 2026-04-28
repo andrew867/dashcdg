@@ -117,8 +117,9 @@
 #define DASHCDG_RX_QUEUE_SERVO_FINE_GAIN_PPM_PER_MS 1
 #define DASHCDG_RX_QUEUE_SERVO_FINE_BAND_MS 10
 #define DASHCDG_RX_QUEUE_SERVO_HOLD_UPDATE_MS 120U
-#define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 3000U
-#define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 1500U
+#define DASHCDG_RX_QUEUE_SERVO_WARMUP_MS 1800U
+#define DASHCDG_RX_QUEUE_SERVO_WARMUP_SYNC_ACTIVE_MS 450U
+#define DASHCDG_RX_QUEUE_SERVO_BACKPRESSURE_HOLD_MS 900U
 #define DASHCDG_RX_ZERO_BUFFER_STALL_RECOVER_MS 750U
 #define DASHCDG_RX_BUFFERED_SILENT_STALL_RECOVER_MS 900U
 #define DASHCDG_RX_ZERO_BUFFER_RECOVER_COOLDOWN_MS 3000U
@@ -139,7 +140,7 @@
 #define DASHCDG_RX_DECODE_STALL_MIN_PENDING_SLOTS 4U
 #define DASHCDG_RX_POST_TRACK_RECOVER_WINDOW_MS 15000U
 #define DASHCDG_RX_POST_TRACK_RECOVER_STALE_MS 1100U
-#define DASHCDG_RX_LEADER_BIAS_HOLDOFF_AFTER_TRACK_MS 8000U
+#define DASHCDG_RX_LEADER_BIAS_HOLDOFF_AFTER_TRACK_MS 1200U
 #define DASHCDG_TX_GROUP_SYNC_MODE_OFF 0U
 #define DASHCDG_TX_GROUP_SYNC_MODE_MEASURE 1U
 #define DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE 2U
@@ -469,6 +470,7 @@ struct receiver_state {
     uint32_t audio_ring_capacity_ms;
     uint32_t audio_host_output_latency_ms;
     int32_t audio_resample_trim_ppm;
+    int64_t audio_equal_rate_slip_accum;
     uint64_t audio_servo_enable_after_local_ms;
     uint64_t audio_last_servo_update_local_ms;
     uint64_t audio_last_queue_pressure_local_ms;
@@ -693,6 +695,13 @@ static struct dashcdg_desktop_audio *g_audio;
 #if DASHCDG_RX_HAVE_GLUT
 static struct dashcdg_gl_renderer g_renderer;
 static int g_rx_use_win_gdi;
+static int g_rx_gl_display_active;
+static uint64_t g_rx_gl_resize_pause_until_ms;
+static int g_rx_gl_pending_resize_w;
+static int g_rx_gl_pending_resize_h;
+static uint64_t g_rx_gl_last_resize_cb_ms;
+static uint64_t g_rx_gl_move_guard_until_ms;
+static int g_rx_gl_move_guard_logged;
 #endif
 static struct dashcdg_opus_decoder g_opus_decoder;
 static struct dashcdg_nb_ima_state g_nb_ima_decoder;
@@ -1015,6 +1024,14 @@ static void dashcdg_rx_refresh_audio_latency_budget_locked(
 static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *state, uint32_t buffered_ms);
 static int dashcdg_rx_audio_backpressure_hold_active_locked(const struct receiver_state *state, uint64_t local_now_ms);
 static int dashcdg_rx_audio_recent_auto_recover_locked(const struct receiver_state *state, uint64_t local_now_ms);
+static void dashcdg_rx_apply_equal_rate_trim_slip_locked(
+        struct receiver_state *state,
+        int32_t trim_ppm,
+        int16_t *interleaved_pcm,
+        size_t *inout_frames,
+        unsigned int channels,
+        size_t frame_capacity
+);
 
 static void dashcdg_rx_dump_pcm_to_file(const int16_t *pcm, size_t frame_count, unsigned int channels) {
     const char *dump_dir;
@@ -2517,6 +2534,13 @@ static uint16_t dashcdg_rx_stats_sanitized_startup_stage_locked(
     return stage;
 }
 
+static uint32_t dashcdg_rx_audio_servo_warmup_ms_locked(const struct receiver_state *state) {
+    if (state != NULL && state->sync_group_mode == DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE) {
+        return DASHCDG_RX_QUEUE_SERVO_WARMUP_SYNC_ACTIVE_MS;
+    }
+    return DASHCDG_RX_QUEUE_SERVO_WARMUP_MS;
+}
+
 static void dashcdg_rx_refresh_audio_latency_budget_locked(
         struct receiver_state *state,
         uint16_t playout_delay_ms,
@@ -3235,7 +3259,10 @@ static void dashcdg_rx_reprime_audio_after_host_underrun_locked(struct receiver_
             now_ms,
             dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 1)
     );
-    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(now_ms, DASHCDG_RX_QUEUE_SERVO_WARMUP_MS);
+    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(
+            now_ms,
+            dashcdg_rx_audio_servo_warmup_ms_locked(state)
+    );
     state->audio_last_queue_pressure_local_ms = now_ms;
 
     if (g_audio != NULL) {
@@ -3493,7 +3520,10 @@ static void dashcdg_rx_rebuild_audio_decode_path_locked(struct receiver_state *s
             local_now_ms,
             dashcdg_rx_startup_skip_hold_ms(state->announced_playout_delay_ms, 1)
     );
-    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(local_now_ms, DASHCDG_RX_QUEUE_SERVO_WARMUP_MS);
+    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(
+            local_now_ms,
+            dashcdg_rx_audio_servo_warmup_ms_locked(state)
+    );
 
     if (state->network_audio_enabled &&
             state->announced_audio_sample_rate > 0U &&
@@ -4451,6 +4481,7 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
                 ? trim_ppm_for_frame
                 : dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
         int allow_sync_trim_equal_rate = 0;
+        int32_t equal_rate_trim_ppm = 0;
         unsigned int host_ch = (unsigned int) host_output_channels;
         const int16_t *qptr = pcm;
         size_t qfc = (size_t) decoded_frames;
@@ -4475,6 +4506,15 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
         if (ses_sr == out_sr && !allow_sync_trim_equal_rate) {
             trim_ppm = 0;
             state->pcm_src_overlap_valid = 0U;
+            state->audio_equal_rate_slip_accum = 0;
+        } else if (allow_sync_trim_equal_rate) {
+            /*
+             * Keep equal-rate sync correction off libsoxr to avoid runtime instability in
+             * soxr_deinterleave under rapid move/resize + active playback. Apply a bounded
+             * frame-slip correction below instead.
+             */
+            equal_rate_trim_ppm = trim_ppm;
+            trim_ppm = 0;
         }
         effective_out_sr = out_sr;
         if (out_sr > 0U && trim_ppm != 0) {
@@ -4574,6 +4614,18 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
         if (resampled_output || dashcdg_v4_audio_codec_is_narrowband(codec_id)) {
             dashcdg_pcm_interleaved_s16_soft_limit_inplace((int16_t *) qptr, qfc, host_ch > 0U ? host_ch : 1U);
         }
+        if (equal_rate_trim_ppm != 0 && qptr == pcm && host_ch > 0U) {
+            size_t slip_qfc = qfc;
+            dashcdg_rx_apply_equal_rate_trim_slip_locked(
+                    state,
+                    equal_rate_trim_ppm,
+                    pcm,
+                    &slip_qfc,
+                    host_ch,
+                    sizeof(pcm) / (sizeof(pcm[0]) * (size_t) host_ch)
+            );
+            qfc = slip_qfc;
+        }
 
         if (effective_out_sr > 0U && qfc > 0U) {
             queued_ms_estimate = (uint32_t) (((uint64_t) qfc * 1000U + (uint64_t) effective_out_sr - 1U) /
@@ -4632,6 +4684,43 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
     }
 
     return 1;
+}
+
+static void dashcdg_rx_apply_equal_rate_trim_slip_locked(
+        struct receiver_state *state,
+        int32_t trim_ppm,
+        int16_t *interleaved_pcm,
+        size_t *inout_frames,
+        unsigned int channels,
+        size_t frame_capacity
+) {
+    int64_t accum;
+
+    if (state == NULL || interleaved_pcm == NULL || inout_frames == NULL || channels == 0U || frame_capacity == 0U || trim_ppm == 0) {
+        return;
+    }
+    accum = state->audio_equal_rate_slip_accum + (int64_t) trim_ppm * (int64_t) (*inout_frames);
+    while (accum >= 1000000LL) {
+        if (*inout_frames >= frame_capacity) {
+            break;
+        }
+        {
+            size_t src = (*inout_frames - 1U) * channels;
+            size_t dst = (*inout_frames) * channels;
+            for (unsigned int ch = 0U; ch < channels; ++ch) {
+                interleaved_pcm[dst + ch] = interleaved_pcm[src + ch];
+            }
+        }
+        (*inout_frames)++;
+        accum -= 1000000LL;
+    }
+    while (accum <= -1000000LL) {
+        if (*inout_frames > 1U) {
+            (*inout_frames)--;
+        }
+        accum += 1000000LL;
+    }
+    state->audio_equal_rate_slip_accum = accum;
 }
 
 static int dashcdg_rx_apply_audio_frame_locked(
@@ -5537,8 +5626,15 @@ static void dashcdg_rx_configure_audio_locked(
     state->last_audio_timestamp_advance_local_ms = 0U;
     state->last_audio_timestamp_ms = -1;
     state->audio_resample_trim_ppm = 0;
-    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(local_now_ms, DASHCDG_RX_QUEUE_SERVO_WARMUP_MS);
-    state->audio_last_queue_pressure_local_ms = local_now_ms;
+    state->audio_servo_enable_after_local_ms = dashcdg_rx_deadline_after_ms(
+            local_now_ms,
+            dashcdg_rx_audio_servo_warmup_ms_locked(state)
+    );
+    /*
+     * Track/session reopen is not backpressure; keep servo responsive so peers converge quickly
+     * after next-track and TX-restart transitions.
+     */
+    state->audio_last_queue_pressure_local_ms = 0U;
     if (!dashcdg_desktop_audio_init_stream(
                 g_audio,
                 sample_rate,
@@ -5808,6 +5904,9 @@ static void handle_v4_session_info(struct receiver_state *state, const struct da
         } else {
             memset(state->audio_fec_groups, 0, sizeof(state->audio_fec_groups));
         }
+        state->sync_leader_instance_id_low16 = 0U;
+        state->sync_leader_trim_bias_ppm = 0;
+        state->sync_leader_last_update_local_ms = 0U;
         state->last_session_change_local_ms = local_now_ms;
     }
 
@@ -7567,6 +7666,44 @@ static void display(void) {
     uint32_t hud_color_a_rgb = DASHCDG_RX_HUD_COLOR_OK_RGB;
     uint32_t hud_color_b_rgb = DASHCDG_RX_HUD_COLOR_OK_RGB;
     int show_hud = 0;
+    int lock_ok = 0;
+    int in_move_guard = 0;
+
+    if (g_rx_gl_display_active) {
+        return;
+    }
+    g_rx_gl_display_active = 1;
+    if (glutGetWindow() == 0 || g_renderer.program == 0U) {
+        g_rx_gl_display_active = 0;
+        return;
+    }
+    if (g_rx_gl_resize_pause_until_ms != 0U && local_now_ms < g_rx_gl_resize_pause_until_ms) {
+        if (!g_rx_gl_move_guard_logged) {
+            RX_ERR("[rx-gl] move-guard active (resize-pause)\n");
+            g_rx_gl_move_guard_logged = 1;
+        }
+        g_rx_gl_display_active = 0;
+        return;
+    }
+    in_move_guard = (g_rx_gl_move_guard_until_ms != 0U && local_now_ms < g_rx_gl_move_guard_until_ms);
+    if (in_move_guard) {
+        if (!g_rx_gl_move_guard_logged) {
+            RX_ERR("[rx-gl] move-guard active (rapid resize callbacks)\n");
+            g_rx_gl_move_guard_logged = 1;
+        }
+        /* Avoid touching GL at all while the window manager is in a volatile move/resize burst. */
+        g_rx_gl_display_active = 0;
+        return;
+    }
+    if (g_rx_gl_move_guard_logged) {
+        RX_ERR("[rx-gl] move-guard cleared\n");
+        g_rx_gl_move_guard_logged = 0;
+    }
+    if (g_rx_gl_pending_resize_w > 0 && g_rx_gl_pending_resize_h > 0) {
+        dashcdg_gl_renderer_resize(&g_renderer, g_rx_gl_pending_resize_w, g_rx_gl_pending_resize_h);
+        g_rx_gl_pending_resize_w = 0;
+        g_rx_gl_pending_resize_h = 0;
+    }
 
     pthread_mutex_lock(&g_render_mutex);
     if (g_render_snapshot.valid) {
@@ -7575,9 +7712,23 @@ static void display(void) {
     }
     pthread_mutex_unlock(&g_render_mutex);
 
-    pthread_mutex_lock(&g_receiver.mutex);
-    dashcdg_rx_connecting_overlay_decide_locked(local_now_ms, &show_connecting, &reconnecting);
-    pthread_mutex_unlock(&g_receiver.mutex);
+    lock_ok = pthread_mutex_trylock(&g_receiver.mutex) == 0;
+    if (lock_ok) {
+        dashcdg_rx_connecting_overlay_decide_locked(local_now_ms, &show_connecting, &reconnecting);
+        show_hud = g_hud_visible;
+        if (show_hud) {
+            dashcdg_rx_fill_hud_lines_locked(
+                    local_now_ms,
+                    hud_line_a,
+                    sizeof(hud_line_a),
+                    hud_line_b,
+                    sizeof(hud_line_b),
+                    &hud_color_a_rgb,
+                    &hud_color_b_rgb
+            );
+        }
+        pthread_mutex_unlock(&g_receiver.mutex);
+    }
 
     if (show_connecting) {
         dashcdg_rx_render_connecting_state(&connecting_state, local_now_ms, reconnecting);
@@ -7589,29 +7740,22 @@ static void display(void) {
         glClear(GL_COLOR_BUFFER_BIT);
     }
 
-    pthread_mutex_lock(&g_receiver.mutex);
-    show_hud = g_hud_visible;
     if (show_hud) {
-        dashcdg_rx_fill_hud_lines_locked(
-                local_now_ms,
-                hud_line_a,
-                sizeof(hud_line_a),
-                hud_line_b,
-                sizeof(hud_line_b),
-                &hud_color_a_rgb,
-                &hud_color_b_rgb
-        );
-    }
-    pthread_mutex_unlock(&g_receiver.mutex);
+        int win_w = glutGet(GLUT_WINDOW_WIDTH);
+        int win_h = glutGet(GLUT_WINDOW_HEIGHT);
 
-    if (show_hud) {
+        if (win_w <= 0 || win_h <= 0) {
+            glutSwapBuffers();
+            g_rx_gl_display_active = 0;
+            return;
+        }
         glUseProgram(0);
         glDisable(GL_TEXTURE_2D);
 
         glMatrixMode(GL_PROJECTION);
         glPushMatrix();
         glLoadIdentity();
-        glOrtho(0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT), 0, -1, 1);
+        glOrtho(0, win_w, win_h, 0, -1, 1);
         glMatrixMode(GL_MODELVIEW);
         glPushMatrix();
         glLoadIdentity();
@@ -7643,6 +7787,7 @@ static void display(void) {
     }
 
     glutSwapBuffers();
+    g_rx_gl_display_active = 0;
 }
 
 static void rx_keyboard(unsigned char key, int x, int y) {
@@ -7670,14 +7815,28 @@ static void rx_keyboard(unsigned char key, int x, int y) {
 }
 
 static void dashcdg_rx_render_timer(int value) {
+    uint64_t now_ms = dashcdg_clock_now_ms();
     (void) value;
 
-    glutPostRedisplay();
+    if (!g_rx_gl_display_active &&
+            (g_rx_gl_resize_pause_until_ms == 0U || now_ms >= g_rx_gl_resize_pause_until_ms) &&
+            (g_rx_gl_move_guard_until_ms == 0U || now_ms >= g_rx_gl_move_guard_until_ms)) {
+        glutPostRedisplay();
+    }
     glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_rx_render_timer, 0);
 }
 
 static void resize_callback(int width, int height) {
-    dashcdg_gl_renderer_resize(&g_renderer, width, height);
+    uint64_t now_ms = dashcdg_clock_now_ms();
+
+    g_rx_gl_pending_resize_w = width;
+    g_rx_gl_pending_resize_h = height;
+    g_rx_gl_resize_pause_until_ms = now_ms + 200U;
+    if (g_rx_gl_last_resize_cb_ms != 0U && now_ms > g_rx_gl_last_resize_cb_ms &&
+            now_ms - g_rx_gl_last_resize_cb_ms <= 120U) {
+        g_rx_gl_move_guard_until_ms = now_ms + 350U;
+    }
+    g_rx_gl_last_resize_cb_ms = now_ms;
 }
 
 #endif /* DASHCDG_RX_HAVE_GLUT */
@@ -7785,7 +7944,7 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
             memset(bgra_frame, 0, sizeof(bgra_frame));
         }
 
-        dashcdg_win32_gdi_view_present_bgra(
+        if (!dashcdg_win32_gdi_view_present_bgra(
                 view,
                 bgra_frame,
                 sizeof(bgra_frame),
@@ -7794,7 +7953,9 @@ static void dashcdg_rx_run_win32_gdi_main(int argc, char **argv) {
                 hud_line_b,
                 hud_color_a_rgb,
                 hud_color_b_rgb
-        );
+        )) {
+            break;
+        }
     }
 
     dashcdg_win32_gdi_view_destroy(view);

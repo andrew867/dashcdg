@@ -18,6 +18,7 @@
 struct dashcdg_win32_gdi_view {
     HWND hwnd;
     int quit;
+    int in_size_move;
     dashcdg_win32_gdi_key_cb on_key;
     void *key_user;
     uint64_t last_present_ms;
@@ -59,6 +60,30 @@ static LRESULT CALLBACK dashcdg_win32_gdi_wnd_proc(HWND hwnd, UINT msg, WPARAM w
                 view->quit = 1;
             }
             PostQuitMessage(0);
+            return 0;
+        case WM_NCDESTROY:
+            if (view != NULL) {
+                view->quit = 1;
+                view->hwnd = NULL;
+            }
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR) 0);
+            return 0;
+        case WM_CLOSE:
+            if (view != NULL) {
+                view->quit = 1;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_ENTERSIZEMOVE:
+            if (view != NULL) {
+                view->in_size_move = 1;
+            }
+            return 0;
+        case WM_EXITSIZEMOVE:
+            if (view != NULL) {
+                view->in_size_move = 0;
+            }
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         case WM_KEYDOWN:
             if (view != NULL && view->on_key != NULL) {
@@ -252,6 +277,14 @@ static int dashcdg_win32_gdi_view_present_bgra_internal(
 
     if (view == NULL || bgra == NULL || bgra_bytes != DASHCDG_CDG_RGBA_BYTES || view->hwnd == NULL) {
         return 0;
+    }
+    if (view->quit || !IsWindow(view->hwnd)) {
+        view->quit = 1;
+        return 0;
+    }
+    if (view->in_size_move) {
+        /* Avoid expensive GDI blits against a sizing/moving modal loop. */
+        return 1;
     }
     now_ms = dashcdg_clock_now_ms();
     if (view->last_present_ms != 0U &&

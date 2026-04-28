@@ -8792,14 +8792,59 @@ static uint64_t dashcdg_tx_preview_delay_effective_ms_locked(void) {
 #endif
 
 #if DASHCDG_TX_HAVE_GL_PREVIEW
+static int g_tx_gl_display_active = 0;
+static uint64_t g_tx_gl_resize_pause_until_ms = 0U;
+static int g_tx_gl_pending_resize_w = 0;
+static int g_tx_gl_pending_resize_h = 0;
+static uint64_t g_tx_gl_last_resize_cb_ms = 0U;
+static uint64_t g_tx_gl_move_guard_until_ms = 0U;
+static int g_tx_gl_move_guard_logged = 0;
 
 static void dashcdg_tx_preview_display(void) {
     uint64_t playback_ms;
     uint64_t now_ms;
+    uint64_t local_now_ms = dashcdg_clock_now_ms();
     uint64_t packet_ts;
     char hud_line_a[256];
     char hud_line_b[256];
     int show_hud = 0;
+    int in_move_guard = 0;
+
+    if (g_tx_gl_display_active) {
+        return;
+    }
+    g_tx_gl_display_active = 1;
+    if (glutGetWindow() == 0 || g_tx_state.renderer.program == 0U) {
+        g_tx_gl_display_active = 0;
+        return;
+    }
+    if (g_tx_gl_resize_pause_until_ms != 0U && local_now_ms < g_tx_gl_resize_pause_until_ms) {
+        if (!g_tx_gl_move_guard_logged) {
+            TX_ERR("[tx-gl] move-guard active (resize-pause)\n");
+            g_tx_gl_move_guard_logged = 1;
+        }
+        g_tx_gl_display_active = 0;
+        return;
+    }
+    in_move_guard = (g_tx_gl_move_guard_until_ms != 0U && local_now_ms < g_tx_gl_move_guard_until_ms);
+    if (in_move_guard) {
+        if (!g_tx_gl_move_guard_logged) {
+            TX_ERR("[tx-gl] move-guard active (rapid resize callbacks)\n");
+            g_tx_gl_move_guard_logged = 1;
+        }
+        /* Avoid touching GL at all while the window manager is in a volatile move/resize burst. */
+        g_tx_gl_display_active = 0;
+        return;
+    }
+    if (g_tx_gl_move_guard_logged) {
+        TX_ERR("[tx-gl] move-guard cleared\n");
+        g_tx_gl_move_guard_logged = 0;
+    }
+    if (g_tx_gl_pending_resize_w > 0 && g_tx_gl_pending_resize_h > 0) {
+        dashcdg_gl_renderer_resize(&g_tx_state.renderer, g_tx_gl_pending_resize_w, g_tx_gl_pending_resize_h);
+        g_tx_gl_pending_resize_w = 0;
+        g_tx_gl_pending_resize_h = 0;
+    }
 
     pthread_mutex_lock(&g_tx_state.mutex);
     if (!g_tx_state.preview_enabled) {
@@ -8807,6 +8852,7 @@ static void dashcdg_tx_preview_display(void) {
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         glutSwapBuffers();
+        g_tx_gl_display_active = 0;
         return;
     }
 
@@ -8894,13 +8940,21 @@ static void dashcdg_tx_preview_display(void) {
     pthread_mutex_unlock(&g_tx_state.mutex);
 
     if (show_hud) {
+        int win_w = glutGet(GLUT_WINDOW_WIDTH);
+        int win_h = glutGet(GLUT_WINDOW_HEIGHT);
+
+        if (win_w <= 0 || win_h <= 0) {
+            glutSwapBuffers();
+            g_tx_gl_display_active = 0;
+            return;
+        }
         glUseProgram(0);
         glDisable(GL_TEXTURE_2D);
 
         glMatrixMode(GL_PROJECTION);
         glPushMatrix();
         glLoadIdentity();
-        glOrtho(0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT), 0, -1, 1);
+        glOrtho(0, win_w, win_h, 0, -1, 1);
         glMatrixMode(GL_MODELVIEW);
         glPushMatrix();
         glLoadIdentity();
@@ -8923,10 +8977,20 @@ static void dashcdg_tx_preview_display(void) {
     }
 
     glutSwapBuffers();
+    g_tx_gl_display_active = 0;
 }
 
 static void dashcdg_tx_preview_resize(int width, int height) {
-    dashcdg_gl_renderer_resize(&g_tx_state.renderer, width, height);
+    uint64_t now_ms = dashcdg_clock_now_ms();
+
+    g_tx_gl_pending_resize_w = width;
+    g_tx_gl_pending_resize_h = height;
+    g_tx_gl_resize_pause_until_ms = now_ms + 200U;
+    if (g_tx_gl_last_resize_cb_ms != 0U && now_ms > g_tx_gl_last_resize_cb_ms &&
+            now_ms - g_tx_gl_last_resize_cb_ms <= 120U) {
+        g_tx_gl_move_guard_until_ms = now_ms + 350U;
+    }
+    g_tx_gl_last_resize_cb_ms = now_ms;
 }
 
 static void dashcdg_tx_preview_keyboard(unsigned char key, int x, int y) {
@@ -8936,9 +9000,14 @@ static void dashcdg_tx_preview_keyboard(unsigned char key, int x, int y) {
 }
 
 static void dashcdg_tx_preview_timer(int value) {
+    uint64_t now_ms = dashcdg_clock_now_ms();
     (void) value;
 
-    glutPostRedisplay();
+    if (!g_tx_gl_display_active &&
+            (g_tx_gl_resize_pause_until_ms == 0U || now_ms >= g_tx_gl_resize_pause_until_ms) &&
+            (g_tx_gl_move_guard_until_ms == 0U || now_ms >= g_tx_gl_move_guard_until_ms)) {
+        glutPostRedisplay();
+    }
     glutTimerFunc(DASHCDG_RENDER_FRAME_INTERVAL_MS, dashcdg_tx_preview_timer, 0);
 }
 
@@ -9167,7 +9236,7 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
             memset(bgra_frame, 0, sizeof(bgra_frame));
         }
 
-        dashcdg_win32_gdi_view_present_bgra(
+        if (!dashcdg_win32_gdi_view_present_bgra(
                 view,
                 bgra_frame,
                 sizeof(bgra_frame),
@@ -9176,7 +9245,10 @@ static void dashcdg_tx_run_win32_gdi_preview_loop(int argc, char **argv) {
                 hud_line_b,
                 0x78F078U,
                 0x78F078U
-        );
+        )) {
+            g_tx_state.shutdown_requested = 1;
+            break;
+        }
     }
 
     dashcdg_win32_gdi_view_destroy(view);
