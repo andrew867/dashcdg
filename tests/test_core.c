@@ -876,6 +876,72 @@ static void test_audio_jitter_stall_when_sender_lags_packet_timeline(void) {
     assert(jb.next_media_sequence == 12U);
 }
 
+/*
+ * No media clock: loss leaves next pointing at a missing sequence while a higher seq is buffered.
+ * Without gap-ahead SKIP the drain step wedged STOP forever (common on ESP32 audio-only).
+ */
+static void test_audio_jitter_no_clock_gap_ahead_skip(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    struct dashcdg_audio_jitter_frame *frame = NULL;
+    struct dashcdg_audio_jitter_drain_input din;
+    uint64_t miss = 0U;
+    const uint8_t one[] = {0x31};
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 10U, 2000U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 0;
+    din.announced_audio_frame_ms = 20U;
+
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_APPLY);
+    dashcdg_audio_jitter_note_applied(&jb, frame, 20U);
+
+    assert(dashcdg_audio_jitter_insert(&jb, 12U, 2040U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    miss = 0U;
+    frame = NULL;
+    din.primed_decode = 0;
+    din.ms_since_prior_audio_apply = 0U;
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_SKIP);
+    assert(miss == 1U);
+    assert(jb.next_media_sequence == 12U);
+}
+
+/*
+ * With a known prior apply time, sub-window waits avoid SKIP until NO_CLOCK_GAP_AHEAD_MIN_WAIT_MS.
+ */
+static void test_audio_jitter_no_clock_gap_ahead_min_wait_when_ms_since_nonzero(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    struct dashcdg_audio_jitter_frame *frame = NULL;
+    struct dashcdg_audio_jitter_drain_input din;
+    uint64_t miss = 0U;
+    const uint8_t one[] = {0x31};
+
+    dashcdg_audio_jitter_init(&jb);
+    assert(dashcdg_audio_jitter_insert(&jb, 10U, 2000U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 0;
+    din.announced_audio_frame_ms = 20U;
+
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_APPLY);
+    dashcdg_audio_jitter_note_applied(&jb, frame, 20U);
+
+    assert(dashcdg_audio_jitter_insert(&jb, 12U, 2040U, 20U, 0U, 0U, one, sizeof(one), 0) == 1);
+
+    miss = 0U;
+    frame = NULL;
+    din.primed_decode = 1;
+    din.ms_since_prior_audio_apply = 50U;
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_STOP);
+
+    din.ms_since_prior_audio_apply = 150U;
+    assert(dashcdg_audio_jitter_drain_step(&jb, &din, &frame, &miss) == DASHCDG_AUDIO_DRAIN_SKIP);
+    assert(miss == 1U);
+    assert(jb.next_media_sequence == 12U);
+}
+
 static void test_audio_jitter_empty_skip_blocked_until_primed_decode(void) {
     struct dashcdg_audio_jitter_buffer jb;
     struct dashcdg_audio_jitter_frame *frame = NULL;
@@ -1137,6 +1203,38 @@ static void test_cdg_batch_jitter_does_not_jump_to_oldest_without_real_wait(void
     assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_SKIP);
     assert(miss == 1U);
     assert(jb.next_packet_index == 12U);
+}
+
+static void test_cdg_batch_jitter_hard_resync_jumps_toward_live_when_ring_has_future_batches(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
+    struct dashcdg_cdg_batch_jitter_drain_input din;
+    uint8_t packets[DASHCDG_MAX_CDG_BATCH_PACKETS * DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    uint64_t miss = 0U;
+
+    memset(packets, 0x88, sizeof(packets));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 0U, (uint8_t) DASHCDG_MAX_CDG_BATCH_PACKETS, packets, 0) == 1);
+    memset(&din, 0, sizeof(din));
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    dashcdg_cdg_batch_jitter_note_applied(&jb, batch);
+    assert(jb.next_packet_index == (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS);
+
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 2000U, 1U, packets, 0) == 1);
+
+    miss = 0U;
+    batch = NULL;
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    /* ~900 ms song position -> packet index ~270; batch at 2000 is the live edge in the ring. */
+    din.sender_playback_now_ms = 900U;
+    din.late_grace_ms = 80U;
+    din.late_gate = 1;
+    din.primed_decode = 1;
+    din.ms_since_prior_cdg_apply = 200U;
+    assert(dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss) == DASHCDG_CDG_BATCH_DRAIN_SKIP);
+    assert(jb.next_packet_index == 2000U);
+    assert(miss == 2000U - (uint64_t) DASHCDG_MAX_CDG_BATCH_PACKETS);
 }
 
 static void test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start(void) {
@@ -1552,6 +1650,8 @@ int main(void) {
     test_audio_jitter_sender_playback_respects_announced_preroll();
     test_audio_jitter_drain_empty_hole_recovery_bounded_skew();
     test_audio_jitter_stall_when_sender_lags_packet_timeline();
+    test_audio_jitter_no_clock_gap_ahead_skip();
+    test_audio_jitter_no_clock_gap_ahead_min_wait_when_ms_since_nonzero();
     test_audio_jitter_empty_skip_blocked_until_primed_decode();
     test_audio_jitter_does_not_jump_to_oldest_without_real_wait();
     test_audio_jitter_skip_blocked_while_device_buffer_is_healthy();
@@ -1562,6 +1662,7 @@ int main(void) {
     test_cdg_batch_jitter_apply_note_and_drain_skip();
     test_cdg_batch_jitter_sender_playback_respects_announced_preroll();
     test_cdg_batch_jitter_does_not_jump_to_oldest_without_real_wait();
+    test_cdg_batch_jitter_hard_resync_jumps_toward_live_when_ring_has_future_batches();
     test_cdg_batch_jitter_late_recovery_prefers_real_pending_batch_start();
     test_cdg_batch_jitter_late_recovery_ignores_stale_oldest_gap();
     test_cdg_batch_jitter_stale_only_does_not_emit_continuity_skip();

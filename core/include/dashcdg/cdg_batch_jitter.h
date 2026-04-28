@@ -18,6 +18,14 @@
 #define DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS 280U
 #endif
 
+/** When CDG decode/blit falls behind wall-clock but bursts exist in the ring, jump toward live (like audio). */
+#ifndef DASHCDG_CDG_HARD_RESYNC_SKEW_MS
+#define DASHCDG_CDG_HARD_RESYNC_SKEW_MS 500U
+#endif
+#ifndef DASHCDG_CDG_HARD_RESYNC_MIN_WAIT_MS
+#define DASHCDG_CDG_HARD_RESYNC_MIN_WAIT_MS 120U
+#endif
+
 struct dashcdg_cdg_batch_jitter_frame {
     int occupied;
     uint64_t packet_start_index;

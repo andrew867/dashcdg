@@ -60,6 +60,18 @@ enum { DASHCDG_AUDIO_JITTER_MAX_PAYLOAD = 255 };
 #define DASHCDG_AUDIO_HARD_RESYNC_MIN_WAIT_MS 120U
 #endif
 /*
+ * If the receiver has no media clock (`have_sender_playback` = 0), the time-based late/skip blocks
+ * in `dashcdg_audio_jitter_drain_step` never run. A single lost UDP frame then deadlocks: we need
+ * `next_media_sequence` but only a higher sequence is buffered, and the "nearly full buffer" stall
+ * path never opens under sparse loss. After a short wait (reorder window), jump the cursor to the
+ * oldest buffered frame. Embedded Wi-Fi + audio-only often has no clock until clock_sync is stable.
+ * While `ms_since_prior_audio_apply` is still 0 (nothing has drained yet), we still allow this jump
+ * when a gap is already visible — otherwise ms_since never advances and the ring can fill forever.
+ */
+#ifndef DASHCDG_AUDIO_NO_CLOCK_GAP_AHEAD_MIN_WAIT_MS
+#define DASHCDG_AUDIO_NO_CLOCK_GAP_AHEAD_MIN_WAIT_MS 100U
+#endif
+/*
  * Skip-starvation gate normally refuses loss/hole SKIP while the host PCM ring still looks "deep"
  * (protects underrun). If decode is wedged for this long anyway, allow SKIP — otherwise Win32/P3
  * paths can deadlock: ring never drains, gate never opens, CDG keeps advancing (see

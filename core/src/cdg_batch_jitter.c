@@ -445,6 +445,28 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         }
     }
 
+    /*
+     * Catch graphics up to media-clock when the badge applies CDG slower than real time but the jitter
+     * ring already holds batches at or past the live packet index (TX CPU load often starves CDG first;
+     * audio keeps pace). Without this, drain applies strictly in-order and CDG can lag audio with no
+     * catch-up. Audio jitter already has an equivalent hard-resync block.
+     */
+    if (in->have_sender_playback && in->late_gate != 0 && in->primed_decode != 0 &&
+            in->ms_since_prior_cdg_apply >= (uint64_t) DASHCDG_CDG_HARD_RESYNC_MIN_WAIT_MS &&
+            receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) DASHCDG_CDG_HARD_RESYNC_SKEW_MS) {
+        uint64_t target_pk = dashcdg_ms_to_packet_count(receiver_playback_now_ms);
+        struct dashcdg_cdg_batch_jitter_frame *live = dashcdg_cdg_batch_jitter_oldest_ahead(jb, target_pk);
+
+        if (live != NULL && live->packet_start_index > jb->next_packet_index) {
+            uint64_t delta = live->packet_start_index - jb->next_packet_index;
+
+            *out_missing_skips_delta = delta;
+            jb->next_packet_index = live->packet_start_index;
+            jb->next_playback_ms = dashcdg_packet_count_to_ms(live->packet_start_index);
+            return DASHCDG_CDG_BATCH_DRAIN_SKIP;
+        }
+    }
+
     frame = dashcdg_cdg_batch_jitter_find(jb, jb->next_packet_index);
     if (frame != NULL) {
         *out_frame = frame;
