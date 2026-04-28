@@ -1,4 +1,10 @@
-# Regression plan — PCM libsoxr migration
+# Regression plan — PCM libsoxr migration (historical)
+
+This plan is retained for historical migration evidence. For current desktop runtime validation, prioritize:
+
+- `make test` with `test-pcm-rate-convert`,
+- desktop RX/TX sync and startup regression scenarios from active v4 validation docs,
+- mixed GL/GDI runtime soak checks.
 
 ## Automated (`make test`)
 

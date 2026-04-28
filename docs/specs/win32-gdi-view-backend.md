@@ -50,6 +50,15 @@ require OpenGL 3**, GLEW, or GLSL. It uses **GDI** (`CreateWindow`, top-down
 - `WM_CLOSE` posts quit; main loop exits, then existing RX shutdown (audio,
   threads, `WSACleanup`) runs in `dashcdg_desktop_rx_main`.
 
+## Move/resize lifecycle guarantees
+
+- `WM_ENTERSIZEMOVE`/`WM_EXITSIZEMOVE` are tracked so the GDI path can skip heavy
+  blits during drag/resize modal loops.
+- `WM_NCDESTROY` clears the window handle/user-data binding so stale handles are
+  not reused after close.
+- Present calls treat `quit`/invalid window state as terminal and return control
+  to caller for clean loop exit.
+
 ## Related
 
 - Platform matrix (artifacts, sneakernet, retro): [`desktop-platform-support.md`](desktop-platform-support.md)

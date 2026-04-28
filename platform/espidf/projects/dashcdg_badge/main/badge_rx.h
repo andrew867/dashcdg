@@ -28,6 +28,8 @@ typedef struct {
     uint32_t v4_audio_decode_fail;
     uint32_t v4_audio_dac_begin_fail;
     uint32_t v4_audio_unsupported_codec;
+    uint32_t v4_audio_codec_switches;
+    uint32_t v4_audio_codec_mismatch;
     uint32_t v4_loading_screen_count;
     uint64_t last_sequence;
     int32_t skew_ema_ms;

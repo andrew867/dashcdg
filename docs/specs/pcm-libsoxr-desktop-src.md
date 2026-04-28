@@ -1,6 +1,14 @@
-# Desktop PCM sample-rate conversion — libsoxr
+# Desktop PCM sample-rate conversion — historical libsoxr migration note
 
-## Goal
+## Status
+
+This document is retained as migration history. Current desktop runtime behavior is:
+
+- in-rate (`session sample rate == output sample rate`) playout remains bit-transparent unless an explicit bounded sync correction is active,
+- equal-rate sync correction no longer depends on a direct libsoxr equal-rate path,
+- `pcm_soxr_stream` remains relevant for true sample-rate mismatches where enabled by build/runtime path.
+
+## Original migration goal (historical)
 
 Use **libsoxr** (SoX Resampler, LGPL) as the **only** high-quality SRC path for desktop builds that define `DASHCDG_HAVE_LIBSOXR` (MinGW sneakernet / typical Windows builds; optional vendored tree on Linux).
 

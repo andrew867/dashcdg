@@ -25,7 +25,7 @@ The sender and receiver share one protocol and one timeline:
 
 - `core/src/cdg.c`: deterministic CD+G packet application, snapshotting, and seek primitives
 - `core/src/media_clock.c`: bounded remote/local time discipline helpers
-- `proto/src/protocol.c`: packet serialization and parsing for protocol v3
+- `proto/src/protocol.c`: packet serialization and parsing for protocol v4 (with legacy v3 compatibility paths)
 - `platform/desktop/src/app_tx.c`: TX state machine, scheduler, playlist logic, pause screen, PTP master behavior, and FEC generation
 - `platform/desktop/src/app_rx.c`: RX session state, jitter queues, FEC recovery, snapshot apply, PTP slave behavior, and render/audio startup gates
 - `platform/desktop/src/desktop_audio.c`: queue-driven PortAudio backend used by RX network playback
@@ -37,24 +37,22 @@ The sender and receiver share one protocol and one timeline:
 
 ```mermaid
 flowchart LR
-    prep[Track load plus prepare] --> announce[ANNOUNCE]
-    prep --> beacon[CLOCK_BEACON]
-    prep --> chunks[ASSET_CHUNK]
-    prep --> af[AUDIO_FRAME]
-    prep --> cdg[CDG_BATCH]
-    prep --> snap[CDG_SNAPSHOT]
-    af --> fec[FEC_PARITY]
-    cdg --> fec
-    announce --> rxstate[RX session bootstrap]
-    beacon --> rxstate
-    chunks --> rxstate
-    snap --> rxstate
-    af --> jitter[Audio jitter queue]
-    cdg --> jitter2[CDG jitter queue]
-    fec --> repair[FEC repair attempt]
+    prep[Track load plus prepare] --> v4meta[V4_SESSION_INFO]
+    prep --> v4clock[V4_CLOCK_SYNC]
+    prep --> va[V4_VIDEO_ANCHOR]
+    prep --> vd[V4_VIDEO_DELTA]
+    prep --> ac[V4_AUDIO_CHUNK]
+    vd --> rw[V4_REPAIR_WINDOW]
+    ac --> rw
+    v4meta --> rxstate[RX session bootstrap]
+    v4clock --> rxstate
+    va --> rxstate
+    ac --> jitter[Audio jitter queue]
+    vd --> jitter2[CDG jitter queue]
+    rw --> repair[FEC repair attempt]
     repair --> jitter
     repair --> jitter2
-    jitter --> decode[Opus decode]
+    jitter --> decode[Codec decode]
     decode --> pa[PortAudio stream]
     jitter2 --> live[Live CDG state]
     pa --> sync[Audio-led playout time]
@@ -105,11 +103,11 @@ Important current behavior:
 
 `app_tx.c` is responsible for:
 
-- periodic `ANNOUNCE` and `CLOCK_BEACON`
-- live `AUDIO_FRAME` send
-- live `CDG_BATCH` send
-- bounded `FEC_PARITY` generation
-- periodic `CDG_SNAPSHOT` generation
+- periodic `V4_SESSION_INFO` and `V4_CLOCK_SYNC`
+- live `V4_AUDIO_CHUNK` send
+- live `V4_VIDEO_DELTA` send
+- bounded `V4_REPAIR_WINDOW` generation
+- periodic `V4_VIDEO_ANCHOR` generation
 - pause-screen snapshot generation
 - preview HUD and terminal stats
 - operator commands for pause, next, back, restart, rebroadcast, and visibility
@@ -138,12 +136,11 @@ Pause is not just a local UI stop:
 
 RX combines bootstrap and live playout:
 
-1. `ANNOUNCE` prepares or resets session state
+1. `V4_SESSION_INFO` prepares or resets session state
 2. RX anchors the sender clock immediately from a fresh announce on new sessions or track changes
-3. `ASSET_CHUNK` rebuilds the full CDG asset in the background
-4. `CDG_SNAPSHOT` can immediately seed the live framebuffer before asset completion
-5. `AUDIO_FRAME` and `CDG_BATCH` enter bounded jitter queues
-6. `FEC_PARITY` is used to recover a single missing payload per protected group when possible
+3. `V4_VIDEO_ANCHOR` can immediately seed the live framebuffer before full steady-state deltas
+4. `V4_AUDIO_CHUNK` and `V4_VIDEO_DELTA` enter bounded jitter queues
+5. `V4_REPAIR_WINDOW` is used to recover bounded losses in protected groups when possible
 7. PortAudio startup happens asynchronously so GUI/headless status does not stall
 
 ### Clocking
@@ -183,9 +180,9 @@ Current FEC behavior:
 
 Late join now combines three layers:
 
-1. repeated `ANNOUNCE` for session discovery and config
-2. repeated `ASSET_CHUNK` for deterministic full-asset rebuild
-3. periodic `CDG_SNAPSHOT` for fast visual bootstrap and mid-session repair anchor
+1. repeated `V4_SESSION_INFO` for session discovery and config
+2. periodic `V4_VIDEO_ANCHOR` for deterministic visual bootstrap/repair
+3. steady `V4_VIDEO_DELTA` + repair windows for ongoing state convergence
 
 That means:
 
@@ -234,7 +231,7 @@ Desktop-specific today:
 - The clock loop is software timestamped and millisecond scale, not venue-grade hardware timestamping.
 - FEC is intentionally bounded and only repairs one missing payload per group.
 - Long impaired-network soak validation is still incomplete.
-- There is no embedded receiver implementation yet; only the reusable seams and planning docs exist.
+- Embedded receiver implementation exists (`platform/espidf/projects/dashcdg_badge/main/badge_rx.c`) and tracks the desktop v4 contract with platform-specific constraints.
 
 ## Suggested Reading Order
 

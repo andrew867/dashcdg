@@ -87,7 +87,7 @@ Variables (see `Makefile`):
 
 - `MINGW_ARCH=mingw64` | `mingw32`
 - `WINDOWS_LEGACY_TARGET=1` — XP-oriented PE subsystem flags; on i686 adds `-march=pentium3 -mtune=pentium3` when retro bundle is off.
-- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, same **`-march=pentium3`** object tuning as other pre-SSE2 profiles, `LDLIBS_DESKTOP_RETRO` (no OpenGL stack; **Opus + PortAudio + libsoxr** still linked; runtime DLL copy list matches the retro Makefile rule — see `Makefile` `WINDOWS_RETRO_BUNDLE` / `bundle-runtime`).
+- `WINDOWS_RETRO_BUNDLE=1` — **requires** `mingw32`; switches `BUILD_DIR` to `build/x86-retro`, WinNT 5.0 defaults, same **`-march=pentium3`** object tuning as other pre-SSE2 profiles, `LDLIBS_DESKTOP_RETRO` (no OpenGL stack; **Opus + PortAudio** linked; runtime DLL copy list matches the retro Makefile rule — see `Makefile` `WINDOWS_RETRO_BUNDLE` / `bundle-runtime`).
 
 **Windows TX/RX:** **`WINMM.dll`** for timer resolution; MMCSS uses **`AVRT.dll`** only when loadable (Vista+); XP/2000 skip AVRT (`win32_timing_boost.c`).
 

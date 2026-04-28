@@ -531,10 +531,12 @@ void dashcdg_cdg_batch_jitter_note_applied(struct dashcdg_cdg_batch_jitter_buffe
 }
 
 void dashcdg_cdg_batch_jitter_apply_snapshot_seek(struct dashcdg_cdg_batch_jitter_buffer *jb, uint64_t packet_index) {
-    size_t cap = cdg_jb_capacity(jb);
+    size_t cap;
+
     if (jb == NULL) {
         return;
     }
+    cap = cdg_jb_capacity(jb);
     for (size_t i = 0; i < cap; ++i) {
         if (jb->slots[i].occupied && jb->slots[i].packet_start_index < packet_index) {
             cdg_jb_zero_slot(&jb->slots[i]);
@@ -543,6 +545,16 @@ void dashcdg_cdg_batch_jitter_apply_snapshot_seek(struct dashcdg_cdg_batch_jitte
     jb->next_packet_index = packet_index;
     jb->next_playback_ms = dashcdg_packet_count_to_ms(packet_index);
     jb->initialized = 1;
+    /*
+     * insert() counts reorders when packet_start_index < highest_packet_index_seen. A
+     * snapshot/anchor sets a new post-snapshot CDG boundary at packet_index; the pre-snapshot
+     * high watermark is not meaningful (and may be far above packet_index after a long session),
+     * so the next live batches would be misclassified as reorders. Batches still in the buffer
+     * with start >= packet_index (kept by the purge above) are on the new timeline; reorder
+     * stats after this point are relative to the anchor cursor, not leftover indices alone — reset
+     * the watermark to packet_index unconditionally.
+     */
+    jb->highest_packet_index_seen = packet_index;
 }
 
 void dashcdg_cdg_batch_jitter_evict_pressure(struct dashcdg_cdg_batch_jitter_buffer *jb, size_t min_free_slots) {

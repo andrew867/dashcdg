@@ -15,6 +15,9 @@
 | GDI-M-02 | Resize window | No crash; image scales; 1×1 client does not divide-by-zero |
 | GDI-M-03 | Keys I / M / S | HUD toggles, mute toggles, status line to stdout |
 | GDI-M-04 | Close window | Process exits cleanly (no hang in media thread) |
+| GDI-M-05 | Click-drag move while active audio/video is running | No crash; window remains responsive; playback continues |
+| GDI-M-06 | Repeated minimize/restore during playback | No crash, no permanent black frame, decode continues |
+| GDI-M-07 | Rapid open/close cycles (5+ launches) | No stuck process; each close exits cleanly |
 
 ## Soak
 

@@ -1283,7 +1283,22 @@ static void test_cdg_batch_jitter_snapshot_seek_purges_old_slots(void) {
 
     dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 30U);
     assert(jb.next_packet_index == 30U);
+    assert(jb.highest_packet_index_seen == 30U);
     assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 0U);
+}
+
+static void test_cdg_batch_jitter_snapshot_seek_resets_reorder_baseline(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+
+    memset(one_pkt, 0x33, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 5000U, 1U, one_pkt, 1) == 1);
+    assert(jb.reordered_batches == 0U);
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 100U);
+    assert(jb.highest_packet_index_seen == 100U);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 100U, 1U, one_pkt, 1) == 1);
+    assert(jb.reordered_batches == 0U);
 }
 
 static void test_cdg_batch_jitter_evict_pressure_frees_slots(void) {
@@ -1552,6 +1567,7 @@ int main(void) {
     test_cdg_batch_jitter_stale_only_does_not_emit_continuity_skip();
     test_cdg_batch_jitter_reorder_applies_lower_index_first();
     test_cdg_batch_jitter_snapshot_seek_purges_old_slots();
+    test_cdg_batch_jitter_snapshot_seek_resets_reorder_baseline();
     test_cdg_batch_jitter_evict_pressure_frees_slots();
     test_fec_recovery();
     test_nb_ima_codec_roundtrip();

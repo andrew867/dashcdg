@@ -6,7 +6,7 @@ This document defines a repeatable desktop proof workflow for loss, reorder, and
 
 For simple direct TX/RX bring-up, the desktop apps now default to `239.255.77.77:24684` and can also run against explicit IPv4 broadcast endpoints. This document intentionally uses separate multicast input/output groups so the relay can isolate clean input traffic from impaired output traffic.
 
-The current matrix validates the protocol v3 desktop proof. The next weak-Wi-Fi
+The current matrix validates the protocol v4 desktop runtime baseline. The next weak-Wi-Fi
 transport tranche is specified separately in
 `docs/specs/bad-network-transport.md`, with a dedicated validation matrix in
 `docs/test/bad-network-transport-validation.md`.
@@ -48,10 +48,16 @@ python scripts/desktop_impairment.py \
   --emit-port 24685
 ```
 
-Start TX:
+Start TX (repo-local media):
 
 ```sh
 build/amd64/bin/desktop-tx 239.255.77.91 24684 "C:/Users/andrew/OneDrive - Green O365/Documents/GitHub/dashcdg/cdg" 1000
+```
+
+Start TX (external/network-mounted media source lane):
+
+```sh
+build/amd64/bin/desktop-tx 239.255.77.91 24684 "C:/Users/andrew/OneDrive - Green O365/Documents/GitHub/dashcdg-windows-sneakernet/windows-x64" 1000
 ```
 
 ## Suggested matrix
@@ -182,6 +188,16 @@ Relay:
   "expected proof" interpretation with a stricter matrix that includes startup
   loading-screen latency, first-audio deadlines, throughput pressure, and
   profile-specific pass criteria.
+
+## Soak source provenance (required)
+
+For archived impairment or soak evidence, record the source lane used:
+
+- `source_lane=repo_local`
+- `source_lane=external_local_disk`
+- `source_lane=network_mounted`
+
+Include the source lane value in run notes so transport jitter and source I/O jitter are not conflated during triage.
 
 ## Long soaks and quantified thresholds
 

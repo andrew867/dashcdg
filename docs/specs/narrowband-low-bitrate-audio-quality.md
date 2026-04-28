@@ -162,6 +162,10 @@ Operational fixes landed in **`platform/desktop`** and **`pcm_rate_convert.c`**:
 
 Related: **`docs/specs/opus-desktop-encoding-policy.md`**, **`AGENTS.md`**.
 
+## 11. Current-state clarification
+
+Sections describing cubic-only SRC as the active baseline should be treated as historical context when they conflict with newer implementation notes in this document and active desktop runtime docs.
+
 ---
 
 **Status for implementation:** Phase **B** (band-limited resampling core) is largely satisfied on desktop; **Phase C** (PLC on **`DRAIN_SKIP`**) remains open if loss-soak still reports audible holes.

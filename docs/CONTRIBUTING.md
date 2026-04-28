@@ -23,16 +23,15 @@ make test
 ```
 
 `make test` links and runs the core/protocol/desktop-adjacent tests. On **Windows
-MSYS2**, the desktop stack also needs **vendored libsoxr** for high-quality
-resampling before you link the full player:
+MSYS2**, the desktop stack is expected to build and run from the in-tree desktop
+audio paths plus the currently vendored codec/runtime dependencies:
 
 ```sh
-make vendor-soxr
 make desktop-apps   # or your usual make debug / dist target
 ```
 
 Details: [`specs/windows-legacy-mingw-build.md`](specs/windows-legacy-mingw-build.md),
-[`specs/pcm-libsoxr-desktop-src.md`](specs/pcm-libsoxr-desktop-src.md).
+[`specs/desktop-platform-support.md`](specs/desktop-platform-support.md).
 
 ## Commits and branches
 

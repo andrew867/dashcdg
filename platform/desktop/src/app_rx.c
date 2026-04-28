@@ -787,6 +787,9 @@ static int g_endpoint_is_broadcast;
 static uint32_t g_rx_stats_interval_ms = DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS;
 static uint32_t g_rx_av_sync_log_ms = 0U;
 static uint64_t g_rx_last_av_sync_log_ms = 0U;
+static FILE *g_rx_metrics_jsonl_file = NULL;
+static char g_rx_metrics_jsonl_path[512];
+static uint64_t g_rx_metrics_last_emit_ms = 0U;
 /* Default to DAC-follow render clock so displayed CDG tracks locally heard audio. */
 static int g_rx_graphics_clock_sender = 0;
 static int32_t g_rx_graphics_trim_ms = 0;
@@ -871,6 +874,110 @@ static void dashcdg_rx_sidecar_write_line(const char *line) {
     }
 }
 
+static int dashcdg_rx_local_audio_playback_now_locked(uint64_t *out_playback_ms);
+static uint32_t dashcdg_rx_audio_host_latency_ms_locked(void);
+static uint32_t dashcdg_rx_audio_target_total_latency_ms_locked(const struct receiver_state *state);
+static uint32_t dashcdg_rx_audio_target_buffer_ms_locked(const struct receiver_state *state);
+
+static int dashcdg_rx_metrics_jsonl_open(const char *path) {
+    FILE *file = NULL;
+
+    if (path == NULL || path[0] == '\0') {
+        return 1;
+    }
+    file = fopen(path, "ab");
+    if (file == NULL) {
+        (void) fprintf(stderr, "[rx] metrics-jsonl: failed to open path: %s\n", path);
+        return 0;
+    }
+    g_rx_metrics_jsonl_file = file;
+    snprintf(g_rx_metrics_jsonl_path, sizeof(g_rx_metrics_jsonl_path), "%s", path);
+    g_rx_metrics_jsonl_path[sizeof(g_rx_metrics_jsonl_path) - 1U] = '\0';
+    g_rx_metrics_last_emit_ms = 0U;
+    (void) fprintf(stdout, "[rx] metrics jsonl: %s\n", g_rx_metrics_jsonl_path);
+    (void) fflush(stdout);
+    return 1;
+}
+
+static void dashcdg_rx_metrics_jsonl_close(void) {
+    if (g_rx_metrics_jsonl_file != NULL) {
+        (void) fflush(g_rx_metrics_jsonl_file);
+        (void) fclose(g_rx_metrics_jsonl_file);
+        g_rx_metrics_jsonl_file = NULL;
+    }
+}
+
+static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
+    char line[1024];
+    uint32_t audio_buf_ms = g_audio != NULL ? dashcdg_desktop_audio_buffered_ms(g_audio) : 0U;
+    uint32_t target_buf_ms = dashcdg_rx_audio_target_buffer_ms_locked(&g_receiver);
+    uint32_t host_latency_ms = dashcdg_rx_audio_host_latency_ms_locked();
+    uint32_t target_total_ms = dashcdg_rx_audio_target_total_latency_ms_locked(&g_receiver);
+    uint64_t presented_audio_ts_ms = 0U;
+    int have_presented_ts = 0;
+    int phase_warn = 0;
+    int phase_fail = 0;
+    int clock_noisy = 0;
+    int clock_skew_ms = (int) g_receiver.rx_sender_skew_ema_ms;
+    int64_t ptp_offset_ema_us = g_receiver.sender_offset_ms * 1000LL;
+    int ptp_offset_i32 = 0;
+
+    if (g_rx_metrics_jsonl_file == NULL) {
+        return;
+    }
+    if (clock_skew_ms > 9999) {
+        clock_skew_ms = 9999;
+    } else if (clock_skew_ms < -9999) {
+        clock_skew_ms = -9999;
+    }
+    if (ptp_offset_ema_us > (int64_t) INT_MAX) {
+        ptp_offset_i32 = INT_MAX;
+    } else if (ptp_offset_ema_us < (int64_t) INT_MIN) {
+        ptp_offset_i32 = INT_MIN;
+    } else {
+        ptp_offset_i32 = (int) ptp_offset_ema_us;
+    }
+    phase_warn = (g_receiver.sync_group_phase_spread_ms >= 20U) ? 1 : 0;
+    phase_fail = (g_receiver.sync_group_phase_spread_ms >= 40U) ? 1 : 0;
+    clock_noisy = (g_receiver.sender_offset_ms >= 2 || g_receiver.sender_offset_ms <= -2) ? 1 : 0;
+    have_presented_ts = dashcdg_rx_local_audio_playback_now_locked(&presented_audio_ts_ms);
+    snprintf(
+            line,
+            sizeof(line),
+            "{\"type\":\"rx_metrics\",\"ts_ms\":%llu,\"receiver_instance\":%u,\"session_start_ms\":%llu,"
+            "\"sync_mode\":%u,\"group_target_ms\":%u,\"group_phase_spread_ms\":%u,"
+            "\"audio_buffer_ms\":%u,\"audio_target_buffer_ms\":%u,\"host_latency_ms\":%u,\"target_total_ms\":%u,"
+            "\"trim_ppm\":%d,\"presented_audio_ts_ms\":%u,\"clock_offset_estimate_ms\":%d,"
+            "\"clock_skew_ema_ms\":%d,\"ptp_offset_ema_us\":%d,"
+            "\"recover_host_underrun\":%llu,\"recover_zero_buffer\":%llu,\"recover_silent_stall\":%llu,"
+            "\"phase_warn\":%d,\"phase_fail\":%d,\"clock_noisy\":%d}\n",
+            (unsigned long long) now_ms,
+            (unsigned int) g_rx_receiver_instance_id,
+            (unsigned long long) g_receiver.session_start_ms,
+            (unsigned int) g_receiver.sync_group_mode,
+            (unsigned int) g_receiver.sync_group_target_latency_ms,
+            (unsigned int) g_receiver.sync_group_phase_spread_ms,
+            (unsigned int) audio_buf_ms,
+            (unsigned int) target_buf_ms,
+            (unsigned int) host_latency_ms,
+            (unsigned int) target_total_ms,
+            (int) g_receiver.audio_resample_trim_ppm,
+            (unsigned int) (have_presented_ts ? presented_audio_ts_ms : 0U),
+            (int) g_receiver.sender_offset_ms,
+            clock_skew_ms,
+            ptp_offset_i32,
+            (unsigned long long) g_receiver.recovery_host_underrun_count,
+            (unsigned long long) g_receiver.recovery_zero_buffer_count,
+            (unsigned long long) g_receiver.recovery_silent_stall_count,
+            phase_warn,
+            phase_fail,
+            clock_noisy
+    );
+    line[sizeof(line) - 1U] = '\0';
+    (void) fputs(line, g_rx_metrics_jsonl_file);
+    (void) fflush(g_rx_metrics_jsonl_file);
+}
+
 #define RX_OUT(...) \
     do { \
         char _dashcdg_rx_log_buf[DASHCDG_ASYNC_LOG_LINE_MAX]; \
@@ -898,6 +1005,7 @@ static void dashcdg_rx_sidecar_write_line(const char *line) {
     } while (0)
 
 static void dashcdg_rx_logger_shutdown_if_needed(void) {
+    dashcdg_rx_metrics_jsonl_close();
     if (g_rx_logger_enabled) {
         dashcdg_async_logger_shutdown(&g_rx_logger);
         g_rx_logger_enabled = 0;
@@ -993,9 +1101,6 @@ static void dashcdg_rx_logger_boot(const char *argv0) {
 #endif
 }
 
-static uint32_t dashcdg_rx_audio_host_latency_ms_locked(void);
-static uint32_t dashcdg_rx_audio_target_total_latency_ms_locked(const struct receiver_state *state);
-static uint32_t dashcdg_rx_audio_target_buffer_ms_locked(const struct receiver_state *state);
 static uint16_t dashcdg_rx_startup_stage_locked(
         const struct receiver_state *state,
         uint64_t local_now_ms,
@@ -1454,7 +1559,7 @@ static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
     RX_ERR(
             "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-stats-port <port>] [--rx-repair-port <port>] [--rx-av-sync-log-ms <ms>]\n"
-            "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
+            "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--metrics-jsonl <path>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
             argv0
     );
     RX_ERR( "  --win-gdi / --gdi   Windows only: force Win32 GDI instead of OpenGL\n");
@@ -1462,7 +1567,7 @@ static void dashcdg_rx_print_usage(const char *argv0) {
 #else
     RX_ERR(
             "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-stats-port <port>] [--rx-repair-port <port>] [--rx-av-sync-log-ms <ms>]\n"
-            "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [endpoint-address] [port]\n",
+            "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--metrics-jsonl <path>] [endpoint-address] [port]\n",
             argv0
     );
 #endif
@@ -1515,6 +1620,7 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
             "--rx-graphics-clock dac|sender: dac = align raster to locally heard audio (default); "
             "sender = network lyrics timeline.\n"
             "--rx-graphics-trim-ms <n>: add n ms to raster playback before seek (fine sync).\n"
+            "--metrics-jsonl <path> (alias --rx-metrics-jsonl): write 1 Hz RX sync metrics JSON lines.\n"
             "--rx-drop-audio / --no-audio-decode: ignore audio packets and keep video/sync only.\n"
     );
 }
@@ -7412,6 +7518,11 @@ static void *dashcdg_rx_media_thread_main(void *unused) {
             dashcdg_rx_publish_render_snapshot_locked(now_ms);
             g_rx_last_render_snapshot_local_ms = now_ms;
         }
+        if (g_rx_metrics_jsonl_file != NULL &&
+                (g_rx_metrics_last_emit_ms == 0U || now_ms - g_rx_metrics_last_emit_ms >= 1000U)) {
+            dashcdg_rx_metrics_emit_locked(now_ms);
+            g_rx_metrics_last_emit_ms = now_ms;
+        }
         dashcdg_rx_maybe_send_v4_stats_locked(now_ms);
         pthread_mutex_unlock(&g_receiver.mutex);
 
@@ -8045,6 +8156,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     int repair_port = DASHCDG_RX_DEFAULT_REPAIR_PORT;
     int repair_thread_started = 0;
     int help_i;
+    const char *metrics_jsonl_path = NULL;
 
     dashcdg_rx_logger_boot(argv[0] != NULL ? argv[0] : "desktop-rx");
 
@@ -8164,6 +8276,16 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_rx_graphics_trim_ms = (int32_t) strtol(argv[i], NULL, 10);
             continue;
         }
+        if (strcmp(argv[i], "--metrics-jsonl") == 0 || strcmp(argv[i], "--rx-metrics-jsonl") == 0) {
+            if (i + 1 >= argc) {
+                RX_ERR("%s: --metrics-jsonl requires a path\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
+                return 1;
+            }
+            ++i;
+            metrics_jsonl_path = argv[i];
+            continue;
+        }
         if (strcmp(argv[i], "--rx-drop-audio") == 0 || strcmp(argv[i], "--no-audio-decode") == 0) {
             g_audio_decode_disabled = 1;
             continue;
@@ -8269,6 +8391,10 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         return 1;
     }
     dashcdg_win32_process_timing_enable();
+    if (!dashcdg_rx_metrics_jsonl_open(metrics_jsonl_path)) {
+        dashcdg_rx_logger_shutdown_if_needed();
+        return 1;
+    }
 
     dashcdg_rx_init_stats_sender(g_rx_stats_port);
 
