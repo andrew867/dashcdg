@@ -232,6 +232,117 @@ struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_oldest(const str
     return oldest;
 }
 
+static struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_oldest_ahead(
+        const struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_index
+) {
+    struct dashcdg_cdg_batch_jitter_frame *oldest = NULL;
+    size_t cap = cdg_jb_capacity(jb);
+
+    if (jb == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        if (!jb->slots[i].occupied || jb->slots[i].packet_start_index < packet_index) {
+            continue;
+        }
+        if (oldest == NULL || jb->slots[i].packet_start_index < oldest->packet_start_index) {
+            oldest = (struct dashcdg_cdg_batch_jitter_frame *) &jb->slots[i];
+        }
+    }
+    return oldest;
+}
+
+static struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_predecessor(
+        const struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_index
+) {
+    struct dashcdg_cdg_batch_jitter_frame *best = NULL;
+    size_t cap = cdg_jb_capacity(jb);
+
+    if (jb == NULL || packet_index == 0U) {
+        return NULL;
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        uint64_t start;
+        uint64_t end;
+
+        if (!jb->slots[i].occupied || jb->slots[i].packet_count == 0U) {
+            continue;
+        }
+        start = jb->slots[i].packet_start_index;
+        if (start >= packet_index) {
+            continue;
+        }
+        end = start + (uint64_t) jb->slots[i].packet_count;
+        if (end != packet_index) {
+            continue;
+        }
+        if (best == NULL || start > best->packet_start_index) {
+            best = (struct dashcdg_cdg_batch_jitter_frame *) &jb->slots[i];
+        }
+    }
+    return best;
+}
+
+static struct dashcdg_cdg_batch_jitter_frame *dashcdg_cdg_batch_jitter_covering_cursor(
+        const struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_index
+) {
+    struct dashcdg_cdg_batch_jitter_frame *best = NULL;
+    size_t cap = cdg_jb_capacity(jb);
+
+    if (jb == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        uint64_t start;
+        uint64_t end;
+
+        if (!jb->slots[i].occupied || jb->slots[i].packet_count == 0U) {
+            continue;
+        }
+        start = jb->slots[i].packet_start_index;
+        if (start >= packet_index) {
+            continue;
+        }
+        end = start + (uint64_t) jb->slots[i].packet_count;
+        if (packet_index >= end) {
+            continue;
+        }
+        if (best == NULL || start > best->packet_start_index) {
+            best = (struct dashcdg_cdg_batch_jitter_frame *) &jb->slots[i];
+        }
+    }
+    return best;
+}
+
+static uint64_t dashcdg_cdg_batch_jitter_drop_stale_before_cursor(
+        struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_index
+) {
+    uint64_t dropped = 0U;
+    size_t cap = cdg_jb_capacity(jb);
+
+    if (jb == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        uint64_t end;
+
+        if (!jb->slots[i].occupied || jb->slots[i].packet_count == 0U) {
+            continue;
+        }
+        end = jb->slots[i].packet_start_index + (uint64_t) jb->slots[i].packet_count;
+        if (end < packet_index) {
+            cdg_jb_zero_slot(&jb->slots[i]);
+            jb->pending_drops++;
+            dropped++;
+        }
+    }
+    return dropped;
+}
+
 size_t dashcdg_cdg_batch_jitter_occupied_count(const struct dashcdg_cdg_batch_jitter_buffer *jb) {
     size_t n = 0U;
     size_t cap = cdg_jb_capacity(jb);
@@ -341,22 +452,36 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
     }
 
     {
-        struct dashcdg_cdg_batch_jitter_frame *oldest_gap = dashcdg_cdg_batch_jitter_oldest(jb);
-        if (oldest_gap != NULL && oldest_gap->packet_start_index < jb->next_packet_index) {
-            uint64_t oldest_end = oldest_gap->packet_start_index + (uint64_t) oldest_gap->packet_count;
-            if (oldest_end == jb->next_packet_index) {
-                jb->next_packet_index = oldest_gap->packet_start_index;
-                jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
-                *out_frame = oldest_gap;
-                return DASHCDG_CDG_BATCH_DRAIN_APPLY;
-            }
+        struct dashcdg_cdg_batch_jitter_frame *pred = dashcdg_cdg_batch_jitter_predecessor(jb, jb->next_packet_index);
+        if (pred != NULL) {
+            jb->next_packet_index = pred->packet_start_index;
+            jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
+            *out_frame = pred;
+            return DASHCDG_CDG_BATCH_DRAIN_APPLY;
+        }
+    }
+    {
+        struct dashcdg_cdg_batch_jitter_frame *cover = dashcdg_cdg_batch_jitter_covering_cursor(jb, jb->next_packet_index);
+        if (cover != NULL) {
+            jb->next_packet_index = cover->packet_start_index;
+            jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
+            *out_frame = cover;
+            return DASHCDG_CDG_BATCH_DRAIN_APPLY;
         }
     }
 
     if (!in->have_sender_playback) {
         struct dashcdg_cdg_batch_jitter_frame *oldest_live = dashcdg_cdg_batch_jitter_oldest(jb);
+        /*
+         * Before sender-playback timing exists, only allow strict in-order bootstrap.
+         *
+         * Applying an arbitrary "oldest" batch when next_packet_index is still 0 can consume
+         * mid-stream deltas before the matching snapshot/anchor epoch arrives. That corrupts the
+         * canvas and then causes continuity-skip storms while RX keeps trying to chase a boundary
+         * that was never established.
+         */
         if (jb->next_packet_index == 0U && oldest_live != NULL &&
-                oldest_live->packet_start_index > jb->next_packet_index) {
+                oldest_live->packet_start_index == jb->next_packet_index) {
             *out_frame = oldest_live;
             return DASHCDG_CDG_BATCH_DRAIN_APPLY;
         }
@@ -365,27 +490,33 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
 
     if (in->have_sender_playback && in->late_gate != 0 &&
             receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) in->late_grace_ms) {
-        struct dashcdg_cdg_batch_jitter_frame *oldest = dashcdg_cdg_batch_jitter_oldest(jb);
-        if (oldest != NULL && oldest->packet_start_index > jb->next_packet_index) {
+        struct dashcdg_cdg_batch_jitter_frame *oldest_ahead =
+                dashcdg_cdg_batch_jitter_oldest_ahead(jb, jb->next_packet_index);
+        if (oldest_ahead != NULL && oldest_ahead->packet_start_index > jb->next_packet_index) {
             if (in->primed_decode == 0 || in->ms_since_prior_cdg_apply == 0U ||
                     in->ms_since_prior_cdg_apply < (uint64_t) DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS) {
                 return DASHCDG_CDG_BATCH_DRAIN_STOP;
             }
             *out_missing_skips_delta = 1U;
-            jb->next_packet_index = oldest->packet_start_index;
-            jb->next_playback_ms = dashcdg_packet_count_to_ms(oldest->packet_start_index);
-        } else if (oldest != NULL) {
-            if (in->primed_decode == 0) {
-                return DASHCDG_CDG_BATCH_DRAIN_STOP;
-            }
-            uint64_t skipped_packet_index = jb->next_packet_index + DASHCDG_MAX_CDG_BATCH_PACKETS;
-            *out_missing_skips_delta = 1U;
-            jb->next_packet_index = skipped_packet_index;
-            jb->next_playback_ms = dashcdg_packet_count_to_ms(skipped_packet_index);
-        } else {
+            jb->next_packet_index = oldest_ahead->packet_start_index;
+            jb->next_playback_ms = dashcdg_packet_count_to_ms(oldest_ahead->packet_start_index);
+            return DASHCDG_CDG_BATCH_DRAIN_SKIP;
+        }
+        if (dashcdg_cdg_batch_jitter_drop_stale_before_cursor(jb, jb->next_packet_index) > 0U) {
             return DASHCDG_CDG_BATCH_DRAIN_STOP;
         }
-        return DASHCDG_CDG_BATCH_DRAIN_SKIP;
+        oldest_ahead = dashcdg_cdg_batch_jitter_oldest_ahead(jb, jb->next_packet_index);
+        if (oldest_ahead != NULL && oldest_ahead->packet_start_index > jb->next_packet_index) {
+            if (in->primed_decode == 0 || in->ms_since_prior_cdg_apply == 0U ||
+                    in->ms_since_prior_cdg_apply < (uint64_t) DASHCDG_CDG_STALL_LOSS_SKIP_MIN_WAIT_MS) {
+                return DASHCDG_CDG_BATCH_DRAIN_STOP;
+            }
+            *out_missing_skips_delta = 1U;
+            jb->next_packet_index = oldest_ahead->packet_start_index;
+            jb->next_playback_ms = dashcdg_packet_count_to_ms(oldest_ahead->packet_start_index);
+            return DASHCDG_CDG_BATCH_DRAIN_SKIP;
+        }
+        return DASHCDG_CDG_BATCH_DRAIN_STOP;
     }
     return DASHCDG_CDG_BATCH_DRAIN_STOP;
 }
