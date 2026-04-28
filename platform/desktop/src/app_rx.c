@@ -4450,6 +4450,7 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
         int32_t trim_ppm = have_trim_ppm_for_frame
                 ? trim_ppm_for_frame
                 : dashcdg_rx_audio_resample_trim_ppm_locked(state, buffered_ms);
+        int allow_sync_trim_equal_rate = 0;
         unsigned int host_ch = (unsigned int) host_output_channels;
         const int16_t *qptr = pcm;
         size_t qfc = (size_t) decoded_frames;
@@ -4463,8 +4464,15 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
          * Keep the RX path bit-transparent whenever decode/session and device rates already match.
          * This queue path is shared by PortAudio and WinMM outputs; forcing SRC/trim in-rate can
          * produce "healthy logs but audible silence" on some Windows endpoints.
+         *
+         * Exception: when group-sync is ACTIVE and controller trim is non-zero, allow a tiny
+         * equal-rate stretch/compress path (SOXR stream) to converge multi-receiver sample timing.
          */
-        if (ses_sr == out_sr) {
+        allow_sync_trim_equal_rate =
+                (ses_sr == out_sr) &&
+                (state->sync_group_mode == DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE) &&
+                (trim_ppm != 0);
+        if (ses_sr == out_sr && !allow_sync_trim_equal_rate) {
             trim_ppm = 0;
             state->pcm_src_overlap_valid = 0U;
         }
@@ -4505,37 +4513,56 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
                     return -1;
                 }
 #if defined(DASHCDG_HAVE_LIBSOXR)
-                if (trim_ppm == 0 &&
-                        dashcdg_pcm_soxr_stream_ensure(ses_sr, effective_out_sr) &&
+                if (dashcdg_pcm_soxr_stream_ensure(ses_sr, effective_out_sr) &&
                         dashcdg_pcm_soxr_stream_process_interleaved(pcm, (size_t) decoded_frames, rs_tmp, out_fc)) {
                     used_stream_soxr = 1;
                     state->pcm_src_overlap_valid = 0U;
                 }
 #endif
                 if (!used_stream_soxr) {
+                    /*
+                     * Safety valve: do not use overlap resampler for equal-rate trim fallback.
+                     * If streaming SOXR is unavailable, stay bit-transparent for this frame.
+                     */
+                    if (ses_sr == out_sr && allow_sync_trim_equal_rate) {
 #if defined(DASHCDG_HAVE_LIBSOXR)
-                    dashcdg_pcm_soxr_stream_reset();
+                        dashcdg_pcm_soxr_stream_reset();
 #endif
-                    dashcdg_pcm_stereo_interleaved_resample_overlap(
-                            state->pcm_src_overlap_l,
-                            state->pcm_src_overlap_r,
-                            &state->pcm_src_overlap_valid,
-                            stream_in_before,
-                            stream_out_before,
-                            pcm,
-                            (size_t) decoded_frames,
-                            ses_sr,
-                            rs_tmp,
-                            out_fc,
-                            effective_out_sr,
-                            mono_scratch,
-                            wr_r_st,
-                            wm
-                    );
+                        free(rs_tmp);
+                        rs_tmp = NULL;
+                        qptr = pcm;
+                        qfc = (size_t) decoded_frames;
+                        resampled_output = 0;
+                        effective_out_sr = ses_sr;
+                        trim_ppm = 0;
+                        state->pcm_src_overlap_valid = 0U;
+                    } else {
+#if defined(DASHCDG_HAVE_LIBSOXR)
+                        dashcdg_pcm_soxr_stream_reset();
+#endif
+                        dashcdg_pcm_stereo_interleaved_resample_overlap(
+                                state->pcm_src_overlap_l,
+                                state->pcm_src_overlap_r,
+                                &state->pcm_src_overlap_valid,
+                                stream_in_before,
+                                stream_out_before,
+                                pcm,
+                                (size_t) decoded_frames,
+                                ses_sr,
+                                rs_tmp,
+                                out_fc,
+                                effective_out_sr,
+                                mono_scratch,
+                                wr_r_st,
+                                wm
+                        );
+                    }
                 }
-                qptr = rs_tmp;
-                qfc = out_fc;
-                resampled_output = 1;
+                if (rs_tmp != NULL) {
+                    qptr = rs_tmp;
+                    qfc = out_fc;
+                    resampled_output = 1;
+                }
             } else {
 #if defined(DASHCDG_HAVE_LIBSOXR)
                 dashcdg_pcm_soxr_stream_reset();
