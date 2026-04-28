@@ -167,7 +167,7 @@
 #define DASHCDG_TX_RX_REPORTER_CONTROLLER_STALE_MS 4500U
 #define DASHCDG_TX_RX_REPORTER_DEGRADED_MS 6500U
 #define DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_BUFFER_MS 1500U
-#define DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS (-80)
+#define DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS (-250)
 #define DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS 4000
 #define DASHCDG_TX_RX_SUMMARY_INTERVAL_MS 2000U
 #define DASHCDG_TX_RX_MEASUREMENTS_REFRESH_MIN_MS 100U
@@ -3430,6 +3430,8 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
     int64_t observed_domain_latency_ms = 0;
     int have_observed_domain_latency = 0;
     int64_t chosen_latency_ms;
+    int64_t fallback_target_latency_ms = 0;
+    int have_fallback_target_latency = 0;
     uint64_t receipt_age_ms;
     const struct dashcdg_v4_rx_stats_payload *stats;
 
@@ -3443,6 +3445,11 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
     if (stats == NULL || latency_ms_out == NULL ||
             stats->presented_audio_timestamp_ms == 0U) {
         return 0;
+    }
+    if (stats->target_total_latency_ms > 0U &&
+            stats->target_total_latency_ms <= (uint16_t) DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS) {
+        fallback_target_latency_ms = (int64_t) stats->target_total_latency_ms;
+        have_fallback_target_latency = 1;
     }
 
     receipt_age_ms = now_ms > slot->last_local_ms ? now_ms - slot->last_local_ms : 0U;
@@ -3478,9 +3485,18 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
                 observed_domain_latency_ms >= (int64_t) DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS - 2000LL &&
                 observed_domain_latency_ms <= (int64_t) DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS + 20000LL) {
             chosen_latency_ms = observed_domain_latency_ms;
+        } else if (have_fallback_target_latency) {
+            chosen_latency_ms = fallback_target_latency_ms;
         } else if (chosen_latency_ms < -60000LL || chosen_latency_ms > 60000LL) {
             return 0;
         }
+    }
+    if (chosen_latency_ms <= 0 && have_fallback_target_latency) {
+        /*
+         * During RX startup/recovery, playback-domain projections can temporarily go negative.
+         * Keep controller inputs sane by using the receiver's declared target latency instead.
+         */
+        chosen_latency_ms = fallback_target_latency_ms;
     }
 
     if (chosen_latency_ms > (int64_t) INT32_MAX) {
@@ -3811,12 +3827,6 @@ static enum dashcdg_tx_rx_peer_health dashcdg_tx_classify_rx_reporter_locked(
         slot->health_state = (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
         slot->controller_eligible = 0U;
         snprintf(slot->health_reason, sizeof(slot->health_reason), "bad-lat");
-        return DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
-    }
-    if (rx_latency_ms <= 0) {
-        slot->health_state = (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
-        slot->controller_eligible = 0U;
-        snprintf(slot->health_reason, sizeof(slot->health_reason), "no-latency");
         return DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
     }
     if (age_ms > DASHCDG_TX_RX_REPORTER_CONTROLLER_STALE_MS) {

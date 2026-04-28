@@ -385,6 +385,22 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
 
     starvation_gate_open = dashcdg_audio_jitter_skip_starvation_gate_open(in);
 
+    if (in->have_sender_playback &&
+            in->primed_decode != 0 &&
+            in->announced_audio_frame_ms > 0 &&
+            in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_HARD_RESYNC_MIN_WAIT_MS &&
+            receiver_playback_now_ms > jb->next_playback_ms + (uint64_t) DASHCDG_AUDIO_HARD_RESYNC_SKEW_MS) {
+        struct dashcdg_audio_jitter_frame *oldest = dashcdg_audio_jitter_oldest(jb);
+
+        if (oldest != NULL && oldest->media_sequence > jb->next_media_sequence) {
+            uint32_t jump = oldest->media_sequence - jb->next_media_sequence;
+            *out_missing_skips_delta = (uint64_t) jump;
+            jb->next_media_sequence = oldest->media_sequence;
+            jb->next_playback_ms = oldest->playback_ms;
+            return DASHCDG_AUDIO_DRAIN_SKIP;
+        }
+    }
+
     if (in->primed_decode != 0 &&
             in->announced_audio_frame_ms > 0 &&
             in->ms_since_prior_audio_apply >= (uint64_t) DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS &&

@@ -8,7 +8,7 @@
 
 | Area | Effort | Why |
 |------|--------|-----|
-| Wire + session + clock | **Low–medium** | `badge_rx.c` already joins multicast, parses v4, runs `handle_clock_sync`, owns `dashcdg_media_clock_t`. **Audio datagrams are not handled yet** — add `DASHCDG_PACKET_V4_AUDIO_CHUNK` to the same `rx_one_datagram` switch and feed a new pipeline. |
+| Wire + session + clock | **Low–medium** | `badge_rx.c` joins multicast, parses v4, handles `DASHCDG_PACKET_V4_AUDIO_CHUNK`, runs `handle_clock_sync`, and owns `dashcdg_media_clock_t`. Current focus is hardening epoch transitions (`session_start_ms`) and restart behavior under track advance / reorder. |
 | **Sync / timing discipline** | **Medium** | Desktop proves the contract in `platform/desktop/src/app_rx.c` (jitter priming, `playback_base_*`, cold join, pause). **ESP32 `dashcdg_core` today does *not* compile `core/src/audio_jitter.c`**, so there is **no shared “drop in” audio playout module** on the badge yet — either add `audio_jitter.c` (+ glue) to `components/dashcdg_core` or grow a badge-local ring + scheduler that mirrors the same invariants (documented in `docs/specs/v4-codec-switching-contract.md` and `AGENTS.md`). |
 | **Decoders (your order)** | **Medium → high** | **AMR-WB (6)** and **AMR-NB (5)** have a known desktop path (`amr_*_codec.c` + vendor tree per `audio-codec-modules.md`). **QCELP-13k (3)** and **Bluetooth SBC (7)** are desktop-wrapped vendor C; **Opus (1)** is `libopus` + `opus_codec.c`. None of that is linked on ESP32 today — each is a **port + CMake + heap budget + stack** exercise. |
 | **Audio lab** | **Low once karaoke path exists** | Audio lab today is **PWM lab PCM** (`badge_lab_ym.c`), not v4. Reuse is “same output stage + volume” if you add a “stream lab sample” mode; **not** the same code path as multicast RX until you factor a small “PCM → amp” API. |
@@ -40,7 +40,7 @@ Your order: **AMR-WB → QCELP-13k → SBC → Opus (last)**.
 
 Repo embedded policy (`docs/specs/embedded-rx-audio-profile.md`) may still mention NB-IMA-first language; treat this roadmap as the **badge** source of truth until that doc is reconciled.
 
-1. **Phase 0 (prove audio path):** v4 audio chunk ingest + **`core/src/audio_jitter.c`** + playout clock from **`media_clock` / `V4_CLOCK_SYNC`** + **AMR-WB decode** to the board audio stage (DAC or I2S), with desktop TX on `--v4-audio-codec=amr-wb`.
+1. **Phase 0 (prove audio path):** keep v4 audio chunk ingest + **`core/src/audio_jitter.c`** + playout clock from **`media_clock` / `V4_CLOCK_SYNC`**, then complete stable board decode/output policy for soak (AMR-WB first remains preferred once full codec stack is enabled).
 2. **Phase 1:** Harden **AMR-WB** — session/codec switch without leak, soak with CDG + Wi-Fi, measure heap/WDT.
 3. **Phase 2:** **QCELP-13k (3)**.
 4. **Phase 3:** **Bluetooth SBC (7)** — confirm **byte-for-byte** framing matches desktop `nb_sbc_codec` output (kernel `sbc` LGPL — static link policy in `audio-codec-modules.md`).
@@ -50,10 +50,15 @@ Repo embedded policy (`docs/specs/embedded-rx-audio-profile.md`) may still menti
 
 ### Phase 0 — Audio existence (gate: AMR-WB audible on target)
 
-- [ ] Add `DASHCDG_PACKET_V4_AUDIO_CHUNK` handling in `badge_rx.c` (or dedicated task fed from RX).
+- [x] Add `DASHCDG_PACKET_V4_AUDIO_CHUNK` handling in `badge_rx.c` (or dedicated task fed from RX).
 - [x] Add `audio_jitter.c` to `components/dashcdg_core` (same module as desktop).
-- [ ] Board audio output (native DAC continuous @ 48 kHz mono **or** I2S); playout clock from `media_clock` + `V4_CLOCK_SYNC` (same fields desktop uses).
+- [ ] Board audio output soak gate remains open: path is active on badge, but session-epoch restart hardening and codec-path acceptance tests are still in progress.
 - [ ] **Tests:** cold join, late join, 60 s idle RX then TX start, no wedge; log underruns/overruns.
+
+## 2026-04-27 update (implemented hardening)
+
+- Badge RX now applies a **clock-sync epoch reset** when `v4_clock_sync.session_start_ms` changes unexpectedly, so audio/CDG pipelines are reset even if `v4_session_info` timing is delayed.
+- Session reset path in `badge_rx.c` is centralized (audio jitter clear, DAC stop, anchor assembly reset, video-repair-group clear, CDG jitter clear, media clock reset), reducing divergence between `session_info`-driven and clock-driven transitions.
 
 ### Phase 1 — AMR-WB (gate: stable lyric alignment “good enough”)
 

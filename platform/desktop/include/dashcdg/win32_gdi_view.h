@@ -35,7 +35,9 @@ int dashcdg_win32_gdi_view_present_rgba(
         size_t rgba_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 );
 
 int dashcdg_win32_gdi_view_present_bgra(
@@ -44,7 +46,9 @@ int dashcdg_win32_gdi_view_present_bgra(
         size_t bgra_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 );
 
 #endif

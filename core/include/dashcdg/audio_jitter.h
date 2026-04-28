@@ -48,6 +48,18 @@ enum { DASHCDG_AUDIO_JITTER_MAX_PAYLOAD = 255 };
 #define DASHCDG_AUDIO_STALL_LOSS_SKIP_MIN_WAIT_MS 280U
 #endif
 /*
+ * Hard resync path: if sender playback runs far ahead of jb->next_playback_ms,
+ * jump the jitter cursor to the oldest available frame to rapidly catch up.
+ * This complements ppm servo (fine control) with bounded "drop stale backlog"
+ * behavior during severe stalls/reorder storms.
+ */
+#ifndef DASHCDG_AUDIO_HARD_RESYNC_SKEW_MS
+#define DASHCDG_AUDIO_HARD_RESYNC_SKEW_MS 500U
+#endif
+#ifndef DASHCDG_AUDIO_HARD_RESYNC_MIN_WAIT_MS
+#define DASHCDG_AUDIO_HARD_RESYNC_MIN_WAIT_MS 120U
+#endif
+/*
  * Skip-starvation gate normally refuses loss/hole SKIP while the host PCM ring still looks "deep"
  * (protects underrun). If decode is wedged for this long anyway, allow SKIP — otherwise Win32/P3
  * paths can deadlock: ring never drains, gate never opens, CDG keeps advancing (see

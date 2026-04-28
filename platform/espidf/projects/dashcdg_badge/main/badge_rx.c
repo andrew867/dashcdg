@@ -278,6 +278,7 @@ static int badge_rx_ensure_amr_pcm_scratch(void);
 static void badge_rx_free_audio_jitter(void);
 static void badge_rx_drain_v4_audio(uint64_t local_now_ms);
 static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64_t local_now_ms);
+static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms);
 static void badge_rx_apply_memory_profile_locked(void);
 static void badge_rx_adapt_jitter_capacity_locked(uint64_t now_ms);
 static void badge_rx_note_wire_sequence(uint64_t seq);
@@ -1847,6 +1848,45 @@ static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64
     badge_rx_drain_v4_audio(local_now_ms);
 }
 
+static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
+{
+    xSemaphoreGive(s_mtx);
+    if (s_audio_jb != NULL) {
+        dashcdg_audio_jitter_clear(s_audio_jb);
+    }
+    badge_rx_amr_decoder_reset();
+    dashcdg_platform_hw_karaoke_dac_stop();
+    s_audio_decode_primed = 0;
+    s_last_audio_jitter_apply_local_ms = 0U;
+    s_last_presented_audio_timestamp_ms = 0U;
+    if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "session reset: mutex re-acquire failed");
+        return -1;
+    }
+
+    s_cdg_snapshots_applied = 0U;
+    s_pre_anchor_palette_mask = 0U;
+    badge_rx_v4_anchor_asm_reset();
+    memset(s_video_repair_groups, 0, sizeof(s_video_repair_groups));
+    s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
+    if (s_cdg != NULL) {
+        dashcdg_cdg_state_init(s_cdg);
+        dashcdg_cdg_state_raster_dirty_mark_full(s_cdg);
+    }
+    if (s_jb != NULL) {
+        dashcdg_cdg_batch_jitter_clear(s_jb);
+    }
+    s_jitter_cdg_primed = 0;
+    s_last_cdg_apply_local_ms = 0U;
+    s_stats.skew_ema_inited = 0;
+    s_stats.have_clock = 0;
+    s_clock_pb_inited = 0U;
+    s_clock_last_playback_ms = 0U;
+    dashcdg_media_clock_init(&s_mclk);
+    s_active_session_local_start_ms = local_now_ms;
+    return 0;
+}
+
 static void handle_session_info(const struct dashcdg_packet_view *view)
 {
     int same_session;
@@ -1867,55 +1907,44 @@ static void handle_session_info(const struct dashcdg_packet_view *view)
         return;
     }
 
-    xSemaphoreGive(s_mtx);
-    if (s_audio_jb != NULL) {
-        dashcdg_audio_jitter_clear(s_audio_jb);
-    }
-    badge_rx_amr_decoder_reset();
-    dashcdg_platform_hw_karaoke_dac_stop();
-    s_audio_decode_primed = 0;
-    s_last_audio_jitter_apply_local_ms = 0U;
-    s_last_presented_audio_timestamp_ms = 0U;
-    if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(TAG, "session_info: mutex re-acquire failed");
+    if (badge_rx_reset_for_new_session_locked(dashcdg_clock_now_ms()) != 0) {
         return;
     }
 
     s_active_session_start_ms = view->v4_session_info.session_start_ms;
-    s_active_session_local_start_ms = dashcdg_clock_now_ms();
     s_active_asset_size = view->v4_session_info.asset_size;
     memcpy(s_active_song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID);
     s_active_session_valid = 1;
-
-    s_cdg_snapshots_applied = 0U;
-    s_pre_anchor_palette_mask = 0U;
-    badge_rx_v4_anchor_asm_reset();
-    memset(s_video_repair_groups, 0, sizeof(s_video_repair_groups));
-
-    s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
-
-    if (s_cdg != NULL) {
-        dashcdg_cdg_state_init(s_cdg);
-    }
-    if (s_jb != NULL) {
-        dashcdg_cdg_batch_jitter_clear(s_jb);
-    }
-    s_jitter_cdg_primed = 0;
-    s_last_cdg_apply_local_ms = 0U;
-    s_stats.skew_ema_inited = 0;
     memset(s_stats.song_id, 0, sizeof(s_stats.song_id));
     memcpy(s_stats.song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID);
     s_stats.song_id[DASHCDG_MAX_SONG_ID] = '\0';
     s_stats.v4_session_count++;
-    s_stats.have_clock = 0;
-    dashcdg_media_clock_init(&s_mclk);
-    if (s_cdg != NULL) {
-        dashcdg_cdg_state_raster_dirty_mark_full(s_cdg);
-    }
 }
 
 static void handle_clock_sync(const struct dashcdg_packet_view *view, uint64_t local_now_ms)
 {
+    if (view->v4_clock_sync.session_start_ms != 0U &&
+        s_active_session_valid &&
+        s_active_session_start_ms != 0U &&
+        view->v4_clock_sync.session_start_ms != s_active_session_start_ms) {
+        ESP_LOGI(
+                TAG,
+                "clock epoch change session=%llu->%llu; forcing session reset",
+                (unsigned long long)s_active_session_start_ms,
+                (unsigned long long)view->v4_clock_sync.session_start_ms);
+        if (badge_rx_reset_for_new_session_locked(local_now_ms) != 0) {
+            return;
+        }
+        s_active_session_start_ms = view->v4_clock_sync.session_start_ms;
+        s_active_session_valid = 1;
+        s_stats.v4_session_count++;
+    } else if (view->v4_clock_sync.session_start_ms != 0U &&
+               (!s_active_session_valid || s_active_session_start_ms == 0U)) {
+        s_active_session_start_ms = view->v4_clock_sync.session_start_ms;
+        s_active_session_local_start_ms = local_now_ms;
+        s_active_session_valid = 1;
+    }
+
     if (s_clock_pb_inited) {
         uint64_t delta_ms = (view->v4_clock_sync.playback_ms >= s_clock_last_playback_ms)
                                 ? (view->v4_clock_sync.playback_ms - s_clock_last_playback_ms)

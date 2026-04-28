@@ -17,6 +17,12 @@ sneakernet packaging) matches **what we build and run today**. The rows below ar
 still **research / hardening**, not a claim that the tree is broken — they are the
 backlog that keeps “possible” from turning into “mythical”.
 
+## Snapshot update: 2026-04-27
+
+- TX and RX now include additional v4 hardening beyond initial `v0.1.0` baseline: leader/follower trim hinting, playlist-advance path unification, hard-audio-resync telemetry, and stricter CDG bootstrap ordering.
+- TX now performs per-track **CDG hazard assessment** (xor-heavy + sparse keyframe clears) and raises minimum CDG protection automatically (FEC floor + tighter anchor cadence caps) for hostile assets.
+- ESP32 badge RX now performs a **clock-sync epoch reset** on `session_start_ms` transitions to keep track-advance behavior aligned with desktop restart invariants.
+
 ## Priority order
 
 1. **Tranche 0**: stabilize current v4 behavior and freeze validation gates

@@ -34,6 +34,14 @@ isProject: false
 
 # ESP32 CYD embedded program (enterprise tranches)
 
+## Progress update (2026-04-27)
+
+- Desktop `tr0a-v4-stabilize` remains the baseline handoff gate and is complete.
+- Badge receiver now includes additional runtime parity with desktop session-transition behavior:
+  - clock-sync epoch transition (`v4_clock_sync.session_start_ms`) forces a full session reset path,
+  - reset path clears audio jitter + DAC state and CDG anchor/repair/jitter state in one place.
+- Protocol-v4 hardening for hostile CDG assets now includes TX hazard-aware safeguards (asset-scoped FEC floor and anchor cadence caps), which should be treated as part of Tranche 0 stabilization evidence feeding embedded bring-up.
+
 ## Baseline in this repo
 
 - **Chosen hardware** is already documented: primary target **Freenove ESP32 CYD 3.2", 240×320 IPS, ST7789**, ESP-IDF + FreeRTOS ([`docs/hardware/amazon-board-recommendation.md`](docs/hardware/amazon-board-recommendation.md), [`docs/hardware/esp32-board-interface-notes.md`](docs/hardware/esp32-board-interface-notes.md)).

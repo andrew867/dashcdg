@@ -240,7 +240,9 @@ static int dashcdg_win32_gdi_view_present_bgra_internal(
         size_t bgra_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 ) {
     HDC hdc;
     RECT cr;
@@ -309,9 +311,24 @@ static int dashcdg_win32_gdi_view_present_bgra_internal(
         HFONT old = (HFONT) SelectObject(hdc, font);
         SetBkMode(hdc, OPAQUE);
         SetBkColor(hdc, RGB(0, 0, 0));
-        SetTextColor(hdc, RGB(120, 240, 120));
+        SetTextColor(
+                hdc,
+                RGB(
+                        (int) ((hud_color_a_rgb >> 16U) & 0xffU),
+                        (int) ((hud_color_a_rgb >> 8U) & 0xffU),
+                        (int) (hud_color_a_rgb & 0xffU)
+                )
+        );
         TextOutA(hdc, 8, 8, hud_line_a, len_a);
         if (hud_line_b != NULL) {
+            SetTextColor(
+                    hdc,
+                    RGB(
+                            (int) ((hud_color_b_rgb >> 16U) & 0xffU),
+                            (int) ((hud_color_b_rgb >> 8U) & 0xffU),
+                            (int) (hud_color_b_rgb & 0xffU)
+                    )
+            );
             TextOutA(hdc, 8, 24, hud_line_b, len_b);
         }
         SelectObject(hdc, old);
@@ -327,7 +344,9 @@ int dashcdg_win32_gdi_view_present_rgba(
         size_t rgba_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 ) {
     if (view == NULL || rgba == NULL || rgba_bytes != DASHCDG_CDG_RGBA_BYTES) {
         return 0;
@@ -355,7 +374,9 @@ int dashcdg_win32_gdi_view_present_rgba(
             DASHCDG_CDG_RGBA_BYTES,
             show_hud,
             hud_line_a,
-            hud_line_b
+            hud_line_b,
+            hud_color_a_rgb,
+            hud_color_b_rgb
     );
 }
 
@@ -365,7 +386,9 @@ int dashcdg_win32_gdi_view_present_bgra(
         size_t bgra_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 ) {
     return dashcdg_win32_gdi_view_present_bgra_internal(
             view,
@@ -373,7 +396,9 @@ int dashcdg_win32_gdi_view_present_bgra(
             bgra_bytes,
             show_hud,
             hud_line_a,
-            hud_line_b
+            hud_line_b,
+            hud_color_a_rgb,
+            hud_color_b_rgb
     );
 }
 
@@ -417,7 +442,9 @@ int dashcdg_win32_gdi_view_present_rgba(
         size_t rgba_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 ) {
     (void) view;
     (void) rgba;
@@ -425,6 +452,8 @@ int dashcdg_win32_gdi_view_present_rgba(
     (void) show_hud;
     (void) hud_line_a;
     (void) hud_line_b;
+    (void) hud_color_a_rgb;
+    (void) hud_color_b_rgb;
     return 0;
 }
 
@@ -434,7 +463,9 @@ int dashcdg_win32_gdi_view_present_bgra(
         size_t bgra_bytes,
         int show_hud,
         const char *hud_line_a,
-        const char *hud_line_b
+        const char *hud_line_b,
+        uint32_t hud_color_a_rgb,
+        uint32_t hud_color_b_rgb
 ) {
     (void) view;
     (void) bgra;
@@ -442,6 +473,8 @@ int dashcdg_win32_gdi_view_present_bgra(
     (void) show_hud;
     (void) hud_line_a;
     (void) hud_line_b;
+    (void) hud_color_a_rgb;
+    (void) hud_color_b_rgb;
     return 0;
 }
 

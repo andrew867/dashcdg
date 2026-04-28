@@ -76,3 +76,7 @@ Firmware should inherit this **stabilized desktop v4 contract** — see **`docs/
 ## User preferences (from rules)
 
 High-quality prose; minimal drive-by refactors; prefer code citations with fenced `startLine:endLine:filepath` blocks in chat; execute commands locally rather than only suggesting them.
+
+## Operator trust rule (must-follow)
+
+When the operator says a file/path exists (especially test assets used daily), do **not** claim it is missing after a single failed lookup. Re-check with multiple discovery methods (`Glob`, `rg`, and nearby directories / likely naming variants) and ask for the exact path only after those checks. Prefer: "I couldn't locate it yet; please share exact path" over "it isn't in the repo."
