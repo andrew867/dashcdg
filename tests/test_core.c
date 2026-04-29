@@ -1095,6 +1095,43 @@ static void test_cdg_raster_rgba_matches_memory_preset(void) {
     assert(rgba[3] == 255U);
 }
 
+static void test_cdg_batch_jitter_does_not_apply_ahead_of_receiver(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    struct dashcdg_cdg_batch_jitter_frame *batch = NULL;
+    struct dashcdg_cdg_batch_jitter_drain_input din;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    uint64_t miss = 0U;
+    enum dashcdg_cdg_batch_drain_step step;
+    uint64_t ahead_ms;
+
+    memset(one_pkt, 0x55, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 600U);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 600U, 1U, one_pkt, 0) == 1);
+
+    ahead_ms = dashcdg_packet_count_to_ms(600U);
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.sender_playback_now_ms = 50U;
+    din.late_grace_ms = 0U;
+    din.late_gate = 1;
+    din.primed_decode = 1;
+    step = dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss);
+    assert(step == DASHCDG_CDG_BATCH_DRAIN_STOP);
+    assert(batch == NULL);
+    assert(jb.next_packet_index == 600U);
+
+    memset(&din, 0, sizeof(din));
+    din.have_sender_playback = 1;
+    din.sender_playback_now_ms = ahead_ms;
+    din.late_grace_ms = 120U;
+    din.late_gate = 1;
+    din.primed_decode = 1;
+    step = dashcdg_cdg_batch_jitter_drain_step(&jb, &din, &batch, &miss);
+    assert(step == DASHCDG_CDG_BATCH_DRAIN_APPLY);
+    assert(batch != NULL && batch->packet_start_index == 600U);
+}
+
 static void test_cdg_batch_jitter_duplicate_drop(void) {
     struct dashcdg_cdg_batch_jitter_buffer jb;
     uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
@@ -1679,6 +1716,7 @@ int main(void) {
     test_cdg_raster_rgba_matches_memory_preset();
     test_cdg_raster_alpha_from_transparency();
     test_cdg_batch_jitter_duplicate_drop();
+    test_cdg_batch_jitter_does_not_apply_ahead_of_receiver();
     test_cdg_batch_jitter_apply_note_and_drain_skip();
     test_cdg_batch_jitter_sender_playback_respects_announced_preroll();
     test_cdg_batch_jitter_does_not_jump_to_oldest_without_real_wait();

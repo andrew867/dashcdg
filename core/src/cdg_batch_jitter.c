@@ -418,6 +418,23 @@ int dashcdg_cdg_batch_jitter_insert(
     return 1;
 }
 
+/*
+ * Do not apply CDG for packet timeline positions that are still "in the future" relative to the
+ * receiver playout clock (heard audio / delayed sender timeline). Without this guard, contiguous
+ * batches in the ring could be applied back-to-back in one host tick, advancing the graphic lyrics
+ * seconds ahead of the speakers.
+ */
+static int cdg_jb_receiver_covers_batch_ms(
+        uint64_t batch_start_ms,
+        const struct dashcdg_cdg_batch_jitter_drain_input *in,
+        uint64_t receiver_playback_now_ms
+) {
+    if (in == NULL || !in->have_sender_playback) {
+        return 1;
+    }
+    return batch_start_ms <= receiver_playback_now_ms + (uint64_t) in->late_grace_ms;
+}
+
 enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
         struct dashcdg_cdg_batch_jitter_buffer *jb,
         const struct dashcdg_cdg_batch_jitter_drain_input *in,
@@ -469,13 +486,24 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
 
     frame = dashcdg_cdg_batch_jitter_find(jb, jb->next_packet_index);
     if (frame != NULL) {
+        uint64_t batch_start_ms = dashcdg_packet_count_to_ms(frame->packet_start_index);
+
+        if (!cdg_jb_receiver_covers_batch_ms(batch_start_ms, in, receiver_playback_now_ms)) {
+            return DASHCDG_CDG_BATCH_DRAIN_STOP;
+        }
         *out_frame = frame;
         return DASHCDG_CDG_BATCH_DRAIN_APPLY;
     }
 
     {
         struct dashcdg_cdg_batch_jitter_frame *pred = dashcdg_cdg_batch_jitter_predecessor(jb, jb->next_packet_index);
+        uint64_t batch_start_ms;
+
         if (pred != NULL) {
+            batch_start_ms = dashcdg_packet_count_to_ms(pred->packet_start_index);
+            if (!cdg_jb_receiver_covers_batch_ms(batch_start_ms, in, receiver_playback_now_ms)) {
+                return DASHCDG_CDG_BATCH_DRAIN_STOP;
+            }
             jb->next_packet_index = pred->packet_start_index;
             jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
             *out_frame = pred;
@@ -484,7 +512,13 @@ enum dashcdg_cdg_batch_drain_step dashcdg_cdg_batch_jitter_drain_step(
     }
     {
         struct dashcdg_cdg_batch_jitter_frame *cover = dashcdg_cdg_batch_jitter_covering_cursor(jb, jb->next_packet_index);
+        uint64_t batch_start_ms;
+
         if (cover != NULL) {
+            batch_start_ms = dashcdg_packet_count_to_ms(cover->packet_start_index);
+            if (!cdg_jb_receiver_covers_batch_ms(batch_start_ms, in, receiver_playback_now_ms)) {
+                return DASHCDG_CDG_BATCH_DRAIN_STOP;
+            }
             jb->next_packet_index = cover->packet_start_index;
             jb->next_playback_ms = dashcdg_packet_count_to_ms(jb->next_packet_index);
             *out_frame = cover;
