@@ -86,9 +86,13 @@ where \(f\) is a documented function consistent with existing **receiver minimum
 
 **Requirement:** v4 clock sync path SHOULD reduce **flicker** in `clock_offset_estimate` / related fields (filtering or cadence), improving “healthy” classification and decoupling phase from benign ±1 ms jitter.
 
+**Implementation:** RX maintains `clock_offset_ema_ms` (τ ≈ 850 ms) from the controller-facing offset; v4 RX stats and jsonl publish the filtered value as `clock_offset_estimate_ms` / `clock_skew_ema_ms`; `clock_noisy` uses the EMA for thresholding.
+
 ### 4.2 Startup alignment
 
 **Requirement:** Cold-start policies across peers SHOULD align (same **start_hold** band where applicable). Join bursts that cause **`audio_queue_overflow`** storms SHOULD be reduced (softer prime, longer gate, or backpressure policy) so early trim does not chase transient overload.
+
+**Implementation:** PCM queue pressure limit gains **+40 ms** during the first **5 s** after `last_session_change_local_ms` or while `now < audio_servo_enable_after_local_ms` (see `DASHCDG_RX_PCM_QUEUE_STARTUP_*` in `app_rx.c`).
 
 ### 4.3 Telemetry thresholds vs reality
 
@@ -104,6 +108,8 @@ where \(f\) is a documented function consistent with existing **receiver minimum
 ### 5.1 MEASURE → ACTIVE
 
 **Requirement:** Default or document a **measurement** phase (`DASHCDG_TX_GROUP_SYNC_MODE_MEASURE`) so `group_target` and trims stabilize before **ACTIVE** tightens the group (aligns with [`v4-group-playout-sync-rollout.md`](../ops/v4-group-playout-sync-rollout.md) Phase 2).
+
+**Implementation:** TX defaults to **MEASURE**; automatically promotes to **ACTIVE** after **10 s** if at least one controller-eligible RX is present, or after **45 s** if none (bench / TX-only). Override with `--v4-group-sync=active` for immediate ACTIVE.
 
 ### 5.2 Network matrix (Wi‑Fi scope)
 

@@ -42,6 +42,8 @@ Normative requirements, soak gates, and implementation order (residual phase: de
 
 **Implemented in code (2026):** TX `dashcdg_tx_refresh_rx_measurements_locked` detrends per peer (buffer+host), EMA-smooths absolute and residual series (τ ≈ 3.5 s), publishes **pipeline** vs **residual** spread; `phase_warn` / `clock_noisy` / v4 clock_sync wire spread use **residual**; jsonl includes `pipeline_phase_spread_ms` and `residual_phase_spread_ms` (`phase_spread_ms` aliases residual for scripts). RX follower leader trim is capped by **residual** `sync_group_phase_spread_ms` from the wire: `min(200 ppm, 2 * spread_ms)` unless leader trim is smaller. Optional **`DASHCDG_RX_DAC_TRIM_MS`** nudges the queue servo target (±500 ms).
 
+**Also:** RX exports **EMA-filtered** clock offset (~850 ms τ) on wire stats / jsonl (`clock_offset_ema_ms` path). PCM queue pressure allows **+40 ms** slack during the first **5 s** after session change or until audio servo enable. TX **defaults to group-sync MEASURE**, then auto-switches to **ACTIVE** after **10 s** with controllers or **45 s** idle (`--v4-group-sync=active` for immediate ACTIVE).
+
 ## Observability
 
 **`dashcdg_rx_configure_audio_locked`** logs:

@@ -107,6 +107,11 @@
  * / re-prime on cold start — seen on idle Ethernet laptops when PortAudio has not yet consumed.
  */
 #define DASHCDG_RX_PCM_QUEUE_EXTRA_SLACK_MS 24U
+/** Extra slack on PCM queue pressure limit during cold start / session change (reduces false overflows). */
+#define DASHCDG_RX_PCM_QUEUE_STARTUP_EXTRA_MS 40U
+#define DASHCDG_RX_PCM_QUEUE_STARTUP_GATE_MS 5000U
+/** EMA time constant for exported clock_offset_estimate / v4 rx-stats (smooth short spikes). */
+#define DASHCDG_RX_CLOCK_OFFSET_EMA_TAU_MS 850U
 #define DASHCDG_RX_MIN_APP_RING_TARGET_MS 120U
 /*
  * Before the first Pa_StartStream, require at most this much app-ring PCM in
@@ -481,6 +486,9 @@ struct receiver_state {
     int pending_sync_valid;
     int pending_delay_request_valid;
     int sender_offset_baseline_valid;
+    /** Low-pass version of controller-facing clock offset (matches jsonl / v4 stats when clock active). */
+    int32_t clock_offset_ema_ms;
+    uint64_t clock_offset_ema_last_local_ms;
     uint32_t active_snapshot_id;
     uint64_t active_snapshot_packet_index;
     uint32_t active_snapshot_total_bytes;
@@ -1020,20 +1028,25 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
     } else {
         controller_offset_ms = g_receiver.sender_offset_ms;
     }
-    ptp_offset_ema_us = controller_offset_ms * 1000LL;
+    if (g_receiver.sender_clock_updates > 0U && g_receiver.have_clock) {
+        clock_offset_estimate_i32 = g_receiver.clock_offset_ema_ms;
+        ptp_offset_ema_us = (int64_t) g_receiver.clock_offset_ema_ms * 1000LL;
+    } else {
+        ptp_offset_ema_us = controller_offset_ms * 1000LL;
+        if (controller_offset_ms > (int64_t) INT32_MAX) {
+            clock_offset_estimate_i32 = INT32_MAX;
+        } else if (controller_offset_ms < (int64_t) INT32_MIN) {
+            clock_offset_estimate_i32 = INT32_MIN;
+        } else {
+            clock_offset_estimate_i32 = (int) controller_offset_ms;
+        }
+    }
     if (ptp_offset_ema_us > (int64_t) INT_MAX) {
         ptp_offset_i32 = INT_MAX;
     } else if (ptp_offset_ema_us < (int64_t) INT_MIN) {
         ptp_offset_i32 = INT_MIN;
     } else {
         ptp_offset_i32 = (int) ptp_offset_ema_us;
-    }
-    if (controller_offset_ms > (int64_t) INT32_MAX) {
-        clock_offset_estimate_i32 = INT32_MAX;
-    } else if (controller_offset_ms < (int64_t) INT32_MIN) {
-        clock_offset_estimate_i32 = INT32_MIN;
-    } else {
-        clock_offset_estimate_i32 = (int) controller_offset_ms;
     }
     /*
      * Align jsonl clock_skew_ema_ms with v4 rx-stats (disciplined media-clock offset), not
@@ -1062,8 +1075,8 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
     clock_noisy =
             (clock_offset_valid &&
                     g_receiver.sender_clock_updates >= DASHCDG_RX_CLOCK_NOISY_MIN_UPDATES &&
-                    (controller_offset_ms >= DASHCDG_RX_CLOCK_NOISY_OFFSET_MS ||
-                            controller_offset_ms <= -DASHCDG_RX_CLOCK_NOISY_OFFSET_MS))
+                    ((int64_t) g_receiver.clock_offset_ema_ms >= DASHCDG_RX_CLOCK_NOISY_OFFSET_MS ||
+                            (int64_t) g_receiver.clock_offset_ema_ms <= -DASHCDG_RX_CLOCK_NOISY_OFFSET_MS))
             ? 1
             : 0;
     /*
@@ -1962,6 +1975,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->pending_sync_valid = 0;
     state->pending_delay_request_valid = 0;
     state->sender_offset_baseline_valid = 0;
+    state->clock_offset_ema_ms = 0;
+    state->clock_offset_ema_last_local_ms = 0U;
     state->active_snapshot_id = 0;
     state->active_snapshot_packet_index = 0;
     state->active_snapshot_total_bytes = 0;
@@ -2598,6 +2613,43 @@ static void dashcdg_rx_collect_fec_group_stats(
     }
 }
 
+static void dashcdg_rx_update_clock_offset_ema_locked(struct receiver_state *state, uint64_t local_now_ms) {
+    int64_t controller_offset_ms;
+    int32_t sample;
+    uint64_t dt_ms;
+    int64_t tau;
+
+    if (state == NULL) {
+        return;
+    }
+    if (state->sender_offset_baseline_valid) {
+        controller_offset_ms = state->sender_offset_ms - state->sender_offset_baseline_ms;
+    } else {
+        controller_offset_ms = state->sender_offset_ms;
+    }
+    if (controller_offset_ms > 30000LL) {
+        controller_offset_ms = 30000LL;
+    } else if (controller_offset_ms < -30000LL) {
+        controller_offset_ms = -30000LL;
+    }
+    sample = (int32_t) controller_offset_ms;
+    if (state->clock_offset_ema_last_local_ms == 0U) {
+        state->clock_offset_ema_ms = sample;
+    } else {
+        dt_ms = local_now_ms - state->clock_offset_ema_last_local_ms;
+        if (dt_ms == 0U) {
+            dt_ms = 1U;
+        }
+        if (dt_ms > 5000U) {
+            dt_ms = 5000U;
+        }
+        tau = (int64_t) DASHCDG_RX_CLOCK_OFFSET_EMA_TAU_MS;
+        state->clock_offset_ema_ms = (int32_t) (state->clock_offset_ema_ms +
+                (int32_t) (((int64_t) (sample - state->clock_offset_ema_ms) * (int64_t) dt_ms) / (tau + (int64_t) dt_ms)));
+    }
+    state->clock_offset_ema_last_local_ms = local_now_ms;
+}
+
 static void dashcdg_rx_note_clock_update_locked(
         struct receiver_state *state,
         uint64_t local_now_ms,
@@ -2634,6 +2686,7 @@ static void dashcdg_rx_note_clock_update_locked(
     } else {
         state->ptp_fallback_updates++;
     }
+    dashcdg_rx_update_clock_offset_ema_locked(state, local_now_ms);
 }
 
 static void dashcdg_rx_format_audio_gate_locked(
@@ -5185,6 +5238,23 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
         } else {
             queue_limit_ms = UINT32_MAX;
         }
+        {
+            uint64_t wall_now = dashcdg_clock_now_ms();
+            uint32_t startup_extra_ms = 0U;
+
+            if (state->last_session_change_local_ms != 0U &&
+                    wall_now - state->last_session_change_local_ms < DASHCDG_RX_PCM_QUEUE_STARTUP_GATE_MS) {
+                startup_extra_ms = DASHCDG_RX_PCM_QUEUE_STARTUP_EXTRA_MS;
+            }
+            if (state->audio_servo_enable_after_local_ms != 0U && wall_now < state->audio_servo_enable_after_local_ms) {
+                if (startup_extra_ms < DASHCDG_RX_PCM_QUEUE_STARTUP_EXTRA_MS) {
+                    startup_extra_ms = DASHCDG_RX_PCM_QUEUE_STARTUP_EXTRA_MS;
+                }
+            }
+            if (startup_extra_ms > 0U && queue_limit_ms <= UINT32_MAX - startup_extra_ms) {
+                queue_limit_ms += startup_extra_ms;
+            }
+        }
         if (state->audio_ring_capacity_ms > 0U && queue_limit_ms > state->audio_ring_capacity_ms) {
             queue_limit_ms = state->audio_ring_capacity_ms;
         }
@@ -7346,7 +7416,9 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
     pl.report_seq = g_receiver.rx_stats_report_seq;
     pl.wall_now_ms = now_ms;
     pl.sender_time_observed_ms = sender_observed_ms;
-    if (controller_offset_ms > (int64_t) INT32_MAX) {
+    if (g_receiver.sender_clock_updates > 0U) {
+        pl.clock_offset_estimate_ms = g_receiver.clock_offset_ema_ms;
+    } else if (controller_offset_ms > (int64_t) INT32_MAX) {
         pl.clock_offset_estimate_ms = INT32_MAX;
     } else if (controller_offset_ms < (int64_t) INT32_MIN) {
         pl.clock_offset_estimate_ms = INT32_MIN;
@@ -7409,7 +7481,15 @@ static void dashcdg_rx_maybe_send_v4_stats_locked(uint64_t now_ms) {
      * incorrectly degrade peers in TX controller eligibility.
      */
     pl.clock_skew_ema_ms = pl.clock_offset_estimate_ms;
-    if (controller_offset_ms > (int64_t) INT_MAX / 1000LL) {
+    if (g_receiver.sender_clock_updates > 0U) {
+        if ((int64_t) g_receiver.clock_offset_ema_ms > (int64_t) INT_MAX / 1000LL) {
+            pl.ptp_offset_ema_us = INT_MAX;
+        } else if ((int64_t) g_receiver.clock_offset_ema_ms < (int64_t) INT_MIN / 1000LL) {
+            pl.ptp_offset_ema_us = INT_MIN;
+        } else {
+            pl.ptp_offset_ema_us = (int32_t) ((int64_t) g_receiver.clock_offset_ema_ms * 1000LL);
+        }
+    } else if (controller_offset_ms > (int64_t) INT_MAX / 1000LL) {
         pl.ptp_offset_ema_us = INT_MAX;
     } else if (controller_offset_ms < (int64_t) INT_MIN / 1000LL) {
         pl.ptp_offset_ema_us = INT_MIN;

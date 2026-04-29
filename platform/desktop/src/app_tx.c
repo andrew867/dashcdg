@@ -189,6 +189,9 @@
 #define DASHCDG_TX_PHASE_FAIL_SPREAD_MS 80
 #define DASHCDG_TX_CLOCK_NOISY_SPREAD_MS 60
 #define DASHCDG_TX_LATENCY_CTRL_EMA_TAU_MS 3500U
+/** Default group sync starts in MEASURE; promote to ACTIVE after stability window. */
+#define DASHCDG_TX_GROUP_SYNC_MEASURE_PROMOTE_WITH_CTL_MS 10000U
+#define DASHCDG_TX_GROUP_SYNC_MEASURE_PROMOTE_IDLE_MS 45000U
 #define DASHCDG_TX_RX_SUMMARY_INTERVAL_MS 2000U
 #define DASHCDG_TX_RX_MEASUREMENTS_REFRESH_MIN_MS 100U
 #define DASHCDG_TX_CDG_FEC_ADAPT_INTERVAL_MS 3000U
@@ -755,6 +758,8 @@ struct dashcdg_tx_state {
     int32_t v4_group_sync_pipeline_spread_ms;
     /** Detrended spread (smoothed residual max−min); drives gates, wire syncctrl, RX follower scaling. */
     int32_t v4_group_sync_phase_spread_ms;
+    /** When default MEASURE→ACTIVE is used: refresh-local ms when anchor was reset for promotion timer. */
+    uint64_t v4_group_sync_measure_anchor_local_ms;
     uint64_t v4_cdg_starved_bypass_checks;
     uint64_t v4_cdg_starved_bypass_taken;
     int64_t v4_cdg_worst_negative_lead_ms;
@@ -2759,6 +2764,7 @@ static void dashcdg_tx_roll_session_rx_reporters_locked(void) {
     g_tx_state.v4_rx_phase_error_max_ms = 0;
     g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
     g_tx_state.v4_group_sync_phase_spread_ms = 0;
+    g_tx_state.v4_group_sync_measure_anchor_local_ms = 0U;
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
         struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
         if (!slot->occupied) {
@@ -2908,7 +2914,8 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     );
     TX_OUT(
             "v4 group sync controller mode: --v4-group-sync=off|measure|active "
-            "(default active; measure computes/logs controller target but does not apply leader trim bias on receivers).\n\n"
+            "(default measure: logs targets without follower trim until ~10 s with receivers or ~45 s idle, then auto-active; "
+            "override with active for immediate convergence).\n\n"
     );
     TX_OUT(
             "Network defaults: %s:%d  Library folder default: %s\n\n",
@@ -4368,6 +4375,25 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
         g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
         g_tx_state.v4_group_sync_phase_spread_ms = 0;
     }
+    if (g_tx_state.v4_group_sync_mode == DASHCDG_TX_GROUP_SYNC_MODE_MEASURE) {
+        if (g_tx_state.v4_group_sync_measure_anchor_local_ms == 0U) {
+            g_tx_state.v4_group_sync_measure_anchor_local_ms = now_ms;
+        }
+        if (controller_count >= 1U &&
+                now_ms >= g_tx_state.v4_group_sync_measure_anchor_local_ms &&
+                now_ms - g_tx_state.v4_group_sync_measure_anchor_local_ms >= DASHCDG_TX_GROUP_SYNC_MEASURE_PROMOTE_WITH_CTL_MS) {
+            g_tx_state.v4_group_sync_mode = DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE;
+            TX_OUT(
+                    "[tx] group-sync: measure -> active (controllers=%llu)\n",
+                    (unsigned long long) controller_count
+            );
+        } else if (controller_count == 0U &&
+                now_ms >= g_tx_state.v4_group_sync_measure_anchor_local_ms &&
+                now_ms - g_tx_state.v4_group_sync_measure_anchor_local_ms >= DASHCDG_TX_GROUP_SYNC_MEASURE_PROMOTE_IDLE_MS) {
+            g_tx_state.v4_group_sync_mode = DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE;
+            TX_OUT("[tx] group-sync: measure -> active (idle timeout)\n");
+        }
+    }
     dashcdg_tx_update_adaptive_cdg_fec_locked(now_ms);
 }
 
@@ -5734,6 +5760,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.last_track_switch_local_ms = now_ms;
+    g_tx_state.v4_group_sync_measure_anchor_local_ms = 0U;
     /*
      * Audio send thread only reads g_tx_ad; the main tx thread normally syncs in its ~5 ms tick.
      * After a new session_start_ms, update g_tx_ad immediately so due-time gating (send_deadline vs
@@ -10029,7 +10056,8 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     g_tx_state.v4_anchor_interval_base_ms = DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS;
     g_tx_state.v4_anchor_interval_effective_ms = DASHCDG_V4_VIDEO_ANCHOR_INTERVAL_MS;
     g_tx_state.v4_anchor_interval_auto = 0U;
-    g_tx_state.v4_group_sync_mode = DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE;
+    g_tx_state.v4_group_sync_mode = DASHCDG_TX_GROUP_SYNC_MODE_MEASURE;
+    g_tx_state.v4_group_sync_measure_anchor_local_ms = 0U;
     pthread_mutex_unlock(&g_tx_state.mutex);
     dashcdg_cdg_reader_init(&g_tx_state.reader);
     dashcdg_cdg_source_init(&g_tx_state.cdg_source);

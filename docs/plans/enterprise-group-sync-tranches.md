@@ -33,9 +33,9 @@ Implement in order; each tranche has exit criteria in the test plan.
 | **R3** | **Telemetry split / thresholds** | **Done:** jsonl `pipeline_phase_spread_ms`, `residual_phase_spread_ms`; script gates on residual; thresholds unchanged (apply to residual semantics). | `app_tx.c`, `sync_metrics_report.py` |
 | **R4** | **RX leader authority** | **Done:** follower \|bias\| capped by `min(HARD_MAX, spread_ms * PER_SPREAD_MS)` (spread = residual on wire). | `app_rx.c` |
 | **R5** | **DAC trim** | **Done (env):** `DASHCDG_RX_DAC_TRIM_MS` adjusts ring servo target (±500 ms clamp). Prefs UI optional later. | `app_rx.c` |
-| **R6** | **Clock discipline** | Filter/cadence improvements for `clock_offset_estimate` stability | `app_rx.c` / clock sync handlers |
-| **R7** | **Startup alignment** | Reduce join-time `audio_queue_overflow` bursts; align start_hold with policy | `app_rx.c`, jitter init |
-| **R8** | **MEASURE → ACTIVE** | Default or document MEASURE-first; ensure ACTIVE does not over-trim cold | `app_tx.c`, operator doc |
+| **R6** | **Clock discipline** | **Done:** ~850 ms τ EMA on controller-facing offset (`clock_offset_ema_ms`); jsonl + v4 rx-stats `clock_offset_estimate_ms` / `clock_skew_ema_ms` / `clock_noisy` use filtered value. | `app_rx.c` |
+| **R7** | **Startup alignment** | **Done:** +40 ms PCM queue limit slack for 5 s after session change or until servo enable deadline (reduces join overflows). | `app_rx.c` |
+| **R8** | **MEASURE → ACTIVE** | **Done:** TX defaults to MEASURE; auto-promotes to ACTIVE after **10 s** with ≥1 controller-eligible RX or **45 s** with none; `--v4-group-sync=active` overrides. | `app_tx.c`, `--help` |
 
 **Parallel / orthogonal:** Impaired-network soaks, CDG source regression, embedded parity — see [`../specs/remaining-tranches-roadmap.md`](../specs/remaining-tranches-roadmap.md).
 
