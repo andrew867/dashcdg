@@ -4416,6 +4416,37 @@ static int dashcdg_tx_cdg_emit_starved_vs_audio_locked(uint64_t now_ms, uint64_t
     return 0;
 }
 
+/*
+ * Under starvation, one-video-per-pass can take too long to close a large lag window.
+ * Raise CDG send budget proportionally to negative lead while preserving audio due-soon gating.
+ */
+static unsigned int dashcdg_tx_cdg_video_budget_per_pass_locked(uint64_t now_ms) {
+    uint64_t media_playback_ms;
+    int64_t cdg_lead_ms;
+    uint64_t lag_ms;
+
+    if (!g_tx_state.transport_v4_enabled || g_tx_state.paused ||
+            g_tx_state.next_cdg_batch_index >= g_tx_state.cdg_batch_count) {
+        return DASHCDG_V4_MAX_VIDEO_PER_PASS;
+    }
+    media_playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(media_playback_ms);
+    if (cdg_lead_ms >= 0) {
+        return DASHCDG_V4_MAX_VIDEO_PER_PASS;
+    }
+    lag_ms = (uint64_t)(-cdg_lead_ms);
+    if (lag_ms >= 600U) {
+        return 4U;
+    }
+    if (lag_ms >= 300U) {
+        return 3U;
+    }
+    if (lag_ms >= (uint64_t)DASHCDG_TX_CDG_STARVED_VS_AUDIO_MS) {
+        return 2U;
+    }
+    return DASHCDG_V4_MAX_VIDEO_PER_PASS;
+}
+
 static size_t dashcdg_tx_collect_audio_fault_lines_locked(
         uint64_t now_ms,
         char lines[][256],
@@ -8195,6 +8226,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
      */
     uint64_t send_deadline_ms = dashcdg_tx_media_send_deadline_ms_locked(now_ms);
     unsigned int video_sent = 0U;
+    unsigned int video_budget_this_pass = DASHCDG_V4_MAX_VIDEO_PER_PASS;
     int startup_anchor_bootstrap_pending = 0;
 
     if (g_tx_state.paused &&
@@ -8277,6 +8309,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
             !dashcdg_tx_cdg_emit_starved_vs_audio_locked(now_ms, send_deadline_ms)) {
         return;
     }
+    video_budget_this_pass = dashcdg_tx_cdg_video_budget_per_pass_locked(now_ms);
 
     while (!g_tx_state.paused &&
             !startup_anchor_bootstrap_pending &&
@@ -8284,7 +8317,7 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
             g_tx_state.next_cdg_batch_index < g_tx_state.cdg_batch_count &&
             g_tx_state.session_start_ms + g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
                     send_deadline_ms &&
-            video_sent < DASHCDG_V4_MAX_VIDEO_PER_PASS) {
+            video_sent < video_budget_this_pass) {
         const struct dashcdg_tx_cdg_batch *batch = &g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index];
         int send_group_fec = g_tx_state.next_cdg_batch_index + 1U >= g_tx_state.cdg_batch_count ||
                 g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index + 1U].group_id != batch->group_id;
