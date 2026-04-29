@@ -8,3 +8,5 @@ Emission: `platform/desktop/src/app_rx.c` (`dashcdg_rx_metrics_emit_locked`).
 - **`cdg_render_skew_ms`**: `heard_playback_ms − packet_index_to_ms(live_state.ts)` — closer to **on-screen** vs **heard** when `live_state.ts` tracks the rendered canvas.
 
 `heard_playback_ms` in metrics uses the same **stable host output latency** adjustment as v4 `presented_audio_timestamp_ms` (see `dashcdg_rx_stable_host_adjust_presented_timestamp_locked`).
+
+See also [`../specs/enterprise-group-sync-spec.md`](../specs/enterprise-group-sync-spec.md) (pipeline vs residual spread, gates) and [`enterprise-group-sync-test-plan.md`](enterprise-group-sync-test-plan.md).
