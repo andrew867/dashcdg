@@ -1013,6 +1013,10 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
     int64_t cdg_lag_ms = 0;
     int64_t cdg_render_skew_ms = 0;
     uint64_t cdg_jb_next_ms = 0U;
+    int64_t cdg_lag_sender_ms = 0;
+    int64_t sender_minus_heard_ms = 0;
+    uint64_t sender_playback_now_ms = 0U;
+    int have_sender_playback_now = 0;
     int clock_skew_ms = 0;
     int packet_wall_delta_skew_ema_ms = 0;
     int64_t controller_offset_ms = 0;
@@ -1084,6 +1088,8 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
      * timeline as graphics/CDG drain when possible: stable-host-adjusted heard playback_ms (same as
      * v4 presented_audio_timestamp_ms). Sender-network playback is the fallback before audio starts.
      * Signed: positive ⇒ CDG jitter cursor behind heard audio (cursor ms − heard ms negative ⇒ graphics ahead).
+     * cdg_lag_sender_ms uses sender_playback_now for the same subtraction (wire timeline); should stay small.
+     * sender_minus_heard_ms is sender−heard (≈ ring+host when timestamps are healthy).
      */
     if (g_audio != NULL) {
         int raw_ts = DASHCDG_ATOMIC_GET(g_audio->timestamp_ms);
@@ -1115,6 +1121,10 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
             have_presented_ts = 1;
         }
     }
+    have_sender_playback_now = dashcdg_rx_sender_playback_now_locked(&g_receiver, now_ms, &sender_playback_now_ms);
+    if (have_sender_playback_now && have_presented_ts) {
+        sender_minus_heard_ms = (int64_t) sender_playback_now_ms - (int64_t) presented_audio_ts_ms;
+    }
     {
         uint64_t cdg_ref_playback_ms = 0U;
         int have_cdg_ref = 0;
@@ -1131,6 +1141,9 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
     }
     if (g_receiver.cdg_batch_jitter.initialized) {
         cdg_jb_next_ms = g_receiver.cdg_batch_jitter.next_playback_ms;
+    }
+    if (have_sender_playback_now && g_receiver.cdg_batch_jitter.initialized) {
+        cdg_lag_sender_ms = (int64_t) sender_playback_now_ms - (int64_t) g_receiver.cdg_batch_jitter.next_playback_ms;
     }
     /*
      * True lip-sync hint: compare heard playback_ms to the canvas timeline (live_state.ts packet
@@ -1152,6 +1165,7 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
             "\"recover_host_underrun\":%llu,\"recover_zero_buffer\":%llu,\"recover_silent_stall\":%llu,"
             "\"cdg_hard_resync_events\":%llu,\"cdg_hard_resync_packets\":%llu,"
             "\"clock_offset_valid\":%d,\"group_phase_spread_clipped\":%d,\"cdg_lag_ms\":%lld,"
+            "\"cdg_lag_sender_ms\":%lld,\"sender_minus_heard_ms\":%lld,"
             "\"cdg_jb_next_ms\":%llu,\"cdg_render_skew_ms\":%lld,"
             "\"phase_warn\":%d,\"phase_fail\":%d,\"clock_noisy\":%d}\n",
             (unsigned long long) now_ms,
@@ -1178,6 +1192,8 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
             clock_offset_valid,
             phase_spread_clipped,
             (long long) cdg_lag_ms,
+            (long long) cdg_lag_sender_ms,
+            (long long) sender_minus_heard_ms,
             (unsigned long long) cdg_jb_next_ms,
             (long long) cdg_render_skew_ms,
             phase_warn,
