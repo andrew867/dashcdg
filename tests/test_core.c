@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "dashcdg/audio_jitter.h"
 #include "dashcdg/cdg.h"
@@ -1627,6 +1628,25 @@ static void test_nb_ima_codec_roundtrip(void) {
     assert(energy > 1000);
 }
 
+/*
+ * Reference: desktop-rx metrics jsonl `packet_wall_delta_skew_ema_ms` EMAs (Δsender_time_ms − Δlocal_ms)
+ * between consecutive datagrams. Unlike raw sender_time−local (epoch-mixed), this is on the order of
+ * link scheduling and clock-rate mismatch (ms), not hours.
+ */
+static void test_metrics_packet_wall_skew_delta_reference(void) {
+    uint64_t s0 = 50100000U;
+    uint64_t s1 = 50100020U;
+    uint64_t l0 = 99000000U;
+    uint64_t l1 = 99000015U;
+    int64_t ds = (int64_t) s1 - (int64_t) s0;
+    int64_t dl = (int64_t) l1 - (int64_t) l0;
+    int64_t skew_delta = ds - dl;
+
+    assert(ds == 20);
+    assert(dl == 15);
+    assert(skew_delta == 5);
+}
+
 int main(void) {
     test_cdg_subchannel_pack_rs();
     test_cdg_subchannel_alignment_trims();
@@ -1672,6 +1692,7 @@ int main(void) {
     test_cdg_batch_jitter_evict_pressure_frees_slots();
     test_fec_recovery();
     test_nb_ima_codec_roundtrip();
+    test_metrics_packet_wall_skew_delta_reference();
 
     puts("all tests passed");
     return 0;

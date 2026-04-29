@@ -181,6 +181,9 @@
 #define DASHCDG_TX_RX_REPORTER_MAX_CLOCK_SKEW_ABS_MS 2000
 #define DASHCDG_TX_RX_REPORTER_DESKTOP_MAX_CLOCK_SKEW_ABS_MS 6000
 #define DASHCDG_TX_RX_REPORTER_DESKTOP_MAX_CLOCK_OFFSET_ABS_MS 2500
+#define DASHCDG_TX_SYNC_LEADER_SWITCH_MIN_HOLD_MS 12000U
+#define DASHCDG_TX_SYNC_LEADER_SWITCH_MARGIN_SCORE 1200U
+#define DASHCDG_TX_RX_NEW_JOIN_FOLLOWER_MS 45000U
 #define DASHCDG_TX_PHASE_WARN_SPREAD_MS 40
 #define DASHCDG_TX_PHASE_FAIL_SPREAD_MS 80
 #define DASHCDG_TX_CLOCK_NOISY_SPREAD_MS 60
@@ -189,6 +192,7 @@
 #define DASHCDG_TX_CDG_FEC_ADAPT_INTERVAL_MS 3000U
 #define DASHCDG_TX_VIDEO_REPAIR_REDUNDANCY_MAX 8U
 #define DASHCDG_TX_PENDING_CDG_FEC_MAX 32U
+#define DASHCDG_TX_TRACK_SWITCH_MIN_INTERVAL_MS 140U
 
 static DASHCDG_TX_MAYBE_UNUSED void dashcdg_frame_limit_wait(uint64_t *next_deadline_ms, uint32_t frame_interval_ms) {
     uint64_t now_ms;
@@ -480,6 +484,7 @@ struct dashcdg_tx_rx_reporter {
     int occupied;
     uint32_t receiver_instance_id;
     uint32_t source_ipv4_be;
+    uint64_t first_seen_local_ms;
     uint64_t last_local_ms;
     uint64_t healthy_since_local_ms;
     uint32_t last_report_seq;
@@ -603,6 +608,7 @@ struct dashcdg_tx_state {
     uint64_t ptp_delay_resp_packets_sent;
     uint32_t ptp_sync_id;
     uint64_t last_ptp_sync_ms;
+    uint64_t last_track_switch_local_ms;
     uint64_t last_pause_state_update_ms;
     uint64_t last_cdg_snapshot_ms;
     uint32_t cdg_snapshot_id;
@@ -735,6 +741,7 @@ struct dashcdg_tx_state {
     uint32_t v4_rx_best_buffer_ms;
     uint32_t v4_rx_sync_leader_instance_id;
     int16_t v4_rx_sync_leader_trim_ppm;
+    uint64_t v4_rx_sync_leader_last_switch_ms;
     uint8_t v4_group_sync_mode;
     uint32_t v4_group_sync_target_latency_ms;
     int32_t v4_group_sync_phase_spread_ms;
@@ -2724,6 +2731,26 @@ static void dashcdg_tx_reset_rx_reporters_locked(void) {
     g_tx_state.v4_rx_group_target_latency_ms = 0U;
     g_tx_state.v4_rx_worst_buffer_ms = 0U;
     g_tx_state.v4_rx_best_buffer_ms = 0U;
+    g_tx_state.v4_rx_sync_leader_instance_id = 0U;
+    g_tx_state.v4_rx_sync_leader_trim_ppm = 0;
+    g_tx_state.v4_rx_sync_leader_last_switch_ms = 0U;
+}
+
+static void dashcdg_tx_roll_session_rx_reporters_locked(void) {
+    size_t i;
+    g_tx_rx_measurements_last_refresh_ms = 0U;
+    g_tx_state.v4_rx_phase_error_min_ms = 0;
+    g_tx_state.v4_rx_phase_error_max_ms = 0;
+    g_tx_state.v4_group_sync_phase_spread_ms = 0;
+    for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
+        struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
+        if (!slot->occupied) {
+            continue;
+        }
+        slot->controller_eligible = 0U;
+        slot->healthy_since_local_ms = 0U;
+        snprintf(slot->health_reason, sizeof(slot->health_reason), "session-roll");
+    }
 }
 
 static void dashcdg_tx_cycle_v4_audio_codec_locked(int delta) {
@@ -3545,6 +3572,7 @@ static struct dashcdg_tx_rx_reporter *dashcdg_tx_find_or_alloc_rx_reporter_locke
     empty_slot->occupied = 1;
     empty_slot->receiver_instance_id = receiver_instance_id;
     empty_slot->source_ipv4_be = source_ipv4_be;
+    empty_slot->first_seen_local_ms = dashcdg_clock_now_ms();
     return empty_slot;
 }
 
@@ -3559,10 +3587,13 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
     int64_t observed_domain_latency_ms = 0;
     int have_observed_domain_latency = 0;
     int64_t chosen_latency_ms;
+    int64_t receiver_min_plausible_latency_ms = 0;
     int64_t fallback_target_latency_ms = 0;
+    int have_receiver_min_plausible_latency = 0;
     int have_fallback_target_latency = 0;
     uint64_t receipt_age_ms;
     const struct dashcdg_v4_rx_stats_payload *stats;
+    int latency_confident = 0;
 
     if (latency_ms_out != NULL) {
         *latency_ms_out = 0;
@@ -3575,10 +3606,29 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
             stats->presented_audio_timestamp_ms == 0U) {
         return 0;
     }
+    if (stats->startup_flags & DASHCDG_V4_RX_STARTUP_FLAG_LATENCY_CONFIDENT) {
+        latency_confident = 1;
+    } else if (stats->stats_generation < 4U &&
+            stats->startup_stage >= DASHCDG_V4_RX_STARTUP_RUNNING &&
+            stats->audio_buffer_ms > 0U &&
+            stats->target_total_latency_ms > 0U) {
+        /* Backward-compatible fallback for older RX that do not emit LATENCY_CONFIDENT. */
+        latency_confident = 1;
+    }
+    if (!latency_confident) {
+        return 0;
+    }
     if (stats->target_total_latency_ms > 0U &&
             stats->target_total_latency_ms <= (uint16_t) DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS) {
         fallback_target_latency_ms = (int64_t) stats->target_total_latency_ms;
         have_fallback_target_latency = 1;
+    }
+    if (stats->audio_buffer_ms > 0U) {
+        receiver_min_plausible_latency_ms = (int64_t) stats->audio_buffer_ms + (int64_t) stats->host_output_latency_ms;
+        if (have_fallback_target_latency && receiver_min_plausible_latency_ms > fallback_target_latency_ms + 250LL) {
+            receiver_min_plausible_latency_ms = fallback_target_latency_ms + 250LL;
+        }
+        have_receiver_min_plausible_latency = 1;
     }
 
     receipt_age_ms = now_ms > slot->last_local_ms ? now_ms - slot->last_local_ms : 0U;
@@ -3627,6 +3677,13 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
          */
         chosen_latency_ms = fallback_target_latency_ms;
     }
+    if (have_receiver_min_plausible_latency && chosen_latency_ms + 120LL < receiver_min_plausible_latency_ms) {
+        /*
+         * Guard against impossible near-zero/negative latency reports when the same RX stats packet
+         * shows substantial queued audio and host output latency.
+         */
+        chosen_latency_ms = receiver_min_plausible_latency_ms;
+    }
 
     if (chosen_latency_ms > (int64_t) INT32_MAX) {
         chosen_latency_ms = INT32_MAX;
@@ -3670,10 +3727,67 @@ static int dashcdg_tx_clamp_i32(int32_t v, int32_t lo, int32_t hi) {
     return v;
 }
 
+static int dashcdg_tx_compute_sync_leader_score_locked(
+        uint64_t now_ms,
+        const struct dashcdg_tx_rx_reporter *slot,
+        uint32_t *score_out,
+        int16_t *trim_out
+) {
+    uint32_t score;
+    int32_t skew_abs;
+    int32_t trim;
+    uint32_t rec_penalty;
+    uint64_t connected_ms;
+
+    if (slot == NULL || score_out == NULL || trim_out == NULL) {
+        return 0;
+    }
+    if (!slot->occupied || !slot->controller_eligible || !dashcdg_tx_rx_reporter_has_valid_stats_locked(slot)) {
+        return 0;
+    }
+    if (slot->health_state != (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_HEALTHY) {
+        return 0;
+    }
+
+    skew_abs = slot->stats.clock_skew_ema_ms < 0 ? -slot->stats.clock_skew_ema_ms : slot->stats.clock_skew_ema_ms;
+    rec_penalty = slot->stats.recovery_host_underrun_count +
+            slot->stats.recovery_zero_buffer_count +
+            slot->stats.recovery_silent_stall_count;
+    if (rec_penalty > 200U) {
+        rec_penalty = 200U;
+    }
+
+    score = (uint32_t) slot->stats.loss_pct_x100 * 8U;
+    score += (uint32_t) slot->stats.jitter_rms_ms * 4U;
+    score += (uint32_t) dashcdg_tx_clamp_i32(skew_abs, 0, 400) * 2U;
+    score += rec_penalty * 40U;
+    score += (uint32_t) dashcdg_tx_clamp_i32((int32_t) slot->stats.reorder_events, 0, 1000);
+    if (slot->stats.startup_stage != DASHCDG_V4_RX_STARTUP_RUNNING) {
+        score += 100000U;
+    }
+    connected_ms = (slot->first_seen_local_ms == 0U || now_ms <= slot->first_seen_local_ms) ? 0U : (now_ms - slot->first_seen_local_ms);
+    if (connected_ms < DASHCDG_TX_RX_NEW_JOIN_FOLLOWER_MS) {
+        score += 900U;
+    }
+    trim = dashcdg_tx_clamp_i32(slot->stats.drift_trim_ppm, -DASHCDG_TX_SYNC_LEADER_TRIM_PPM_MAX,
+            DASHCDG_TX_SYNC_LEADER_TRIM_PPM_MAX);
+    if (trim > -6 && trim < 6) {
+        trim = 0;
+    }
+    *score_out = score;
+    *trim_out = (int16_t) trim;
+    return 1;
+}
+
 static int dashcdg_tx_select_audio_sync_leader_locked(uint32_t *leader_instance_id_out, int16_t *leader_trim_ppm_out) {
     uint32_t best_score = UINT32_MAX;
     uint32_t best_instance_id = 0U;
     int16_t best_trim_ppm = 0;
+    uint32_t sticky_score = UINT32_MAX;
+    int16_t sticky_trim_ppm = 0;
+    uint64_t now_ms = dashcdg_clock_now_ms();
+    uint64_t since_last_switch_ms = 0U;
+    int sticky_valid = 0;
     size_t i;
 
     if (leader_instance_id_out == NULL || leader_trim_ppm_out == NULL) {
@@ -3684,49 +3798,41 @@ static int dashcdg_tx_select_audio_sync_leader_locked(uint32_t *leader_instance_
 
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
         const struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
-        uint32_t score;
-        int32_t skew_abs;
-        int32_t trim;
-        uint32_t rec_penalty;
+        uint32_t score = 0U;
+        int16_t trim = 0;
 
-        if (!slot->occupied || !slot->controller_eligible || !dashcdg_tx_rx_reporter_has_valid_stats_locked(slot)) {
+        if (!dashcdg_tx_compute_sync_leader_score_locked(now_ms, slot, &score, &trim)) {
             continue;
         }
-        if (slot->health_state != (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_HEALTHY) {
-            continue;
-        }
-
-        skew_abs = slot->stats.clock_skew_ema_ms < 0 ? -slot->stats.clock_skew_ema_ms : slot->stats.clock_skew_ema_ms;
-        rec_penalty = slot->stats.recovery_host_underrun_count +
-                slot->stats.recovery_zero_buffer_count +
-                slot->stats.recovery_silent_stall_count;
-        if (rec_penalty > 200U) {
-            rec_penalty = 200U;
-        }
-
-        score = (uint32_t) slot->stats.loss_pct_x100 * 8U;
-        score += (uint32_t) slot->stats.jitter_rms_ms * 4U;
-        score += (uint32_t) dashcdg_tx_clamp_i32(skew_abs, 0, 400) * 2U;
-        score += rec_penalty * 40U;
-        score += (uint32_t) dashcdg_tx_clamp_i32((int32_t) slot->stats.reorder_events, 0, 1000);
-        if (slot->stats.startup_stage != DASHCDG_V4_RX_STARTUP_RUNNING) {
-            score += 100000U;
+        if (slot->receiver_instance_id == g_tx_state.v4_rx_sync_leader_instance_id) {
+            sticky_valid = 1;
+            sticky_score = score;
+            sticky_trim_ppm = trim;
         }
 
         if (best_instance_id == 0U || score < best_score) {
-            trim = dashcdg_tx_clamp_i32(slot->stats.drift_trim_ppm, -DASHCDG_TX_SYNC_LEADER_TRIM_PPM_MAX,
-                    DASHCDG_TX_SYNC_LEADER_TRIM_PPM_MAX);
-            if (trim > -6 && trim < 6) {
-                trim = 0;
-            }
             best_score = score;
             best_instance_id = slot->receiver_instance_id;
-            best_trim_ppm = (int16_t) trim;
+            best_trim_ppm = trim;
         }
     }
 
     if (best_instance_id == 0U) {
         return 0;
+    }
+    if (g_tx_state.v4_rx_sync_leader_last_switch_ms != 0U && now_ms > g_tx_state.v4_rx_sync_leader_last_switch_ms) {
+        since_last_switch_ms = now_ms - g_tx_state.v4_rx_sync_leader_last_switch_ms;
+    }
+    if (sticky_valid && g_tx_state.v4_rx_sync_leader_instance_id != 0U &&
+            g_tx_state.v4_rx_sync_leader_instance_id != best_instance_id) {
+        uint32_t required_margin = DASHCDG_TX_SYNC_LEADER_SWITCH_MARGIN_SCORE;
+        if (since_last_switch_ms < DASHCDG_TX_SYNC_LEADER_SWITCH_MIN_HOLD_MS) {
+            required_margin += DASHCDG_TX_SYNC_LEADER_SWITCH_MARGIN_SCORE;
+        }
+        if (sticky_score <= best_score + required_margin) {
+            best_instance_id = g_tx_state.v4_rx_sync_leader_instance_id;
+            best_trim_ppm = sticky_trim_ppm;
+        }
     }
     *leader_instance_id_out = best_instance_id;
     *leader_trim_ppm_out = best_trim_ppm;
@@ -4026,6 +4132,36 @@ static enum dashcdg_tx_rx_peer_health dashcdg_tx_classify_rx_reporter_locked(
     return DASHCDG_TX_RX_PEER_HEALTH_HEALTHY;
 }
 
+/*
+ * Phase spread uses min/max observed latency; the broadcast group target used to be max(latency,
+ * declared targets), which pins pherr≈0 on the slowest receiver and ~−Δ on faster paths. Median
+ * centers the shared target so RX servos pull both lead and lag toward the cluster middle.
+ */
+static uint32_t dashcdg_tx_group_target_from_latencies_median(int32_t *latencies, size_t n) {
+    size_t i;
+    size_t j;
+    int32_t key;
+    int64_t mid_sum;
+
+    if (latencies == NULL || n == 0U) {
+        return 0U;
+    }
+    for (i = 1U; i < n; ++i) {
+        key = latencies[i];
+        j = i;
+        while (j > 0U && latencies[j - 1U] > key) {
+            latencies[j] = latencies[j - 1U];
+            --j;
+        }
+        latencies[j] = key;
+    }
+    if (n % 2U == 1U) {
+        return (uint32_t) latencies[n / 2U];
+    }
+    mid_sum = (int64_t) latencies[n / 2U - 1U] + (int64_t) latencies[n / 2U];
+    return (uint32_t) (mid_sum / 2);
+}
+
 static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     uint64_t active_count = 0U;
     uint64_t healthy_count = 0U;
@@ -4036,6 +4172,8 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     int32_t latency_min_ms = 0;
     int32_t latency_max_ms = 0;
     uint32_t group_target_latency_ms = 0U;
+    int32_t latency_samples[DASHCDG_TX_RX_REPORTER_SLOTS];
+    size_t latency_sample_count = 0U;
     uint32_t best_buffer_ms = 0U;
     uint32_t worst_buffer_ms = 0U;
     uint64_t cdg_recovered_sum = 0U;
@@ -4096,12 +4234,13 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
                 latency_max_ms = rx_latency_ms;
             }
         }
-        if (rx_latency_ms > 0 && (uint32_t) rx_latency_ms > group_target_latency_ms) {
-            group_target_latency_ms = (uint32_t) rx_latency_ms;
+        if (latency_sample_count < DASHCDG_TX_RX_REPORTER_SLOTS) {
+            latency_samples[latency_sample_count++] = rx_latency_ms;
         }
-        if (slot->stats.target_total_latency_ms > group_target_latency_ms) {
-            group_target_latency_ms = slot->stats.target_total_latency_ms;
-        }
+    }
+
+    if (have_phase && latency_sample_count > 0U) {
+        group_target_latency_ms = dashcdg_tx_group_target_from_latencies_median(latency_samples, latency_sample_count);
     }
 
     g_tx_state.v4_rx_stats_reporters_active = active_count;
@@ -5419,11 +5558,10 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.v4_loading_phase = 0U;
     g_tx_ad.v4_running_logged = 0;
     /*
-     * RX reporter measurements are tied to the sender playback epoch. A new track/session resets
-     * playback to zero, so any old receiver stats would project against the wrong sender timeline
-     * and briefly show absurd negative latency until fresh reports arrive.
+     * Preserve peer identity/history across track rolls (leader hysteresis and stable master), but
+     * force a short re-qualification window so stale pre-roll metrics do not immediately drive sync.
      */
-    dashcdg_tx_reset_rx_reporters_locked();
+    dashcdg_tx_roll_session_rx_reporters_locked();
 
     packet_count = asset_size / sizeof(struct dashcdg_subchannel_packet);
     g_tx_state.duration_ms = dashcdg_packet_count_to_ms(packet_count);
@@ -5490,6 +5628,7 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     g_tx_state.last_wire_session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.announce.session_start_ms = g_tx_state.session_start_ms;
     g_tx_state.beacon.session_start_ms = g_tx_state.session_start_ms;
+    g_tx_state.last_track_switch_local_ms = now_ms;
     /*
      * Audio send thread only reads g_tx_ad; the main tx thread normally syncs in its ~5 ms tick.
      * After a new session_start_ms, update g_tx_ad immediately so due-time gating (send_deadline vs
@@ -5553,7 +5692,14 @@ static int dashcdg_tx_load_relative_track_locked(int delta) {
 }
 
 static int dashcdg_tx_advance_playlist_locked(int delta) {
+    uint64_t now_ms = dashcdg_clock_now_ms();
+
     if (g_tx_state.playlist.count == 0U) {
+        return 0;
+    }
+    if (g_tx_state.last_track_switch_local_ms != 0U &&
+            now_ms > g_tx_state.last_track_switch_local_ms &&
+            (now_ms - g_tx_state.last_track_switch_local_ms) < DASHCDG_TX_TRACK_SWITCH_MIN_INTERVAL_MS) {
         return 0;
     }
     return dashcdg_tx_load_relative_track_locked(delta);
@@ -5727,6 +5873,9 @@ static int dashcdg_tx_send_v4_clock_sync_locked(uint64_t now_ms, uint8_t *packet
     }
     leader_trim_u16 = (uint16_t) ((int16_t) leader_trim_ppm);
     payload.reserved = ((uint32_t) leader_instance_lo << 16U) | (uint32_t) leader_trim_u16;
+    if (leader_instance_id != 0U && leader_instance_id != g_tx_state.v4_rx_sync_leader_instance_id) {
+        g_tx_state.v4_rx_sync_leader_last_switch_ms = now_ms;
+    }
     g_tx_state.v4_rx_sync_leader_instance_id = leader_instance_id;
     g_tx_state.v4_rx_sync_leader_trim_ppm = leader_trim_ppm;
 
@@ -8308,6 +8457,13 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
     unsigned int video_sent = 0U;
     unsigned int video_budget_this_pass = DASHCDG_V4_MAX_VIDEO_PER_PASS;
     int startup_anchor_bootstrap_pending = 0;
+    int has_audio_track = 0;
+    int loading_active = 0;
+    const struct dashcdg_tx_track *track = dashcdg_tx_current_track();
+
+    if (track != NULL && track->mp3_path != NULL) {
+        has_audio_track = 1;
+    }
 
     if (g_tx_state.paused &&
             (g_tx_state.last_pause_state_update_ms == 0U ||
@@ -8344,7 +8500,9 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
      * 500 ms "anchor window" caused CONNECTING/REPAIRING packets for the whole session
      * and made receivers flash the connecting UI every ~1 s.
      */
-    if ((g_tx_state.v4_first_anchor_local_ms == 0U || g_tx_ad.v4_first_audio_local_ms == 0U) &&
+    loading_active = (g_tx_state.v4_first_anchor_local_ms == 0U ||
+            (has_audio_track && g_tx_ad.v4_first_audio_local_ms == 0U)) ? 1 : 0;
+    if (loading_active &&
             (g_tx_state.last_v4_loading_screen_ms == 0U ||
              now_ms - g_tx_state.last_v4_loading_screen_ms >= DASHCDG_V4_LOADING_SCREEN_INTERVAL_MS)) {
         dashcdg_tx_send_v4_loading_screen_locked(now_ms, packet, packet_size);
@@ -8383,6 +8541,13 @@ static void dashcdg_tx_tick_v4_locked(uint64_t now_ms, uint8_t *packet, size_t p
                 g_tx_state.last_v4_video_anchor_chunk_ms = now_ms;
             }
         }
+    }
+    if (loading_active) {
+        /*
+         * During CONNECTING/REPAIRING, suppress live deltas so receivers do not alternate
+         * between loading UI and stale framebuffer remnants from a prior track/session.
+         */
+        return;
     }
 
     if (dashcdg_tx_audio_release_due_soon_locked(now_ms, DASHCDG_TX_AUDIO_DUE_SOON_MARGIN_MS) &&

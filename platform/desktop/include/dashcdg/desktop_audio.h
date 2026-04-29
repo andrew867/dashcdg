@@ -50,6 +50,8 @@ struct dashcdg_desktop_audio {
     uint32_t stream_sample_rate;
     uint16_t stream_channels;
     int64_t stream_base_timestamp_ms;
+    /* Last PortAudio/WinMM effective output delay used for timestamp_ms (max of timeInfo vs stream). */
+    int pa_effective_latency_ms;
     uint64_t stream_played_frames;
     size_t stream_capacity_frames;
     size_t stream_read_frame;

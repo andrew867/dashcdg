@@ -12,6 +12,8 @@ DASHCDG_BUILD_VERSION ?= dev-$(DASHCDG_GIT_BRANCH)-g$(DASHCDG_GIT_HASH)
 CFLAGS ?= $(COMMON_CFLAGS) $(INCLUDES)
 # Heap-backed audio + CDG jitter: adaptive grow/shrink in desktop `app_rx.c`; core and tests use the same layout.
 CFLAGS += -DDASHCDG_AUDIO_JITTER_HEAP_BACKED=1 -DDASHCDG_CDG_BATCH_JITTER_HEAP_BACKED=1
+# Desktop/laptop: wider CDG reorder window before insert drops (balanced cap in app_rx adapt logic).
+CFLAGS += -DDASHCDG_CDG_BATCH_JITTER_SLOT_COUNT=96
 UNAME_S := $(shell uname -s 2>/dev/null)
 
 # Opus / PortAudio link flags (expanded after MINGW_ARCH is known on Windows). Linux: set DASHCDG_OPUS_VENDOR=1 and prefixes if needed.

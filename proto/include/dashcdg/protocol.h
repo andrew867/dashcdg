@@ -358,6 +358,7 @@ enum dashcdg_v4_rx_startup_stage {
 #define DASHCDG_V4_RX_STARTUP_FLAG_SOURCE_IDLE 0x00000100U
 #define DASHCDG_V4_RX_STARTUP_FLAG_QUEUE_PRESSURE 0x00000200U
 #define DASHCDG_V4_RX_STARTUP_FLAG_AUDIO_PREROLL_READY 0x00000400U
+#define DASHCDG_V4_RX_STARTUP_FLAG_LATENCY_CONFIDENT 0x00000800U
 #pragma pack(push, 1)
 struct dashcdg_v4_rx_stats_payload {
     uint32_t report_seq;

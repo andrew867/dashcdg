@@ -254,6 +254,7 @@ void dashcdg_desktop_audio_flush_stream_ring(struct dashcdg_desktop_audio *audio
     dashcdg_desktop_audio_flush_stream_ring_locked(audio);
     pthread_mutex_unlock(&audio->stream_mutex);
     DASHCDG_ATOMIC_SET(audio->timestamp_ms, -1);
+    DASHCDG_ATOMIC_SET(audio->pa_effective_latency_ms, -1);
 }
 
 #if DASHCDG_HAVE_PORTAUDIO
@@ -337,6 +338,7 @@ static int dashcdg_pa_callback(
         }
 
         latency_ms = dashcdg_pa_effective_output_latency_ms(audio, time_info, 80);
+        DASHCDG_ATOMIC_SET(audio->pa_effective_latency_ms, latency_ms);
         consumed_frames = dashcdg_stream_buffer_consume(audio, frame_count, (int16_t *) output_buffer);
         total_samples = (size_t) frame_count * (size_t) audio->stream_channels;
         if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
@@ -711,6 +713,7 @@ static void dashcdg_winmm_fill_block(
             return;
         }
 
+        DASHCDG_ATOMIC_SET(audio->pa_effective_latency_ms, latency_ms);
         consumed_frames = dashcdg_stream_buffer_consume(audio, (unsigned long) frames, dst);
         total_samples = frames * (size_t) audio->stream_channels;
         if (DASHCDG_ATOMIC_GET(audio->stream_muted)) {
@@ -1057,6 +1060,7 @@ struct dashcdg_desktop_audio *dashcdg_desktop_audio_new(void) {
     audio->timestamp_ms = -1;
     audio->seek_to_sample = -1;
     audio->stream_base_timestamp_ms = -1;
+    audio->pa_effective_latency_ms = -1;
     audio->stream_decoder_open = 0;
     return audio;
 }
