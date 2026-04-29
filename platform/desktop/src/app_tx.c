@@ -728,6 +728,9 @@ struct dashcdg_tx_state {
     uint8_t v4_group_sync_mode;
     uint32_t v4_group_sync_target_latency_ms;
     int32_t v4_group_sync_phase_spread_ms;
+    uint64_t v4_cdg_starved_bypass_checks;
+    uint64_t v4_cdg_starved_bypass_taken;
+    int64_t v4_cdg_worst_negative_lead_ms;
     struct dashcdg_tx_rx_reporter rx_reporters[DASHCDG_TX_RX_REPORTER_SLOTS];
     int display_requested;
     int transport_v4_enabled;
@@ -1113,6 +1116,7 @@ static void dashcdg_tx_metrics_emit_locked(uint64_t now_ms) {
             "\"leader_instance\":%u,\"leader_trim_ppm\":%d,"
             "\"peers_total\":%llu,\"peers_healthy\":%llu,\"peers_degraded\":%llu,\"peers_stale\":%llu,"
             "\"rx_best_buffer_ms\":%u,\"rx_worst_buffer_ms\":%u,"
+            "\"cdg_starved_bypass_checks\":%llu,\"cdg_starved_bypass_taken\":%llu,\"cdg_worst_negative_lead_ms\":%lld,"
             "\"phase_warn\":%d,\"phase_fail\":%d,\"clock_noisy\":%d}\n",
             (unsigned long long) now_ms,
             (unsigned long long) g_tx_state.session_start_ms,
@@ -1129,6 +1133,9 @@ static void dashcdg_tx_metrics_emit_locked(uint64_t now_ms) {
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_stale,
             (unsigned int) g_tx_state.v4_rx_best_buffer_ms,
             (unsigned int) g_tx_state.v4_rx_worst_buffer_ms,
+            (unsigned long long) g_tx_state.v4_cdg_starved_bypass_checks,
+            (unsigned long long) g_tx_state.v4_cdg_starved_bypass_taken,
+            (long long) g_tx_state.v4_cdg_worst_negative_lead_ms,
             phase_warn,
             phase_fail,
             clock_noisy
@@ -4382,6 +4389,7 @@ static int dashcdg_tx_cdg_emit_starved_vs_audio_locked(uint64_t now_ms, uint64_t
     uint64_t media_playback_ms;
     int64_t cdg_lead_ms;
 
+    g_tx_state.v4_cdg_starved_bypass_checks++;
     if (!g_tx_state.transport_v4_enabled || g_tx_state.paused ||
             g_tx_state.next_cdg_batch_index >= g_tx_state.cdg_batch_count ||
             g_tx_state.session_start_ms == 0U) {
@@ -4390,17 +4398,22 @@ static int dashcdg_tx_cdg_emit_starved_vs_audio_locked(uint64_t now_ms, uint64_t
 
     media_playback_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
     cdg_lead_ms = dashcdg_tx_next_cdg_lead_ms_locked(media_playback_ms);
+    if (cdg_lead_ms < g_tx_state.v4_cdg_worst_negative_lead_ms) {
+        g_tx_state.v4_cdg_worst_negative_lead_ms = cdg_lead_ms;
+    }
     if (cdg_lead_ms >= -(int64_t) DASHCDG_TX_CDG_STARVED_VS_AUDIO_MS) {
         return 0;
     }
     if (send_deadline_ms < g_tx_state.session_start_ms) {
         return 0;
     }
-    return (g_tx_state.session_start_ms +
+    if (g_tx_state.session_start_ms +
                     g_tx_state.cdg_batches[g_tx_state.next_cdg_batch_index].playback_ms <=
-                    send_deadline_ms)
-                   ? 1
-                   : 0;
+            send_deadline_ms) {
+        g_tx_state.v4_cdg_starved_bypass_taken++;
+        return 1;
+    }
+    return 0;
 }
 
 static size_t dashcdg_tx_collect_audio_fault_lines_locked(

@@ -63,6 +63,18 @@ def main():
         action="store_true",
         help="Apply same-backend gates (10/20 ms p95/p99) instead of mixed (20/40).",
     )
+    parser.add_argument(
+        "--max-cdg-lag-p95-ms",
+        type=float,
+        default=150.0,
+        help="Fail gate when rx.cdg_lag_ms p95 exceeds this threshold.",
+    )
+    parser.add_argument(
+        "--max-clock-noisy-ratio",
+        type=float,
+        default=0.02,
+        help="Fail gate when clock_noisy samples / total samples exceeds this ratio.",
+    )
     args = parser.parse_args()
 
     records = load_records(args.jsonl)
@@ -77,6 +89,8 @@ def main():
         by_rx[r.get("receiver_instance", 0)].append(r)
 
     phase_spread = [float(r.get("phase_spread_ms", 0.0)) for r in tx]
+    starved_bypass_taken = [float(r.get("cdg_starved_bypass_taken", 0.0)) for r in tx]
+    worst_negative_lead = [float(r.get("cdg_worst_negative_lead_ms", 0.0)) for r in tx]
     phase_warn_count = sum(1 for r in records if int(r.get("phase_warn", 0)) != 0)
     phase_fail_count = sum(1 for r in records if int(r.get("phase_fail", 0)) != 0)
     clock_noisy_count = sum(1 for r in records if int(r.get("clock_noisy", 0)) != 0)
@@ -91,7 +105,12 @@ def main():
     print("== dashcdg sync metrics summary ==")
     print(f"records: total={len(records)} tx={len(tx)} rx={len(rx)} receivers={len(by_rx)}")
     print(summarize_series("tx.phase_spread_ms", phase_spread))
+    if tx:
+        print(summarize_series("tx.cdg_starved_bypass_taken", starved_bypass_taken))
+        print(summarize_series("tx.cdg_worst_negative_lead_ms", worst_negative_lead))
     print(f"flags: phase_warn={phase_warn_count} phase_fail={phase_fail_count} clock_noisy={clock_noisy_count}")
+    if records:
+        print(f"flags_ratio: clock_noisy={clock_noisy_count / len(records):.4f}")
     print(
         "gate: "
         f"p95<={thresh_p95:.0f} ({'PASS' if pass_p95 else 'FAIL'}) "
@@ -104,24 +123,50 @@ def main():
         host_ms = [float(s.get("host_latency_ms", 0.0)) for s in samples]
         trim_ppm = [float(s.get("trim_ppm", 0.0)) for s in samples]
         clock_off_ms = [float(s.get("clock_offset_estimate_ms", 0.0)) for s in samples]
+        clock_off_valid = [float(s.get("clock_offset_estimate_ms", 0.0)) for s in samples if int(s.get("clock_offset_valid", 1)) != 0]
         ptp_off_us = [float(s.get("ptp_offset_ema_us", 0.0)) for s in samples]
+        cdg_lag_ms = [float(s.get("cdg_lag_ms", 0.0)) for s in samples]
+        phase_clipped = sum(1 for s in samples if int(s.get("group_phase_spread_clipped", 0)) != 0)
         rec_host = max(int(s.get("recover_host_underrun", 0)) for s in samples)
         rec_zero = max(int(s.get("recover_zero_buffer", 0)) for s in samples)
         rec_silent = max(int(s.get("recover_silent_stall", 0)) for s in samples)
+        cdg_hard_resync_events = max(int(s.get("cdg_hard_resync_events", 0)) for s in samples)
+        cdg_hard_resync_packets = max(int(s.get("cdg_hard_resync_packets", 0)) for s in samples)
 
         print(f"-- receiver {receiver_id} --")
         print(summarize_series("audio_buffer_ms", buf_ms))
         print(summarize_series("host_latency_ms", host_ms))
         print(summarize_series("trim_ppm", trim_ppm))
         print(summarize_series("clock_offset_estimate_ms", clock_off_ms))
+        if clock_off_valid:
+            print(summarize_series("clock_offset_estimate_ms_valid_only", clock_off_valid))
         print(summarize_series("ptp_offset_ema_us", ptp_off_us))
+        print(summarize_series("cdg_lag_ms", cdg_lag_ms))
+        print(f"group_phase_spread_clipped_ratio={phase_clipped / len(samples):.4f}")
         print(
             f"recovery_counters: host_underrun={rec_host} "
             f"zero_buffer={rec_zero} silent_stall={rec_silent}"
         )
+        print(
+            f"cdg_hard_resync: events={cdg_hard_resync_events} "
+            f"packets={cdg_hard_resync_packets}"
+        )
         print("")
 
-    overall_pass = pass_p95 and pass_p99 and phase_fail_count == 0
+    worst_rx_cdg_lag_p95 = 0.0
+    for samples in by_rx.values():
+        s = [float(x.get("cdg_lag_ms", 0.0)) for x in samples]
+        if s:
+            worst_rx_cdg_lag_p95 = max(worst_rx_cdg_lag_p95, percentile(s, 0.95))
+
+    pass_cdg_lag = worst_rx_cdg_lag_p95 <= args.max_cdg_lag_p95_ms
+    pass_clock_noisy_ratio = (clock_noisy_count / len(records)) <= args.max_clock_noisy_ratio
+    overall_pass = pass_p95 and pass_p99 and phase_fail_count == 0 and pass_cdg_lag and pass_clock_noisy_ratio
+    print(
+        "extended_gate: "
+        f"worst_rx_cdg_lag_p95<={args.max_cdg_lag_p95_ms:.0f} ({'PASS' if pass_cdg_lag else 'FAIL'}) "
+        f"clock_noisy_ratio<={args.max_clock_noisy_ratio:.4f} ({'PASS' if pass_clock_noisy_ratio else 'FAIL'})"
+    )
     print(f"overall_verdict: {'PASS' if overall_pass else 'FAIL'}")
     return 0 if overall_pass else 2
 

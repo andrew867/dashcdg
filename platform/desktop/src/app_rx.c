@@ -357,6 +357,8 @@ struct receiver_state {
     uint64_t audio_queue_overflows;
     uint64_t audio_missing_skips;
     uint64_t audio_hard_resync_events;
+    uint64_t cdg_hard_resync_events;
+    uint64_t cdg_hard_resync_packets;
     uint64_t live_missing_skips;
     uint64_t fec_packets;
     uint64_t fec_audio_packets;
@@ -371,6 +373,7 @@ struct receiver_state {
     uint64_t last_logged_audio_queue_overflows;
     uint64_t last_logged_audio_missing_skips;
     uint64_t last_logged_audio_hard_resync_events;
+    uint64_t last_logged_cdg_hard_resync_events;
     uint64_t last_logged_live_missing_skips;
     uint64_t last_logged_audio_reordered_packets;
     uint64_t last_logged_cdg_reordered_batches;
@@ -875,6 +878,11 @@ static void dashcdg_rx_sidecar_write_line(const char *line) {
 }
 
 static int dashcdg_rx_local_audio_playback_now_locked(uint64_t *out_playback_ms);
+static int dashcdg_rx_sender_playback_now_locked(
+        const struct receiver_state *state,
+        uint64_t local_now_ms,
+        uint64_t *out_playback_ms
+);
 static uint32_t dashcdg_rx_audio_host_latency_ms_locked(void);
 static uint32_t dashcdg_rx_audio_target_total_latency_ms_locked(const struct receiver_state *state);
 static uint32_t dashcdg_rx_audio_target_buffer_ms_locked(const struct receiver_state *state);
@@ -918,6 +926,11 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
     int phase_warn = 0;
     int phase_fail = 0;
     int clock_noisy = 0;
+    int clock_offset_valid = 0;
+    int phase_spread_clipped = 0;
+    int64_t cdg_lag_ms = 0;
+    uint64_t sender_playback_now_ms = 0U;
+    int have_sender_playback = 0;
     int clock_skew_ms = (int) g_receiver.rx_sender_skew_ema_ms;
     int64_t ptp_offset_ema_us = g_receiver.sender_offset_ms * 1000LL;
     int ptp_offset_i32 = 0;
@@ -940,6 +953,19 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
     phase_warn = (g_receiver.sync_group_phase_spread_ms >= 20U) ? 1 : 0;
     phase_fail = (g_receiver.sync_group_phase_spread_ms >= 40U) ? 1 : 0;
     clock_noisy = (g_receiver.sender_offset_ms >= 2 || g_receiver.sender_offset_ms <= -2) ? 1 : 0;
+    phase_spread_clipped = (g_receiver.sync_group_phase_spread_ms == 255U) ? 1 : 0;
+    clock_offset_valid =
+            (g_receiver.session_start_ms != 0U && g_receiver.have_clock && g_receiver.sender_clock_updates > 0U &&
+                    g_receiver.sender_offset_ms <= 30000 && g_receiver.sender_offset_ms >= -30000)
+                    ? 1
+                    : 0;
+    have_sender_playback = dashcdg_rx_sender_playback_now_locked(&g_receiver, now_ms, &sender_playback_now_ms);
+    if (have_sender_playback && g_receiver.cdg_batch_jitter.initialized) {
+        cdg_lag_ms = (int64_t)sender_playback_now_ms - (int64_t)g_receiver.cdg_batch_jitter.next_playback_ms;
+        if (cdg_lag_ms < 0) {
+            cdg_lag_ms = 0;
+        }
+    }
     have_presented_ts = dashcdg_rx_local_audio_playback_now_locked(&presented_audio_ts_ms);
     snprintf(
             line,
@@ -950,6 +976,8 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
             "\"trim_ppm\":%d,\"presented_audio_ts_ms\":%u,\"clock_offset_estimate_ms\":%d,"
             "\"clock_skew_ema_ms\":%d,\"ptp_offset_ema_us\":%d,"
             "\"recover_host_underrun\":%llu,\"recover_zero_buffer\":%llu,\"recover_silent_stall\":%llu,"
+            "\"cdg_hard_resync_events\":%llu,\"cdg_hard_resync_packets\":%llu,"
+            "\"clock_offset_valid\":%d,\"group_phase_spread_clipped\":%d,\"cdg_lag_ms\":%lld,"
             "\"phase_warn\":%d,\"phase_fail\":%d,\"clock_noisy\":%d}\n",
             (unsigned long long) now_ms,
             (unsigned int) g_rx_receiver_instance_id,
@@ -969,6 +997,11 @@ static void dashcdg_rx_metrics_emit_locked(uint64_t now_ms) {
             (unsigned long long) g_receiver.recovery_host_underrun_count,
             (unsigned long long) g_receiver.recovery_zero_buffer_count,
             (unsigned long long) g_receiver.recovery_silent_stall_count,
+            (unsigned long long) g_receiver.cdg_hard_resync_events,
+            (unsigned long long) g_receiver.cdg_hard_resync_packets,
+            clock_offset_valid,
+            phase_spread_clipped,
+            (long long) cdg_lag_ms,
             phase_warn,
             phase_fail,
             clock_noisy
@@ -1677,6 +1710,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_queue_overflows = 0;
     state->audio_missing_skips = 0;
     state->audio_hard_resync_events = 0;
+    state->cdg_hard_resync_events = 0;
+    state->cdg_hard_resync_packets = 0;
     state->live_missing_skips = 0;
     state->fec_packets = 0;
     state->fec_audio_packets = 0;
@@ -1691,6 +1726,7 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->last_logged_audio_queue_overflows = 0;
     state->last_logged_audio_missing_skips = 0;
     state->last_logged_audio_hard_resync_events = 0;
+    state->last_logged_cdg_hard_resync_events = 0;
     state->last_logged_live_missing_skips = 0;
     state->last_logged_audio_reordered_packets = 0;
     state->last_logged_cdg_reordered_batches = 0;
@@ -3158,6 +3194,18 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
                 (uint64_t) local_now_ms
         );
         state->last_logged_audio_hard_resync_events = state->audio_hard_resync_events;
+    }
+    if (state->cdg_hard_resync_events > state->last_logged_cdg_hard_resync_events) {
+        delta = state->cdg_hard_resync_events - state->last_logged_cdg_hard_resync_events;
+        DASHCDG_RX_APPEND_FAULT_LINE(
+                "[rx] fault: cdg_hard_resync +%" DASHCDG_RX_PRIu64 " packets=%" DASHCDG_RX_PRIu64 " next_pkt=%u pending=%u now=%" DASHCDG_RX_PRIu64,
+                (uint64_t) delta,
+                (uint64_t) state->cdg_hard_resync_packets,
+                (unsigned int) state->cdg_batch_jitter.next_packet_index,
+                (unsigned int) dashcdg_rx_pending_cdg_count(state),
+                (uint64_t) local_now_ms
+        );
+        state->last_logged_cdg_hard_resync_events = state->cdg_hard_resync_events;
     }
     if (state->live_missing_skips > state->last_logged_live_missing_skips) {
         delta = state->live_missing_skips - state->last_logged_live_missing_skips;
@@ -5370,6 +5418,10 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             cdg_step = dashcdg_cdg_batch_jitter_drain_step(&state->cdg_batch_jitter, &cdg_din, &batch, &cdg_miss);
             if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
                 state->live_missing_skips += cdg_miss;
+                if (cdg_miss >= 8U) {
+                    state->cdg_hard_resync_events++;
+                    state->cdg_hard_resync_packets += cdg_miss;
+                }
                 state->last_cdg_jitter_apply_local_ms = local_now_ms;
                 state->last_progress_local_ms = local_now_ms;
                 progressed = 1;
