@@ -40,6 +40,8 @@ v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from T
 
 Normative requirements, soak gates, and implementation order (residual phase: detrended spread, smoothed TX controller, RX leader scaling, DAC trim, etc.): **`docs/specs/enterprise-group-sync-spec.md`**, **`docs/test/enterprise-group-sync-test-plan.md`**, **`docs/plans/enterprise-group-sync-tranches.md`**. Older enterprise master-plan markdown is archived under **`docs/archive/enterprise-sync-masterplan-2026-04/`** (stub files keep old paths).
 
+**Implemented in code (2026):** TX `dashcdg_tx_refresh_rx_measurements_locked` detrends per peer (buffer+host), EMA-smooths absolute and residual series (τ ≈ 3.5 s), publishes **pipeline** vs **residual** spread; `phase_warn` / `clock_noisy` / v4 clock_sync wire spread use **residual**; jsonl includes `pipeline_phase_spread_ms` and `residual_phase_spread_ms` (`phase_spread_ms` aliases residual for scripts). RX follower leader trim is capped by **residual** `sync_group_phase_spread_ms` from the wire: `min(200 ppm, 2 * spread_ms)` unless leader trim is smaller. Optional **`DASHCDG_RX_DAC_TRIM_MS`** nudges the queue servo target (±500 ms).
+
 ## Observability
 
 **`dashcdg_rx_configure_audio_locked`** logs:

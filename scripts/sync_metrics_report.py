@@ -88,7 +88,17 @@ def main():
     for r in rx:
         by_rx[r.get("receiver_instance", 0)].append(r)
 
-    phase_spread = [float(r.get("phase_spread_ms", 0.0)) for r in tx]
+    def tx_control_spread_row(r):
+        """
+        Residual (detrended) spread is the control-plane signal for gates.
+        New emitters set residual_phase_spread_ms; phase_spread_ms is kept as an alias.
+        """
+        if "residual_phase_spread_ms" in r:
+            return float(r.get("residual_phase_spread_ms", 0.0))
+        return float(r.get("phase_spread_ms", 0.0))
+
+    phase_spread = [tx_control_spread_row(r) for r in tx]
+    pipeline_spread = [float(r.get("pipeline_phase_spread_ms", 0.0)) for r in tx]
     starved_bypass_taken = [float(r.get("cdg_starved_bypass_taken", 0.0)) for r in tx]
     worst_negative_lead = [float(r.get("cdg_worst_negative_lead_ms", 0.0)) for r in tx]
     phase_warn_count = sum(1 for r in records if int(r.get("phase_warn", 0)) != 0)
@@ -104,7 +114,17 @@ def main():
 
     print("== dashcdg sync metrics summary ==")
     print(f"records: total={len(records)} tx={len(tx)} rx={len(rx)} receivers={len(by_rx)}")
-    print(summarize_series("tx.phase_spread_ms", phase_spread))
+    print(
+        "gate_spread: using "
+        + (
+            "residual_phase_spread_ms (or phase_spread_ms alias)"
+            if tx and ("residual_phase_spread_ms" in tx[0] or "pipeline_phase_spread_ms" in tx[0])
+            else "phase_spread_ms (legacy)"
+        )
+    )
+    print(summarize_series("tx.residual_phase_spread_ms (gate)", phase_spread))
+    if any("pipeline_phase_spread_ms" in r for r in tx):
+        print(summarize_series("tx.pipeline_phase_spread_ms (raw)", pipeline_spread))
     if tx:
         print(summarize_series("tx.cdg_starved_bypass_taken", starved_bypass_taken))
         print(summarize_series("tx.cdg_worst_negative_lead_ms", worst_negative_lead))

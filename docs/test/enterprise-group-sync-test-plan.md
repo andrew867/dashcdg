@@ -120,7 +120,9 @@ python scripts/sync_metrics_report.py --same-backend <tx.jsonl> <rx1.jsonl> [rx2
 
 ### 5.1 Gates until residual metrics ship (legacy columns)
 
-These match the archived enterprise soak gates; **revisit** after `residual_spread_ms` (or equivalent) is emitted and the script prefers it for gating.
+**Update (2026):** TX jsonl emits **`residual_phase_spread_ms`** and **`pipeline_phase_spread_ms`**; `scripts/sync_metrics_report.py` summarizes and **gates on residual** (`phase_spread_ms` is kept as an alias of residual). Legacy logs without `residual_phase_spread_ms` still gate on `phase_spread_ms` alone.
+
+Historical reference — thresholds below targeted **raw** spread before detrending; with residual semantics, expect materially smaller spread numbers at steady state:
 
 | Metric | Mixed backend | Same backend |
 | --- | --- | --- |

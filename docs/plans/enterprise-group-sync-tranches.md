@@ -28,11 +28,11 @@ Implement in order; each tranche has exit criteria in the test plan.
 
 | Order | Tranche | Scope | Primary files (expected) |
 | --- | --- | --- | --- |
-| **R1** | **Detrended spread** | Emit `latency_residual_ms[i]`; drive spread, `clock_noisy`, trim from residual; log raw spread alongside | `app_tx.c` |
-| **R2** | **Smoothed controller** | 2–5 s EMA/window on per-peer latency or residual before min/max + median target | `app_tx.c` |
-| **R3** | **Telemetry split / thresholds** | Either raise `DASHCDG_TX_CLOCK_NOISY_SPREAD_MS` / warn levels for residual semantics, or add `pipeline_spread_ms` vs `residual_spread_ms` columns + script | `app_tx.c`, `sync_metrics_report.py`, jsonl docs |
-| **R4** | **RX leader authority** | Scale `DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX` or bias by `sync_group_phase_spread_ms` when high; decay when low | `app_rx.c` |
-| **R5** | **DAC trim** | Prefs/env ms offset → presented and/or servo target | `app_rx.c`, prefs, `desktop_audio` as needed |
+| **R1** | **Detrended spread** | **Done:** residual = latency − (audio_buffer + host); pipeline vs residual spreads; gates/wire use residual. | `app_tx.c` |
+| **R2** | **Smoothed controller** | **Done:** ~3.5 s τ EMA on absolute + residual samples; median group target from smoothed absolute latency. | `app_tx.c` |
+| **R3** | **Telemetry split / thresholds** | **Done:** jsonl `pipeline_phase_spread_ms`, `residual_phase_spread_ms`; script gates on residual; thresholds unchanged (apply to residual semantics). | `app_tx.c`, `sync_metrics_report.py` |
+| **R4** | **RX leader authority** | **Done:** follower \|bias\| capped by `min(HARD_MAX, spread_ms * PER_SPREAD_MS)` (spread = residual on wire). | `app_rx.c` |
+| **R5** | **DAC trim** | **Done (env):** `DASHCDG_RX_DAC_TRIM_MS` adjusts ring servo target (±500 ms clamp). Prefs UI optional later. | `app_rx.c` |
 | **R6** | **Clock discipline** | Filter/cadence improvements for `clock_offset_estimate` stability | `app_rx.c` / clock sync handlers |
 | **R7** | **Startup alignment** | Reduce join-time `audio_queue_overflow` bursts; align start_hold with policy | `app_rx.c`, jitter init |
 | **R8** | **MEASURE → ACTIVE** | Default or document MEASURE-first; ensure ACTIVE does not over-trim cold | `app_tx.c`, operator doc |

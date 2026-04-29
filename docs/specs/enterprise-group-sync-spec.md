@@ -68,7 +68,7 @@ where \(f\) is a documented function consistent with existing **receiver minimum
 
 **Requirement:** When `sync_group_phase_spread_ms` (from TX) exceeds a configured high threshold, **followers** (non-leader receivers) MAY apply **scaled-up** leader trim bias up to a **raised cap**, decaying when spread falls.
 
-**Current code reference:** `DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX` (80 ppm), `dashcdg_rx_audio_queue_servo_trim_ppm_locked` in `app_rx.c`.
+**Current code reference:** `DASHCDG_RX_SYNC_LEADER_BIAS_PPM_HARD_MAX` (200 ppm cap) and `DASHCDG_RX_SYNC_LEADER_BIAS_PPM_PER_SPREAD_MS` (2 ppm / ms of **residual** group spread on the wire, after TX detrending). Follower |bias| = `min(leader_trim, spread_ms * per_ms, hard_max)`. `dashcdg_rx_audio_queue_servo_trim_ppm_locked` in `app_rx.c`.
 
 **Rationale:** Soak evidence showed leader trim ~80 ppm while raw spread remained large; followers may need more authority briefly, then relax.
 
@@ -128,10 +128,12 @@ The following remain **program requirements** until explicitly retired in a futu
 
 | Area | Location / symbols |
 | --- | --- |
-| Phase spread, clock noisy, TX metrics jsonl | `app_tx.c` — `DASHCDG_TX_PHASE_WARN_SPREAD_MS`, `DASHCDG_TX_CLOCK_NOISY_SPREAD_MS`, `v4_group_sync_phase_spread_ms` |
-| Latency / min plausible / group target median | `app_tx.c` — `dashcdg_tx_compute_rx_latency_ms_locked`, `receiver_min_plausible_latency_ms`, `dashcdg_tx_group_target_from_latencies_median` |
+| Phase spread, clock noisy, TX metrics jsonl | `app_tx.c` — gates use **residual** spread (`v4_group_sync_phase_spread_ms`); **pipeline** (raw) in `v4_group_sync_pipeline_spread_ms`; jsonl `pipeline_phase_spread_ms`, `residual_phase_spread_ms`, `phase_spread_ms` (alias of residual for scripts) |
+| Latency EMA, detrend | `app_tx.c` — per-reporter `latency_abs_ema_ms` / `latency_residual_ema_ms` (τ ≈ 3.5 s), `DASHCDG_TX_LATENCY_CTRL_EMA_TAU_MS`, `dashcdg_tx_rx_pipeline_ms_locked` |
+| Latency / min plausible / group target median | `app_tx.c` — `dashcdg_tx_compute_rx_latency_ms_locked`, `receiver_min_plausible_latency_ms`, `dashcdg_tx_group_target_from_latencies_median` on **smoothed absolute** latency |
 | Group sync modes | `DASHCDG_TX_GROUP_SYNC_MODE_*` in `app_tx.c` |
-| RX queue servo + leader bias | `app_rx.c` — `dashcdg_rx_audio_queue_servo_trim_ppm_locked`, `DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX`, `sync_group_phase_spread_ms` |
+| RX queue servo + leader bias | `app_rx.c` — `dashcdg_rx_audio_queue_servo_trim_ppm_locked`, spread-derived follower cap, `sync_group_phase_spread_ms` (residual from TX wire) |
+| Optional DAC trim | `DASHCDG_RX_DAC_TRIM_MS` env → `g_rx_dac_trim_ms` on ring servo target |
 | Stable presented time / RX metrics | `app_rx.c`, `desktop_audio.c` — see `AGENTS.md` |
 
 Planned items in §§3–5 are **not** all implemented as of this document revision; the tranche doc tracks delivery order.
