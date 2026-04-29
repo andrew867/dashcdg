@@ -322,3 +322,4 @@ Exit criteria:
 - [../test/av-sync-cross-client-validation.md](../test/av-sync-cross-client-validation.md)
 - [../test/v4-group-playout-sync-validation.md](../test/v4-group-playout-sync-validation.md)
 - [../ops/v4-group-playout-sync-rollout.md](../ops/v4-group-playout-sync-rollout.md)
+- [`enterprise-group-sync-spec.md`](enterprise-group-sync-spec.md) — **enterprise** residual-phase requirements (detrended spread, smoothed controller, DAC trim, gates) and implementation pointers

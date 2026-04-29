@@ -20,6 +20,7 @@ lives in **`specs/desktop-platform-support.md`** and
   or `*-implementation-plan.md` are often **snapshots in time**. They stay in the
   tree for archaeology, but may not reflect *today’s* code — check the primary
   sources (`app_rx.c`, `app_tx.c`, `AGENTS.md`) when in doubt.
+- **Enterprise group sync:** canonical spec/tests/tranches are under `specs/enterprise-group-sync-spec.md`, `test/enterprise-group-sync-test-plan.md`, and `plans/enterprise-group-sync-tranches.md`. Older “enterprise sync” master-plan files live in [`archive/enterprise-sync-masterplan-2026-04/`](archive/enterprise-sync-masterplan-2026-04/README.md); stub paths redirect here.
 
 ## Architecture
 
@@ -50,6 +51,8 @@ lives in **`specs/desktop-platform-support.md`** and
 | [`specs/v4-display-audio-sync.md`](specs/v4-display-audio-sync.md) | TX preview delay, RX drain order, **DAC vs graphics** time |
 | [`specs/tx-cdg-source-model.md`](specs/tx-cdg-source-model.md) | TX CDG source / memory model |
 | [`specs/remaining-tranches-roadmap.md`](specs/remaining-tranches-roadmap.md) | **Remaining work index** (soak, track stress, bad-network phases, CD+G regression, observability) |
+| [`specs/enterprise-group-sync-spec.md`](specs/enterprise-group-sync-spec.md) | **Enterprise** multi-receiver sync — residual spread, smoothed TX control, RX leader scaling, DAC trim, gates (normative) |
+| [`plans/enterprise-group-sync-tranches.md`](plans/enterprise-group-sync-tranches.md) | **Enterprise** sync implementation order (closeout + residual R1–R8) |
 | [`specs/bad-network-transport-next-phases.md`](specs/bad-network-transport-next-phases.md) | Bad-network transport **implementation phases** (companion) |
 | [`specs/v4-video-repair-window-design.md`](specs/v4-video-repair-window-design.md) | On-the-fly video repair window math, budgets, and anchor-epoch rules (pre-implementation) |
 | [`specs/operator-observability-and-sync-future-work.md`](specs/operator-observability-and-sync-future-work.md) | PTP / operator UI / metrics UI **future work** |
@@ -74,6 +77,7 @@ lives in **`specs/desktop-platform-support.md`** and
 | [`test/long-impairment-soak-validation.md`](test/long-impairment-soak-validation.md) | **Long** impaired soaks, log capture, burst threshold quantification |
 | [`test/rapid-track-switch-pressure-validation.md`](test/rapid-track-switch-pressure-validation.md) | Rapid track changes under **sustained TX pressure** |
 | [`test/tx-cdg-source-late-join-regression-plan.md`](test/tx-cdg-source-late-join-regression-plan.md) | **TX CD+G** source slimdown — late-join / switch regression |
+| [`test/enterprise-group-sync-test-plan.md`](test/enterprise-group-sync-test-plan.md) | **Enterprise** group sync — environments, traceability (`EGS-*`), soak gates, release checklist |
 | Other `test/*.md` | Feature‑specific plans and reports |
 
 ## Hardware, embedded & ops

@@ -36,6 +36,10 @@ v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from T
 
 6. **Unpause + stall recovery** — **`handle_v4_clock_sync` / `handle_clock_beacon`** call **`dashcdg_rx_rearm_live_video_after_unpause_locked`** plus **`dashcdg_rx_reprime_audio_after_host_underrun_locked`**. On **non-legacy** desktop builds, **dead backend**, **zero-buffer**, and **buffered-silent** auto-recovery use **`dashcdg_rx_rebuild_audio_decode_path_locked`** (same class of work as **`dashcdg_rx_configure_audio_locked`**: stop host stream, re-init ring, reopen device, re-prime jitter/decoders) so the RX does not stay silent until a manual **D** toggle.
 
+## Enterprise group sync (multi-receiver)
+
+Normative requirements, soak gates, and implementation order (residual phase: detrended spread, smoothed TX controller, RX leader scaling, DAC trim, etc.): **`docs/specs/enterprise-group-sync-spec.md`**, **`docs/test/enterprise-group-sync-test-plan.md`**, **`docs/plans/enterprise-group-sync-tranches.md`**. Older enterprise master-plan markdown is archived under **`docs/archive/enterprise-sync-masterplan-2026-04/`** (stub files keep old paths).
+
 ## Observability
 
 **`dashcdg_rx_configure_audio_locked`** logs:
