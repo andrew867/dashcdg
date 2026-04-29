@@ -18,6 +18,7 @@ probably in the right place.
 - **Long-form doc index:** [docs/README.md](docs/README.md)  
 - **Latest release notes:** [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md)  
 - **Receiver + debugging handoff:** [AGENTS.md](AGENTS.md)
+- **Author / other public work (short):** [docs/ops/portfolio.md](docs/ops/portfolio.md)
 
 ---
 

@@ -96,3 +96,4 @@ lives in **`specs/desktop-platform-support.md`** and
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, test, and document
 - [`../AGENTS.md`](../AGENTS.md) — agent / developer handoff for **desktop-rx** debugging
+- [`ops/portfolio.md`](ops/portfolio.md) — one-page **public portfolio** (author index + flagship repos)
