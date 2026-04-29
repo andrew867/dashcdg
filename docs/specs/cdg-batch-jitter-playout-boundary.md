@@ -54,6 +54,25 @@ comparing against `jb->next_playback_ms`. This keeps video drain aligned with
 the same delayed playout boundary as audio and avoids treating the whole
 startup preroll as already-late content.
 
+### Ahead-of-playback gate (lip-sync, normative)
+
+When `have_sender_playback` is set, a batch at `packet_start_index` must not be
+**APPLY**'d until the receiver playout clock has reached the batch’s media
+time (plus `late_grace_ms`):
+
+- `dashcdg_packet_count_to_ms(packet_start_index) <= receiver_playback_now_ms + late_grace_ms`
+- `receiver_playback_now_ms` is the same post–`announced_playout_delay_ms` value
+  used for late/catch-up logic in `dashcdg_cdg_batch_jitter_drain_step`.
+
+Rationale: an exact `find(jb, next_packet_index)` hit used to return **APPLY**
+immediately. Contiguous batches in the ring could then be applied in a tight
+host loop with **no** clock check, advancing on-screen CDG/lyrics many seconds
+**ahead** of heard audio. The ahead gate makes “contiguous in the ring”
+subordinate to “contiguous in real playout time.”
+
+If `have_sender_playback` is false (bootstrap), the gate is not applied; strict
+in-order rules in the `!have_sender_playback` branch still apply.
+
 ## Host responsibilities
 
 - **Apply path:** decode each `dashcdg_subchannel_packet` in order through
