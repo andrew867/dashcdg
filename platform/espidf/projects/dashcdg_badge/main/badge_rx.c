@@ -119,6 +119,8 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_CLOCK_TICK_ESTIMATE_MS 50U
 #define BADGE_RX_V4_SESSION_REORDER_SENDER_SLACK_MS 100U
 #define BADGE_RX_SYNC_LEADER_BIAS_STALE_MS 3000U
+#define BADGE_RX_CDG_HARD_RESYNC_EVENT_MIN_MISS 8U
+#define BADGE_RX_CDG_HARD_RESYNC_COOLDOWN_MS 450U
 /*
  * Reported to TX in v4_rx_stats.host_output_latency_ms so group-sync phase math is not stuck at 0
  * for ESP32 (no PortAudio ring query). ~one I2S DMA period at 48 kHz mono.
@@ -283,6 +285,7 @@ static int s_active_session_valid;
 static uint8_t s_sync_group_mode;
 static uint16_t s_sync_group_target_latency_ms;
 static uint8_t s_sync_group_phase_spread_ms;
+static uint64_t s_cdg_skip_hold_until_local_ms;
 static uint16_t s_sync_leader_instance_id_low16;
 static int16_t s_sync_leader_trim_bias_ppm;
 static uint64_t s_sync_leader_last_update_local_ms;
@@ -1037,6 +1040,19 @@ static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
             startup_stage = DASHCDG_V4_RX_STARTUP_RUNNING;
             startup_flags |= DASHCDG_V4_RX_STARTUP_FLAG_HAVE_CLOCK;
             sender_obs_ms = (uint64_t)dashcdg_media_clock_remote_now(&s_mclk, (int64_t)now_ms);
+            if (s_jb != NULL && s_jb->initialized) {
+                int64_t lag = (int64_t)sender_obs_ms - (int64_t)s_jb->next_playback_ms;
+                if (lag < 0) {
+                    lag = 0;
+                } else if (lag > (int64_t)INT32_MAX) {
+                    lag = INT32_MAX;
+                }
+                s_stats.cdg_lag_ms = (int32_t)lag;
+            } else {
+                s_stats.cdg_lag_ms = 0;
+            }
+        } else {
+            s_stats.cdg_lag_ms = 0;
         }
         if (s_playback_paused) {
             startup_stage = DASHCDG_V4_RX_STARTUP_PAUSED;
@@ -1115,6 +1131,8 @@ static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
         pl.stats_generation = 4U;
         pl.device_flags = (s_run ? 0x1U : 0U) |
                           (s_stats.cdg_heap_ok ? 0x2U : 0U) |
+                          ((skew_inited ? 1U : 0U) << 2U) |
+                          ((s_sync_group_phase_spread_ms == 0xffU ? 1U : 0U) << 3U) |
                           ((uint32_t)(s_sync_group_mode & 0x3U) << 8U) |
                           ((uint32_t)(s_sync_group_phase_spread_ms) << 16U);
         s_v4_stats_snapshot = pl;
@@ -1430,11 +1448,29 @@ static void drain_cdg_to_idle(uint64_t local_now_ms)
                 (local_now_ms > s_last_cdg_apply_local_ms) ? (local_now_ms - s_last_cdg_apply_local_ms) : 0U;
         }
         din.primed_decode = s_jitter_cdg_primed;
+        if (s_cdg_skip_hold_until_local_ms != 0U && local_now_ms < s_cdg_skip_hold_until_local_ms) {
+            din.late_gate = 0;
+            din.ms_since_prior_cdg_apply = 0U;
+            din.primed_decode = 0;
+        }
 
         enum dashcdg_cdg_batch_drain_step step =
             dashcdg_cdg_batch_jitter_drain_step(s_jb, &din, &batch, &miss);
         if (step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
             s_stats.live_missing_skips += miss;
+            if (miss >= BADGE_RX_CDG_HARD_RESYNC_EVENT_MIN_MISS) {
+                uint64_t hold_ms = BADGE_RX_CDG_HARD_RESYNC_COOLDOWN_MS;
+                if (s_announced_playout_delay_ms > hold_ms) {
+                    hold_ms = s_announced_playout_delay_ms;
+                }
+                s_stats.cdg_hard_resync_events++;
+                if (s_stats.cdg_hard_resync_packets > 0xffffffffU - (uint32_t)miss) {
+                    s_stats.cdg_hard_resync_packets = 0xffffffffU;
+                } else {
+                    s_stats.cdg_hard_resync_packets += (uint32_t)miss;
+                }
+                s_cdg_skip_hold_until_local_ms = local_now_ms + hold_ms;
+            }
             s_last_cdg_apply_local_ms = local_now_ms;
         } else if (step == DASHCDG_CDG_BATCH_DRAIN_APPLY && batch != NULL) {
             apply_cdg_batch(batch);
@@ -1460,6 +1496,7 @@ static void badge_rx_try_alloc_cdg_jitter(void)
     dashcdg_cdg_batch_jitter_init(s_jb);
     s_jitter_cdg_primed = 0;
     s_last_cdg_apply_local_ms = 0U;
+    s_cdg_skip_hold_until_local_ms = 0U;
     dashcdg_cdg_state_raster_dirty_mark_full(s_cdg);
     s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
     (void)badge_rx_ensure_blit_scratch();
@@ -2340,6 +2377,7 @@ static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
     s_sync_group_mode = BADGE_RX_TX_GROUP_SYNC_MODE_OFF;
     s_sync_group_target_latency_ms = 0U;
     s_sync_group_phase_spread_ms = 0U;
+    s_cdg_skip_hold_until_local_ms = 0U;
     s_sync_leader_instance_id_low16 = 0U;
     s_sync_leader_trim_bias_ppm = 0;
     s_sync_leader_last_update_local_ms = 0U;
@@ -3218,6 +3256,7 @@ void dashcdg_badge_rx_start(void)
     dashcdg_media_clock_init(&s_mclk);
     s_jitter_cdg_primed = 0;
     s_last_cdg_apply_local_ms = 0U;
+    s_cdg_skip_hold_until_local_ms = 0U;
     s_announced_playout_delay_ms = 0U;
     s_sync_local_ms = 0U;
     s_sync_playback_ms = 0U;
@@ -3226,6 +3265,7 @@ void dashcdg_badge_rx_start(void)
     s_active_asset_size = 0U;
     memset(s_active_song_id, 0, sizeof(s_active_song_id));
     s_active_session_valid = 0;
+    s_cdg_skip_hold_until_local_ms = 0U;
 
     s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
     if (s_video_decode_enabled) {

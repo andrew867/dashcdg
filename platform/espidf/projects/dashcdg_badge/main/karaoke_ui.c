@@ -645,10 +645,11 @@ static void karaoke_mcast_modal_update_dashboard(void)
              heap_free, heap_min, int_largest, (unsigned long)st.parse_failures, (unsigned long long)st.last_sequence);
     lv_label_set_text(s_mcast_card_system, line);
 
-    snprintf(line, sizeof(line), "%s\nclock %s  decode %s\ndec fail %lu  deg %lu  jb skip %lu  dac %lu",
+    snprintf(line, sizeof(line), "%s\nclock %s  decode %s\ndec %lu deg %lu jb %lu dac %lu\ncdg hr %lu/%lu lag %ld",
              st.song_id[0] ? st.song_id : "(none)", st.have_clock ? "yes" : "no", st.cdg_heap_ok ? "on" : "off",
              (unsigned long)st.v4_audio_decode_fail, (unsigned long)st.v4_audio_degraded_push,
-             (unsigned long)st.v4_audio_jitter_skip_events, (unsigned long)st.v4_audio_dac_begin_fail);
+             (unsigned long)st.v4_audio_jitter_skip_events, (unsigned long)st.v4_audio_dac_begin_fail,
+             (unsigned long)st.cdg_hard_resync_events, (unsigned long)st.cdg_hard_resync_packets, (long)st.cdg_lag_ms);
     lv_label_set_text(s_mcast_card_song, line);
 }
 

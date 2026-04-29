@@ -51,6 +51,11 @@ typedef struct {
     /** Per-stream gap estimates for quick corruption correlation in the modal. */
     uint32_t audio_missing_estimate;
     uint32_t cdg_missing_estimate;
+    /** CDG hard-resync skips (large cursor jumps) and total packets skipped by those events. */
+    uint32_t cdg_hard_resync_events;
+    uint32_t cdg_hard_resync_packets;
+    /** Sender-playback minus CDG jitter playback cursor (0 when unavailable). */
+    int32_t cdg_lag_ms;
     uint32_t clock_missing_estimate;
     uint32_t repair_missing_estimate;
     char song_id[80];
