@@ -26,6 +26,8 @@ v4 **full-file backfill** (cycling the `.cdg` on the wire) is **removed** from T
 
 1. **Jitter empty-buffer runaway** — `primed_decode` gates empty / stall-loss skips until first successful decode (`core/src/audio_jitter.c`, `core/src/cdg_batch_jitter.c`). CDG jitter must not anchor **`next_packet_index`** to the first UDP datagram (reorder-safe insert at cursor 0 + stale drop + contiguous rewind in **`dashcdg_cdg_batch_jitter_drain_step`**).
 
+   **Ahead-of-playback (lip-sync):** When **`have_sender_playback`** is set, **`dashcdg_cdg_batch_jitter_drain_step`** must not **APPLY** until **`dashcdg_packet_count_to_ms(batch_start) ≤ receiver_playback_now_ms + late_grace_ms`** (same delayed receiver timeline as late/catch-up). Otherwise contiguous batches in the ring could be applied in one host loop and **on-screen lyrics could run seconds ahead of the speakers** (fixed 2026).
+
 2. **`handle_v4_session_info` teardown loop** — Reconfigure only when **audio fields** (or device null) change, not bare `asset_changed` while chunks are still settling (**`need_audio_device_reconfigure`** in **`app_rx.c`**).
 
 3. **Live CDG before snapshot** — **`dashcdg_rx_seed_live_state_before_first_wire_delta_locked`** seeds **`live_state`** before first wire delta (**`app_rx.c`**).
