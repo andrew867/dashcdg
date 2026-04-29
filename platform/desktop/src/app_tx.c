@@ -184,9 +184,11 @@
 #define DASHCDG_TX_SYNC_LEADER_SWITCH_MIN_HOLD_MS 12000U
 #define DASHCDG_TX_SYNC_LEADER_SWITCH_MARGIN_SCORE 1200U
 #define DASHCDG_TX_RX_NEW_JOIN_FOLLOWER_MS 45000U
+/** Gates apply to **residual** phase spread (pipeline/detrended), not raw instantaneous spread. */
 #define DASHCDG_TX_PHASE_WARN_SPREAD_MS 40
 #define DASHCDG_TX_PHASE_FAIL_SPREAD_MS 80
 #define DASHCDG_TX_CLOCK_NOISY_SPREAD_MS 60
+#define DASHCDG_TX_LATENCY_CTRL_EMA_TAU_MS 3500U
 #define DASHCDG_TX_RX_SUMMARY_INTERVAL_MS 2000U
 #define DASHCDG_TX_RX_MEASUREMENTS_REFRESH_MIN_MS 100U
 #define DASHCDG_TX_CDG_FEC_ADAPT_INTERVAL_MS 3000U
@@ -492,6 +494,11 @@ struct dashcdg_tx_rx_reporter {
     uint8_t controller_eligible;
     char health_reason[32];
     struct dashcdg_v4_rx_stats_payload stats;
+    /** Smoothed absolute latency (EMA, ~3.5 s τ) for group target and phase error. */
+    int32_t latency_abs_ema_ms;
+    /** Smoothed residual vs pipeline (buffer+host). */
+    int32_t latency_residual_ema_ms;
+    uint64_t latency_ctrl_ema_last_ms;
 };
 
 /*
@@ -744,6 +751,9 @@ struct dashcdg_tx_state {
     uint64_t v4_rx_sync_leader_last_switch_ms;
     uint8_t v4_group_sync_mode;
     uint32_t v4_group_sync_target_latency_ms;
+    /** Instantaneous raw latency spread (max−min) among controller-eligible peers. */
+    int32_t v4_group_sync_pipeline_spread_ms;
+    /** Detrended spread (smoothed residual max−min); drives gates, wire syncctrl, RX follower scaling. */
     int32_t v4_group_sync_phase_spread_ms;
     uint64_t v4_cdg_starved_bypass_checks;
     uint64_t v4_cdg_starved_bypass_taken;
@@ -1114,7 +1124,7 @@ static void dashcdg_tx_metrics_jsonl_close(void) {
 }
 
 static void dashcdg_tx_metrics_emit_locked(uint64_t now_ms) {
-    char line[1024];
+    char line[1536];
     int phase_warn = 0;
     int phase_fail = 0;
     int clock_noisy = 0;
@@ -1141,7 +1151,9 @@ static void dashcdg_tx_metrics_emit_locked(uint64_t now_ms) {
             line,
             sizeof(line),
             "{\"type\":\"tx_metrics\",\"ts_ms\":%llu,\"session_start_ms\":%llu,\"group_sync_mode\":\"%s\","
-            "\"group_target_ms\":%u,\"phase_spread_ms\":%d,\"phase_min_ms\":%d,\"phase_max_ms\":%d,"
+            "\"group_target_ms\":%u,"
+            "\"pipeline_phase_spread_ms\":%d,\"residual_phase_spread_ms\":%d,"
+            "\"phase_spread_ms\":%d,\"phase_min_ms\":%d,\"phase_max_ms\":%d,"
             "\"leader_instance\":%u,\"leader_trim_ppm\":%d,"
             "\"peers_total\":%llu,\"peers_healthy\":%llu,\"peers_degraded\":%llu,\"peers_stale\":%llu,"
             "\"rx_best_buffer_ms\":%u,\"rx_worst_buffer_ms\":%u,"
@@ -1151,6 +1163,8 @@ static void dashcdg_tx_metrics_emit_locked(uint64_t now_ms) {
             (unsigned long long) g_tx_state.session_start_ms,
             dashcdg_tx_group_sync_mode_label(g_tx_state.v4_group_sync_mode),
             (unsigned int) g_tx_state.v4_group_sync_target_latency_ms,
+            (int) g_tx_state.v4_group_sync_pipeline_spread_ms,
+            (int) g_tx_state.v4_group_sync_phase_spread_ms,
             (int) g_tx_state.v4_group_sync_phase_spread_ms,
             (int) g_tx_state.v4_rx_phase_error_min_ms,
             (int) g_tx_state.v4_rx_phase_error_max_ms,
@@ -2734,6 +2748,8 @@ static void dashcdg_tx_reset_rx_reporters_locked(void) {
     g_tx_state.v4_rx_sync_leader_instance_id = 0U;
     g_tx_state.v4_rx_sync_leader_trim_ppm = 0;
     g_tx_state.v4_rx_sync_leader_last_switch_ms = 0U;
+    g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
+    g_tx_state.v4_group_sync_phase_spread_ms = 0;
 }
 
 static void dashcdg_tx_roll_session_rx_reporters_locked(void) {
@@ -2741,6 +2757,7 @@ static void dashcdg_tx_roll_session_rx_reporters_locked(void) {
     g_tx_rx_measurements_last_refresh_ms = 0U;
     g_tx_state.v4_rx_phase_error_min_ms = 0;
     g_tx_state.v4_rx_phase_error_max_ms = 0;
+    g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
     g_tx_state.v4_group_sync_phase_spread_ms = 0;
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
         struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
@@ -3727,6 +3744,50 @@ static int dashcdg_tx_clamp_i32(int32_t v, int32_t lo, int32_t hi) {
     return v;
 }
 
+static int32_t dashcdg_tx_rx_pipeline_ms_locked(const struct dashcdg_tx_rx_reporter *slot) {
+    if (slot == NULL) {
+        return 0;
+    }
+    return (int32_t) slot->stats.audio_buffer_ms + (int32_t) slot->stats.host_output_latency_ms;
+}
+
+static void dashcdg_tx_invalidate_latency_ctrl_ema(struct dashcdg_tx_rx_reporter *slot) {
+    if (slot == NULL) {
+        return;
+    }
+    slot->latency_abs_ema_ms = 0;
+    slot->latency_residual_ema_ms = 0;
+    slot->latency_ctrl_ema_last_ms = 0U;
+}
+
+static void dashcdg_tx_update_latency_ctrl_ema_locked(
+        uint64_t now_ms, struct dashcdg_tx_rx_reporter *slot, int32_t abs_lat_ms, int32_t residual_ms) {
+    uint64_t dt_ms;
+    int64_t tau = (int64_t) DASHCDG_TX_LATENCY_CTRL_EMA_TAU_MS;
+
+    if (slot == NULL) {
+        return;
+    }
+    if (slot->latency_ctrl_ema_last_ms == 0U) {
+        slot->latency_abs_ema_ms = abs_lat_ms;
+        slot->latency_residual_ema_ms = residual_ms;
+    } else {
+        dt_ms = now_ms - slot->latency_ctrl_ema_last_ms;
+        if (dt_ms == 0U) {
+            dt_ms = 1U;
+        }
+        if (dt_ms > 20000U) {
+            dt_ms = 20000U;
+        }
+        slot->latency_abs_ema_ms = (int32_t) (slot->latency_abs_ema_ms +
+                (int32_t) (((int64_t) (abs_lat_ms - slot->latency_abs_ema_ms) * (int64_t) dt_ms) / (tau + (int64_t) dt_ms)));
+        slot->latency_residual_ema_ms = (int32_t) (slot->latency_residual_ema_ms +
+                (int32_t) (((int64_t) (residual_ms - slot->latency_residual_ema_ms) * (int64_t) dt_ms) /
+                        (tau + (int64_t) dt_ms)));
+    }
+    slot->latency_ctrl_ema_last_ms = now_ms;
+}
+
 static int dashcdg_tx_compute_sync_leader_score_locked(
         uint64_t now_ms,
         const struct dashcdg_tx_rx_reporter *slot,
@@ -4168,12 +4229,16 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     uint64_t degraded_count = 0U;
     uint64_t stale_count = 0U;
     uint64_t controller_count = 0U;
-    int have_phase = 0;
-    int32_t latency_min_ms = 0;
-    int32_t latency_max_ms = 0;
+    int have_buf_spread = 0;
     uint32_t group_target_latency_ms = 0U;
-    int32_t latency_samples[DASHCDG_TX_RX_REPORTER_SLOTS];
-    size_t latency_sample_count = 0U;
+    int32_t abs_ema_samples[DASHCDG_TX_RX_REPORTER_SLOTS];
+    size_t abs_ema_count = 0U;
+    int32_t pipeline_raw_min_ms = 0;
+    int32_t pipeline_raw_max_ms = 0;
+    int32_t residual_ema_min_ms = 0;
+    int32_t residual_ema_max_ms = 0;
+    int have_pipeline_raw_spread = 0;
+    int have_residual_ema_spread = 0;
     uint32_t best_buffer_ms = 0U;
     uint32_t worst_buffer_ms = 0U;
     uint64_t cdg_recovered_sum = 0U;
@@ -4183,6 +4248,8 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
         struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
         int32_t rx_latency_ms = 0;
+        int32_t pipeline_ms;
+        int32_t residual_inst_ms;
         enum dashcdg_tx_rx_peer_health health;
 
         if (!slot->occupied) {
@@ -4206,14 +4273,16 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
             stale_count++;
         }
         if (!slot->controller_eligible) {
+            dashcdg_tx_invalidate_latency_ctrl_ema(slot);
             continue;
         }
         controller_count++;
         cdg_recovered_sum += slot->stats.cdg_fec_recovered;
         cdg_failed_sum += slot->stats.cdg_fec_failed;
-        if (!have_phase) {
+        if (!have_buf_spread) {
             best_buffer_ms = slot->stats.audio_buffer_ms;
             worst_buffer_ms = slot->stats.audio_buffer_ms;
+            have_buf_spread = 1;
         } else {
             if (slot->stats.audio_buffer_ms < best_buffer_ms) {
                 best_buffer_ms = slot->stats.audio_buffer_ms;
@@ -4222,25 +4291,40 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
                 worst_buffer_ms = slot->stats.audio_buffer_ms;
             }
         }
-        if (!have_phase) {
-            latency_min_ms = rx_latency_ms;
-            latency_max_ms = rx_latency_ms;
-            have_phase = 1;
+        pipeline_ms = dashcdg_tx_rx_pipeline_ms_locked(slot);
+        residual_inst_ms = rx_latency_ms - pipeline_ms;
+        dashcdg_tx_update_latency_ctrl_ema_locked(now_ms, slot, rx_latency_ms, residual_inst_ms);
+        if (!have_pipeline_raw_spread) {
+            pipeline_raw_min_ms = rx_latency_ms;
+            pipeline_raw_max_ms = rx_latency_ms;
+            have_pipeline_raw_spread = 1;
         } else {
-            if (rx_latency_ms < latency_min_ms) {
-                latency_min_ms = rx_latency_ms;
+            if (rx_latency_ms < pipeline_raw_min_ms) {
+                pipeline_raw_min_ms = rx_latency_ms;
             }
-            if (rx_latency_ms > latency_max_ms) {
-                latency_max_ms = rx_latency_ms;
+            if (rx_latency_ms > pipeline_raw_max_ms) {
+                pipeline_raw_max_ms = rx_latency_ms;
             }
         }
-        if (latency_sample_count < DASHCDG_TX_RX_REPORTER_SLOTS) {
-            latency_samples[latency_sample_count++] = rx_latency_ms;
+        if (!have_residual_ema_spread) {
+            residual_ema_min_ms = slot->latency_residual_ema_ms;
+            residual_ema_max_ms = slot->latency_residual_ema_ms;
+            have_residual_ema_spread = 1;
+        } else {
+            if (slot->latency_residual_ema_ms < residual_ema_min_ms) {
+                residual_ema_min_ms = slot->latency_residual_ema_ms;
+            }
+            if (slot->latency_residual_ema_ms > residual_ema_max_ms) {
+                residual_ema_max_ms = slot->latency_residual_ema_ms;
+            }
+        }
+        if (abs_ema_count < DASHCDG_TX_RX_REPORTER_SLOTS) {
+            abs_ema_samples[abs_ema_count++] = slot->latency_abs_ema_ms;
         }
     }
 
-    if (have_phase && latency_sample_count > 0U) {
-        group_target_latency_ms = dashcdg_tx_group_target_from_latencies_median(latency_samples, latency_sample_count);
+    if (abs_ema_count > 0U) {
+        group_target_latency_ms = dashcdg_tx_group_target_from_latencies_median(abs_ema_samples, abs_ema_count);
     }
 
     g_tx_state.v4_rx_stats_reporters_active = active_count;
@@ -4255,13 +4339,33 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
     g_tx_state.v4_rx_cdg_recovered_packets = cdg_recovered_sum;
     g_tx_state.v4_rx_cdg_failed_packets = cdg_failed_sum;
     g_tx_state.v4_rx_unrecoverable_groups = cdg_failed_sum;
-    if (have_phase) {
-        g_tx_state.v4_rx_phase_error_min_ms = latency_min_ms - (int32_t) group_target_latency_ms;
-        g_tx_state.v4_rx_phase_error_max_ms = latency_max_ms - (int32_t) group_target_latency_ms;
-        g_tx_state.v4_group_sync_phase_spread_ms = latency_max_ms - latency_min_ms;
+    if (have_pipeline_raw_spread && abs_ema_count > 0U) {
+        int32_t pe_min = INT32_MAX;
+        int32_t pe_max = INT32_MIN;
+        size_t j;
+
+        for (j = 0U; j < abs_ema_count; ++j) {
+            int32_t err = abs_ema_samples[j] - (int32_t) group_target_latency_ms;
+
+            if (err < pe_min) {
+                pe_min = err;
+            }
+            if (err > pe_max) {
+                pe_max = err;
+            }
+        }
+        g_tx_state.v4_rx_phase_error_min_ms = pe_min;
+        g_tx_state.v4_rx_phase_error_max_ms = pe_max;
+        g_tx_state.v4_group_sync_pipeline_spread_ms = pipeline_raw_max_ms - pipeline_raw_min_ms;
+        if (have_residual_ema_spread && abs_ema_count >= 2U) {
+            g_tx_state.v4_group_sync_phase_spread_ms = residual_ema_max_ms - residual_ema_min_ms;
+        } else {
+            g_tx_state.v4_group_sync_phase_spread_ms = 0;
+        }
     } else {
         g_tx_state.v4_rx_phase_error_min_ms = 0;
         g_tx_state.v4_rx_phase_error_max_ms = 0;
+        g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
         g_tx_state.v4_group_sync_phase_spread_ms = 0;
     }
     dashcdg_tx_update_adaptive_cdg_fec_locked(now_ms);
@@ -4290,7 +4394,7 @@ static int dashcdg_tx_format_rx_summary_locked(char *line, size_t line_size) {
     snprintf(
             line,
             line_size,
-            "[tx] v4-rx\tpkts=%llu\tpeers=%u\tactive=%llu\thealthy=%llu\tdegraded=%llu\tstale=%llu\tctl=%llu\tgsync=%s\tgtarget=%ums\tspread=%dms\tleader=%u/%d\ttarget=%ums\tphase=%d..%dms\tbuf=%u..%ums\tfec=L%u\tp75=%u.%02u%%\tnack=%llu/%llu\tlast=%llu/0x%04x/%u\tunrec=%llu\trepair=%u.%02u%%",
+            "[tx] v4-rx\tpkts=%llu\tpeers=%u\tactive=%llu\thealthy=%llu\tdegraded=%llu\tstale=%llu\tctl=%llu\tgsync=%s\tgtarget=%ums\tpipespread=%dms\tspread=%dms\tleader=%u/%d\ttarget=%ums\tphase=%d..%dms\tbuf=%u..%ums\tfec=L%u\tp75=%u.%02u%%\tnack=%llu/%llu\tlast=%llu/0x%04x/%u\tunrec=%llu\trepair=%u.%02u%%",
             (unsigned long long) g_tx_state.v4_rx_stats_packets_received,
             (unsigned int) peer_count,
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_active,
@@ -4300,6 +4404,7 @@ static int dashcdg_tx_format_rx_summary_locked(char *line, size_t line_size) {
             (unsigned long long) g_tx_state.v4_rx_stats_reporters_controller,
             dashcdg_tx_group_sync_mode_label(g_tx_state.v4_group_sync_mode),
             (unsigned int) g_tx_state.v4_group_sync_target_latency_ms,
+            (int) g_tx_state.v4_group_sync_pipeline_spread_ms,
             (int) g_tx_state.v4_group_sync_phase_spread_ms,
             (unsigned int) (g_tx_state.v4_rx_sync_leader_instance_id & 0xffffU),
             (int) g_tx_state.v4_rx_sync_leader_trim_ppm,

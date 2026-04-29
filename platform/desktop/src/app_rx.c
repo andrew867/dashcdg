@@ -262,7 +262,9 @@ static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
 #define DASHCDG_RX_AUDIO_DEGRADE_NOISE_WEIGHT 42
 #define DASHCDG_RX_AUDIO_DEGRADE_LAST_MONO_CAP 768U
 #define DASHCDG_RX_SYNC_LEADER_BIAS_STALE_MS 3000U
-#define DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX 80
+/** Max |leader trim| applied to followers; actual cap = min(this, spread_ms * PER_MS). */
+#define DASHCDG_RX_SYNC_LEADER_BIAS_PPM_HARD_MAX 200
+#define DASHCDG_RX_SYNC_LEADER_BIAS_PPM_PER_SPREAD_MS 2
 #define DASHCDG_RX_HUD_COLOR_OK_RGB 0x78F078U
 #define DASHCDG_RX_HUD_COLOR_WARN_RGB 0xFFD060U
 #define DASHCDG_RX_HUD_COLOR_ERR_RGB 0xFF6A6AU
@@ -872,6 +874,31 @@ static int g_rx_pcm_dump_init_attempted;
 static uint32_t g_rx_receiver_instance_id = 0U;
 static struct dashcdg_async_logger g_rx_logger;
 static int g_rx_logger_enabled;
+/** Output-path ms trim from `DASHCDG_RX_DAC_TRIM_MS` (applied to ring servo target). */
+static int32_t g_rx_dac_trim_ms;
+
+static void dashcdg_rx_load_sync_env_once(void) {
+    static int loaded;
+    const char *e;
+    long v;
+
+    if (loaded) {
+        return;
+    }
+    loaded = 1;
+    e = getenv("DASHCDG_RX_DAC_TRIM_MS");
+    if (e == NULL || e[0] == '\0') {
+        return;
+    }
+    v = strtol(e, NULL, 10);
+    if (v > 500L) {
+        v = 500L;
+    }
+    if (v < -500L) {
+        v = -500L;
+    }
+    g_rx_dac_trim_ms = (int32_t) v;
+}
 #define DASHCDG_RX_NACK_QUEUE_CAPACITY 256U
 struct dashcdg_rx_nack_job {
     uint64_t now_ms;
@@ -2967,6 +2994,17 @@ static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *
         }
         target_buffer_ms = active_target_ms;
     }
+    if (g_rx_dac_trim_ms != 0) {
+        int64_t adj = (int64_t) target_buffer_ms + (int64_t) g_rx_dac_trim_ms;
+
+        if (adj < (int64_t) DASHCDG_RX_MIN_APP_RING_TARGET_MS) {
+            adj = (int64_t) DASHCDG_RX_MIN_APP_RING_TARGET_MS;
+        }
+        if (state->audio_ring_capacity_ms > 0U && adj > (int64_t) state->audio_ring_capacity_ms) {
+            adj = (int64_t) state->audio_ring_capacity_ms;
+        }
+        target_buffer_ms = (uint32_t) adj;
+    }
     error_ms = (int32_t) target_buffer_ms - (int32_t) buffered_ms;
     if (error_ms > -DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS && error_ms < DASHCDG_RX_QUEUE_SERVO_DEADBAND_MS) {
         desired_ppm = 0;
@@ -2991,11 +3029,21 @@ static int32_t dashcdg_rx_audio_resample_trim_ppm_locked(struct receiver_state *
             state->sync_leader_trim_bias_ppm != 0 &&
             state->sync_leader_instance_id_low16 != 0U &&
             (uint16_t) (g_rx_receiver_instance_id & 0xffffU) != state->sync_leader_instance_id_low16) {
+        uint32_t spread_ms = (uint32_t) state->sync_group_phase_spread_ms;
+        int32_t max_follower_bias_ppm;
+
+        if (spread_ms > 250U) {
+            spread_ms = 250U;
+        }
+        max_follower_bias_ppm = (int32_t) spread_ms * DASHCDG_RX_SYNC_LEADER_BIAS_PPM_PER_SPREAD_MS;
+        if (max_follower_bias_ppm > DASHCDG_RX_SYNC_LEADER_BIAS_PPM_HARD_MAX) {
+            max_follower_bias_ppm = DASHCDG_RX_SYNC_LEADER_BIAS_PPM_HARD_MAX;
+        }
         leader_bias_ppm = (int32_t) state->sync_leader_trim_bias_ppm;
-        if (leader_bias_ppm > DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX) {
-            leader_bias_ppm = DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX;
-        } else if (leader_bias_ppm < -DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX) {
-            leader_bias_ppm = -DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX;
+        if (leader_bias_ppm > max_follower_bias_ppm) {
+            leader_bias_ppm = max_follower_bias_ppm;
+        } else if (leader_bias_ppm < -max_follower_bias_ppm) {
+            leader_bias_ppm = -max_follower_bias_ppm;
         }
         desired_ppm += leader_bias_ppm;
         if (desired_ppm > DASHCDG_RX_QUEUE_SERVO_MAX_PPM) {
@@ -8818,6 +8866,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
         }
     }
     dashcdg_rx_init_receiver_instance_id();
+    dashcdg_rx_load_sync_env_once();
 
     g_endpoint_address = DASHCDG_DEFAULT_NETWORK_ADDRESS;
     memset(&g_endpoint_in_addr, 0, sizeof(g_endpoint_in_addr));
