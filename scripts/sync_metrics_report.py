@@ -118,14 +118,29 @@ def main():
     )
     print("")
 
+    rx_cdg_lag_coverage = 0
+    rx_clock_valid_coverage = 0
     for receiver_id, samples in sorted(by_rx.items(), key=lambda kv: kv[0]):
         buf_ms = [float(s.get("audio_buffer_ms", 0.0)) for s in samples]
         host_ms = [float(s.get("host_latency_ms", 0.0)) for s in samples]
         trim_ppm = [float(s.get("trim_ppm", 0.0)) for s in samples]
         clock_off_ms = [float(s.get("clock_offset_estimate_ms", 0.0)) for s in samples]
-        clock_off_valid = [float(s.get("clock_offset_estimate_ms", 0.0)) for s in samples if int(s.get("clock_offset_valid", 1)) != 0]
+        clock_off_valid = []
+        for s in samples:
+            if "clock_offset_valid" in s:
+                valid = int(s.get("clock_offset_valid", 0)) != 0
+                rx_clock_valid_coverage += 1
+            else:
+                # Backward compatibility for older logs: infer validity from sane offset range.
+                valid = abs(float(s.get("clock_offset_estimate_ms", 0.0))) <= 30000.0
+            if valid:
+                clock_off_valid.append(float(s.get("clock_offset_estimate_ms", 0.0)))
         ptp_off_us = [float(s.get("ptp_offset_ema_us", 0.0)) for s in samples]
-        cdg_lag_ms = [float(s.get("cdg_lag_ms", 0.0)) for s in samples]
+        cdg_lag_ms = []
+        for s in samples:
+            if "cdg_lag_ms" in s:
+                cdg_lag_ms.append(float(s.get("cdg_lag_ms", 0.0)))
+                rx_cdg_lag_coverage += 1
         phase_clipped = sum(1 for s in samples if int(s.get("group_phase_spread_clipped", 0)) != 0)
         rec_host = max(int(s.get("recover_host_underrun", 0)) for s in samples)
         rec_zero = max(int(s.get("recover_zero_buffer", 0)) for s in samples)
@@ -155,17 +170,29 @@ def main():
 
     worst_rx_cdg_lag_p95 = 0.0
     for samples in by_rx.values():
-        s = [float(x.get("cdg_lag_ms", 0.0)) for x in samples]
+        s = [float(x.get("cdg_lag_ms", 0.0)) for x in samples if "cdg_lag_ms" in x]
         if s:
             worst_rx_cdg_lag_p95 = max(worst_rx_cdg_lag_p95, percentile(s, 0.95))
 
     pass_cdg_lag = worst_rx_cdg_lag_p95 <= args.max_cdg_lag_p95_ms
     pass_clock_noisy_ratio = (clock_noisy_count / len(records)) <= args.max_clock_noisy_ratio
-    overall_pass = pass_p95 and pass_p99 and phase_fail_count == 0 and pass_cdg_lag and pass_clock_noisy_ratio
+    pass_cdg_lag_coverage = rx_cdg_lag_coverage == len(rx)
+    pass_clock_valid_coverage = rx_clock_valid_coverage == len(rx)
+    overall_pass = (
+        pass_p95
+        and pass_p99
+        and phase_fail_count == 0
+        and pass_cdg_lag
+        and pass_clock_noisy_ratio
+        and pass_cdg_lag_coverage
+        and pass_clock_valid_coverage
+    )
     print(
         "extended_gate: "
         f"worst_rx_cdg_lag_p95<={args.max_cdg_lag_p95_ms:.0f} ({'PASS' if pass_cdg_lag else 'FAIL'}) "
-        f"clock_noisy_ratio<={args.max_clock_noisy_ratio:.4f} ({'PASS' if pass_clock_noisy_ratio else 'FAIL'})"
+        f"clock_noisy_ratio<={args.max_clock_noisy_ratio:.4f} ({'PASS' if pass_clock_noisy_ratio else 'FAIL'}) "
+        f"cdg_lag_coverage==1.0000 ({'PASS' if pass_cdg_lag_coverage else 'FAIL'}) "
+        f"clock_valid_coverage==1.0000 ({'PASS' if pass_clock_valid_coverage else 'FAIL'})"
     )
     print(f"overall_verdict: {'PASS' if overall_pass else 'FAIL'}")
     return 0 if overall_pass else 2
