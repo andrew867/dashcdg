@@ -22,9 +22,10 @@ similar in *intent* to **ST 2110** (PTP grandmaster, known latency domains) and 
    CDG jitter **ahead-gate** on receiver playout clock, DAC trim env, graphics clock default **dac**.
 2. **Single authoritative timeline document** — One **playback_ms** definition end-to-end (TX
    encode instant → wire → RX jitter → DAC callback); explicit **playout instants** in logs/metrics
-   (already partially in jsonl / v4 stats).
+   (already partially in jsonl / v4 stats). **Normative umbrella:** [`../specs/v5-broadcast-rack-protocol-spec.md`](../specs/v5-broadcast-rack-protocol-spec.md).
 3. **Shared network clock** — PTP or derived media clock already partially used (`sender_clock`);
    extend to **hardware egress** where available (WASAPI event mode / future exclusive mode).
+   **Tranches:** [`v5-broadcast-rack-implementation-tranches.md`](v5-broadcast-rack-implementation-tranches.md) **P3**.
 4. **Multi-receiver discipline** — Enterprise group sync + optional **PTP-locked** or **genlock**
    hardware path for venues that need **&lt;1 ms** phase (outside pure software Windows sharing).
 

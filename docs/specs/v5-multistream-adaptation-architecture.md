@@ -1,5 +1,7 @@
 # V5 multistream adaptation (architecture)
 
+**Companion umbrella (discovery, timeline, PTP GM, FEC/telemetry integration):** [`v5-broadcast-rack-protocol-spec.md`](v5-broadcast-rack-protocol-spec.md) — tranches in [`../plans/v5-broadcast-rack-implementation-tranches.md`](../plans/v5-broadcast-rack-implementation-tranches.md).
+
 ## Status
 
 | Field | Value |

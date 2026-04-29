@@ -44,6 +44,9 @@ lives in **`specs/desktop-platform-support.md`** and
 | [`specs/transport-protocol.md`](specs/transport-protocol.md) | Protocol v3/v4 fields |
 | [`specs/bad-network-transport.md`](specs/bad-network-transport.md) | v4 transport overview |
 | [`specs/v5-multistream-adaptation-architecture.md`](specs/v5-multistream-adaptation-architecture.md) | **V5** — simulcast, IGMP ladder, parallel decode (planned) |
+| [`specs/v5-broadcast-rack-protocol-spec.md`](specs/v5-broadcast-rack-protocol-spec.md) | **V5 umbrella** — discovery, timeline, PTP GM, FEC/RS, telemetry, rack ops (target architecture) |
+| [`plans/v5-broadcast-rack-implementation-tranches.md`](plans/v5-broadcast-rack-implementation-tranches.md) | **V5** — P0–P7 tranches with **files touched** |
+| [`test/v5-broadcast-rack-test-plan.md`](test/v5-broadcast-rack-test-plan.md) | **V5** — `V5-BR-*` test IDs |
 | [`specs/bad-network-audio-profiles.md`](specs/bad-network-audio-profiles.md) | Audio profiles (quality vs resilience / SBC‑like) |
 | [`specs/cdg-batch-jitter-playout-boundary.md`](specs/cdg-batch-jitter-playout-boundary.md) | CDG batch jitter + snapshot deferral rules |
 | [`specs/cpu-rgba-raster-contract.md`](specs/cpu-rgba-raster-contract.md) | `dashcdg_cdg_state_to_rgba8` contract (shared by GL and GDI) |
@@ -78,6 +81,7 @@ lives in **`specs/desktop-platform-support.md`** and
 | [`test/rapid-track-switch-pressure-validation.md`](test/rapid-track-switch-pressure-validation.md) | Rapid track changes under **sustained TX pressure** |
 | [`test/tx-cdg-source-late-join-regression-plan.md`](test/tx-cdg-source-late-join-regression-plan.md) | **TX CD+G** source slimdown — late-join / switch regression |
 | [`test/enterprise-group-sync-test-plan.md`](test/enterprise-group-sync-test-plan.md) | **Enterprise** group sync — environments, traceability (`EGS-*`), soak gates, release checklist |
+| [`test/v5-broadcast-rack-test-plan.md`](test/v5-broadcast-rack-test-plan.md) | **V5 broadcast-rack** — `V5-BR-*` IDs (discovery, timeline, clock, FEC, telemetry, integration) |
 | Other `test/*.md` | Feature‑specific plans and reports |
 
 ## Hardware, embedded & ops
