@@ -234,6 +234,9 @@ static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
 #define DASHCDG_RX_AUDIO_ARRIVAL_FAULT_LOG_MIN_MS 500U
 #endif
 #define DASHCDG_RX_AUDIO_HARD_RESYNC_LOG_COOLDOWN_MS 1000U
+#define DASHCDG_RX_CDG_HARD_RESYNC_EVENT_MIN_MISS 8U
+#define DASHCDG_RX_CDG_HARD_RESYNC_COOLDOWN_MS 450U
+#define DASHCDG_RX_CDG_HARD_RESYNC_LOG_COOLDOWN_MS 1000U
 #define DASHCDG_RX_SYNC_LEADER_BIAS_STALE_MS 3000U
 #define DASHCDG_RX_SYNC_LEADER_BIAS_PPM_MAX 80
 #define DASHCDG_RX_HUD_COLOR_OK_RGB 0x78F078U
@@ -389,6 +392,8 @@ struct receiver_state {
     uint64_t audio_burst_window_start_local_ms;
     uint32_t audio_burst_run_count;
     uint64_t last_audio_hard_resync_local_ms;
+    uint64_t last_cdg_hard_resync_local_ms;
+    uint64_t last_logged_cdg_hard_resync_local_ms;
     uint64_t last_logged_audio_arrival_gap_events;
     uint64_t last_logged_audio_arrival_burst_events;
     uint64_t last_logged_audio_arrival_fault_local_ms;
@@ -1742,6 +1747,8 @@ static void receiver_state_reset(struct receiver_state *state) {
     state->audio_burst_window_start_local_ms = 0;
     state->audio_burst_run_count = 0;
     state->last_audio_hard_resync_local_ms = 0;
+    state->last_cdg_hard_resync_local_ms = 0;
+    state->last_logged_cdg_hard_resync_local_ms = 0;
     state->last_logged_audio_arrival_gap_events = 0;
     state->last_logged_audio_arrival_burst_events = 0;
     state->last_logged_audio_arrival_fault_local_ms = 0;
@@ -3197,14 +3204,19 @@ static size_t dashcdg_rx_collect_fault_lines_locked(
     }
     if (state->cdg_hard_resync_events > state->last_logged_cdg_hard_resync_events) {
         delta = state->cdg_hard_resync_events - state->last_logged_cdg_hard_resync_events;
-        DASHCDG_RX_APPEND_FAULT_LINE(
-                "[rx] fault: cdg_hard_resync +%" DASHCDG_RX_PRIu64 " packets=%" DASHCDG_RX_PRIu64 " next_pkt=%u pending=%u now=%" DASHCDG_RX_PRIu64,
-                (uint64_t) delta,
-                (uint64_t) state->cdg_hard_resync_packets,
-                (unsigned int) state->cdg_batch_jitter.next_packet_index,
-                (unsigned int) dashcdg_rx_pending_cdg_count(state),
-                (uint64_t) local_now_ms
-        );
+        if (state->last_logged_cdg_hard_resync_local_ms == 0U ||
+                local_now_ms <= state->last_logged_cdg_hard_resync_local_ms ||
+                local_now_ms - state->last_logged_cdg_hard_resync_local_ms >= DASHCDG_RX_CDG_HARD_RESYNC_LOG_COOLDOWN_MS) {
+            DASHCDG_RX_APPEND_FAULT_LINE(
+                    "[rx] fault: cdg_hard_resync +%" DASHCDG_RX_PRIu64 " packets=%" DASHCDG_RX_PRIu64 " next_pkt=%u pending=%u now=%" DASHCDG_RX_PRIu64,
+                    (uint64_t) delta,
+                    (uint64_t) state->cdg_hard_resync_packets,
+                    (unsigned int) state->cdg_batch_jitter.next_packet_index,
+                    (unsigned int) dashcdg_rx_pending_cdg_count(state),
+                    (uint64_t) local_now_ms
+            );
+            state->last_logged_cdg_hard_resync_local_ms = local_now_ms;
+        }
         state->last_logged_cdg_hard_resync_events = state->cdg_hard_resync_events;
     }
     if (state->live_missing_skips > state->last_logged_live_missing_skips) {
@@ -5418,9 +5430,20 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
             cdg_step = dashcdg_cdg_batch_jitter_drain_step(&state->cdg_batch_jitter, &cdg_din, &batch, &cdg_miss);
             if (cdg_step == DASHCDG_CDG_BATCH_DRAIN_SKIP) {
                 state->live_missing_skips += cdg_miss;
-                if (cdg_miss >= 8U) {
+                if (cdg_miss >= DASHCDG_RX_CDG_HARD_RESYNC_EVENT_MIN_MISS) {
+                    uint64_t hold_ms = DASHCDG_RX_CDG_HARD_RESYNC_COOLDOWN_MS;
+
                     state->cdg_hard_resync_events++;
                     state->cdg_hard_resync_packets += cdg_miss;
+                    state->last_cdg_hard_resync_local_ms = local_now_ms;
+                    if (state->announced_playout_delay_ms > hold_ms) {
+                        hold_ms = state->announced_playout_delay_ms;
+                    }
+                    /*
+                     * Hysteresis after large CDG jumps: let real deltas apply before another late-gate
+                     * skip, reducing skip oscillation under burst loss / reorder.
+                     */
+                    state->cdg_skip_hold_until_local_ms = dashcdg_rx_deadline_after_ms(local_now_ms, hold_ms);
                 }
                 state->last_cdg_jitter_apply_local_ms = local_now_ms;
                 state->last_progress_local_ms = local_now_ms;

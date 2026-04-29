@@ -33,6 +33,11 @@
 - `test-core` passes.
 - compare `cdg_hard_resync_events` and `cdg_lag_ms` before/after.
 
+### Current implementation note
+- Desktop RX now applies a post-hard-resync skip hold (`cdg_skip_hold_until_local_ms`) after large
+  CDG jumps (`cdg_miss >= 8`) with cooldown duration max(`450 ms`, announced playout delay), to
+  reduce repeated late-gate skip oscillation and allow real deltas to apply between jumps.
+
 ## Tranche D - Release Gates (Phase 4)
 
 ### Work items
