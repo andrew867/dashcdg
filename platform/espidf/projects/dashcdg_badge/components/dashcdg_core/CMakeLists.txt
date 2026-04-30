@@ -13,7 +13,7 @@ set(CORE_SRCS
 idf_component_register(
     SRCS ${CORE_SRCS}
     INCLUDE_DIRS ${DASHCDG_REPO_ROOT}/core/include ${DASHCDG_REPO_ROOT}/proto/include
-    REQUIRES dashcdg_proto
+    REQUIRES dashcdg_proto heap
 )
 
 # Smaller CDG jitter ring than desktop (64); PUBLIC so badge main sees the same struct size as core.
@@ -23,6 +23,8 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_CDG_BATCH_JITTER_SLOT
 # ~0.6 s @ 20 ms frames; helps Wi-Fi reorder bursts without evicting as often (heap struct, not .bss).
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_SLOT_COUNT=30)
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_HEAP_BACKED=1)
+# Match badge_rx heap_caps_* alloc/free — libc calloc on same TLSF heap caused teardown asserts.
+target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_USE_ESP_HEAP_CAPS=1)
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED=1)
 # Was 850 ms to avoid false seq advance on long select idle; with gap-jump before primed decode, 400 ms
 # recovers full jitter rings sooner without relying on 900 ms starvation bypass alone.
