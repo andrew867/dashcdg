@@ -31,6 +31,8 @@ CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n
 CONFIG_XPT2046_INTERRUPT_MODE=y
 
 # --- Internal DRAM headroom (CDG+jitter default .bss; optional CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP frees after rx_stop) ---
+# Strip v4 repair NACK uplink (saves code/RAM; enable in menuconfig if needed).
+CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK=n
 # IPv4-only badge path (multicast / STA); frees lwIP IPv6 pools.
 CONFIG_LWIP_IPV6=n
 
@@ -46,9 +48,9 @@ CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
 # Do not restore a previous lwIP DHCP lease after reboot (cleaner when switching APs / lab networks).
 CONFIG_LWIP_DHCP_RESTORE_LAST_IP=n
 
-# lwIP: few sockets (mDNS + STA + one UDP RX path).
-CONFIG_LWIP_MAX_SOCKETS=6
+# lwIP: badge opens mcast x3 + ucast x3 + uplink (+ mDNS) — 6 was too few; extra UDP PCBs fail silently.
+CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_MAX_ACTIVE_TCP=4
 CONFIG_LWIP_MAX_LISTENING_TCP=4
-CONFIG_LWIP_MAX_UDP_PCBS=8
+CONFIG_LWIP_MAX_UDP_PCBS=12
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16

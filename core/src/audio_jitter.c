@@ -385,7 +385,13 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
 
     starvation_gate_open = dashcdg_audio_jitter_skip_starvation_gate_open(in);
 
-    if (!in->have_sender_playback && in->announced_audio_frame_ms > 0U) {
+    /*
+     * Cold join / Wi‑Fi reorder: clock_sync may set have_sender_playback before the first successful
+     * decode. The timed skip paths below require primed_decode; without this branch the ring fills
+     * (next seq missing, oldest ahead) and never APPLYs — PLC/SKIP sounds like "bending" with no DAC output.
+     * Treat like no-clock until the first APPLY: allow jump to oldest buffered frame.
+     */
+    if ((!in->have_sender_playback || !in->primed_decode) && in->announced_audio_frame_ms > 0U) {
         /*
          * Jump the drain cursor to the oldest buffered frame when the next sequence is missing.
          * Do not require primed_decode: until the first APPLY/SKIP, ms_since_prior_audio_apply stays 0

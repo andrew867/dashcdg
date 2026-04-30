@@ -55,6 +55,8 @@ static const char *TAG = "platform_hw";
 #define BAT_SAMPLE_SLEEP_MS 4000U
 /* IIR smoothing: new = old*(1-1/4) + sample*(1/4). */
 #define BAT_EMA_SHIFT 2U
+#define AMP_MIN_ON_DWELL_MS 180U
+#define AMP_MIN_OFF_DWELL_MS 40U
 
 #define LEDC_MODE           LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_RGB_BL   LEDC_TIMER_0
@@ -148,6 +150,8 @@ static beep_seq_kind_t s_seq_kind;
 static volatile uint8_t s_beep_vol_pct = 85;
 /** LVGL UI tones (button triad, slider blip); power jingles ignore this. */
 static bool s_touch_beep_on = true;
+static bool s_amp_run_state;
+static uint64_t s_amp_last_switch_ms;
 
 static const beep_note_t k_wake_seq[] = {
     {784, 125},  /* G5 */
@@ -579,8 +583,27 @@ static void bl_set_pct(uint8_t pct)
 
 static void amp_set_run(bool run)
 {
+    uint64_t now_ms;
+
+    if (run == s_amp_run_state) {
+        return;
+    }
+    now_ms = dashcdg_clock_now_ms();
+    if (!run && s_amp_run_state) {
+        if (now_ms > s_amp_last_switch_ms &&
+            (now_ms - s_amp_last_switch_ms) < (uint64_t)AMP_MIN_ON_DWELL_MS) {
+            return;
+        }
+    } else if (run && !s_amp_run_state) {
+        if (now_ms > s_amp_last_switch_ms &&
+            (now_ms - s_amp_last_switch_ms) < (uint64_t)AMP_MIN_OFF_DWELL_MS) {
+            return;
+        }
+    }
     /* SC8002B: VDD on shutdown = shutdown. LOW = amp on. */
     gpio_set_level(DASHCDG_HW_GPIO_AMP_SHUTDOWN, run ? 0 : 1);
+    s_amp_run_state = run;
+    s_amp_last_switch_ms = now_ms;
 }
 
 /** PWM to 0 only; does not touch amp shutdown (use between envelope samples while a jingle runs). */
@@ -840,6 +863,13 @@ static esp_err_t ledc_install_beep(void)
 static esp_err_t ledc_beep_audio_channel_attach_locked(void)
 {
     ledc_channel_config_t ch = {0};
+    if (s_karaoke_dac_handle != NULL || s_dac_lab_handle != NULL ||
+        __atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED) ||
+        __atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+        /* GPIO26 currently owned by DAC path; defer LEDC rebind. */
+        return ESP_OK;
+    }
+    gpio_reset_pin(DASHCDG_HW_GPIO_AUDIO_PWM);
     ch.gpio_num = DASHCDG_HW_GPIO_AUDIO_PWM;
     ch.speed_mode = LEDC_MODE;
     ch.channel = LEDC_CH_AUDIO;
@@ -885,8 +915,24 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
     (void)dac_continuous_disable(s_karaoke_dac_handle);
     (void)dac_continuous_del_channels(s_karaoke_dac_handle);
     s_karaoke_dac_handle = NULL;
-    (void)ledc_beep_audio_channel_attach_locked();
+    /*
+     * Never rebind LEDC here. Stop/start churn around karaoke transitions can race ownership and
+     * emit "GPIO 26 not usable". Reattach is centralized in screen-transition logic when UI leaves
+     * karaoke mode.
+     */
     __atomic_store_n(&s_karaoke_pcm_streaming, false, __ATOMIC_RELEASE);
+}
+
+void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) != pdTRUE) {
+        return;
+    }
+    amp_set_run(true);
+    xSemaphoreGive(s_mtx);
 }
 
 bool dashcdg_platform_hw_karaoke_dac_begin(void)
@@ -1009,6 +1055,8 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
 #endif
 
 #if !CONFIG_IDF_TARGET_ESP32
+void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void) {}
+
 bool dashcdg_platform_hw_karaoke_dac_begin(void)
 {
     return false;
@@ -1037,6 +1085,8 @@ static esp_err_t gpio_misc_init(void)
     ESP_RETURN_ON_ERROR(gpio_config(&amp), TAG, "gpio amp");
     /* Boot muted: shutdown asserted (HIGH). External 10k may already bias this; drive explicitly. */
     gpio_set_level(DASHCDG_HW_GPIO_AMP_SHUTDOWN, 1);
+    s_amp_run_state = false;
+    s_amp_last_switch_ms = 0U;
 
     gpio_config_t btn = {
         .pin_bit_mask = 1ULL << DASHCDG_HW_GPIO_USER_BTN,
@@ -1370,6 +1420,12 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
                     (void)esp_wifi_set_ps(s_wifi_ps_karaoke_saved);
                     s_wifi_ps_karaoke_saved_valid = false;
                 }
+#if CONFIG_IDF_TARGET_ESP32
+                if (!__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED) &&
+                    s_karaoke_dac_handle == NULL) {
+                    (void)ledc_beep_audio_channel_attach_locked();
+                }
+#endif
             }
             pm_bump_activity_locked(dashcdg_clock_now_ms());
             xSemaphoreGive(s_mtx);

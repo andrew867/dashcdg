@@ -611,9 +611,13 @@ static void karaoke_mcast_modal_update_dashboard(void)
         break;
     }
 
-    snprintf(line, sizeof(line), "MCAST %s\nSTA %s\nIGMP %s\nstats tx/peer %lu/%lu",
+    snprintf(line, sizeof(line), "MCAST %s\nSTA %s\nIGMP %s\nuc m/s/r %c/%c/%c\nstats tx/peer %lu/%lu",
              st.tx_stats_dest[0] ? st.tx_stats_dest : "--", st.sta_ip[0] ? st.sta_ip : "--",
-             st.igmp_joined ? "joined" : "no", (unsigned long)st.v4_rx_stats_sent, (unsigned long)st.v4_rx_stats_peer_packets);
+             st.igmp_joined ? "joined" : "no",
+             (st.ucast_rx_mask & DASHCDG_BADGE_UCAST_RX_MASK_MEDIA) ? 'y' : '-',
+             (st.ucast_rx_mask & DASHCDG_BADGE_UCAST_RX_MASK_STATS) ? 'y' : '-',
+             (st.ucast_rx_mask & DASHCDG_BADGE_UCAST_RX_MASK_REPAIR) ? 'y' : '-',
+             (unsigned long)st.v4_rx_stats_sent, (unsigned long)st.v4_rx_stats_peer_packets);
     lv_label_set_text(s_mcast_card_net, line);
 
     snprintf(line, sizeof(line), "loss %u.%02u%% reorder %lu\nclk %lu d %lu anch %lu rej %lu\naudio rx/out %lu/%lu",
@@ -809,6 +813,12 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
     lv_refr_now(disp);
     lvgl_port_unlock();
     /*
+     * Multicast + IGMP must run with the STA out of modem PS (home uses WIFI_PS_MAX_MODEM). Screen
+     * used to switch to KARAOKE only after the LVGL tree was built, so the first join/bind raced PS —
+     * cold boot often saw zero packets until reset. Enter KARAOKE (PS_NONE) before sockets exist.
+     */
+    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_KARAOKE);
+    /*
      * Start RX (and try CDG/jitter calloc) while the screen is still empty so internal heap is not
      * fragmented by the karaoke LVGL tree yet.
      */
@@ -816,6 +826,7 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
     dashcdg_badge_rx_start();
     if (!lvgl_port_lock(1000)) {
         dashcdg_badge_rx_stop();
+        dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_HOME);
         return ESP_ERR_TIMEOUT;
     }
 
@@ -1000,7 +1011,7 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
         ESP_LOGW(TAG, "lv_timer_create failed");
     }
 
-    dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_KARAOKE);
+    dashcdg_platform_hw_notify_activity();
     ESP_LOGI(TAG, "karaoke UI up");
     return ESP_OK;
 }

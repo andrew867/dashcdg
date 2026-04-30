@@ -22,6 +22,7 @@
 #include "display_lvgl.h"
 #include "nav.h"
 #include "platform_hw.h"
+#include "badge_rx.h"
 #include "wifi_touch_ui.h"
 
 static const char *TAG = "wifi_ui";
@@ -187,6 +188,8 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ui_statusf("Online\nIP: " IPSTR, IP2STR(&ev->ip_info.ip));
+        /* OpenWrt mcast-to-unicast: re-bind STA UDP + IGMP after DHCP (RX may have started with no IP). */
+        dashcdg_badge_rx_notify_sta_got_ip();
 
         wifi_config_t wc = {0};
         if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {

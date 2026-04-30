@@ -18,8 +18,16 @@ menu "DashCDG badge"
             more empty slots for bursty Wi-Fi and reorder, at the cost of earlier evictions when the
             ring is tight.
 
+    config DASHCDG_BADGE_ENABLE_REPAIR_NACK
+        bool "v4 CDG repair NACK uplink to TX"
+        default n
+        help
+            When enabled, sends v4_repair_nack when FEC groups have missing members (split repair port).
+            Disabled by default on ESP32 to save code size and DRAM; many setups do not use badge NACK.
+
     config DASHCDG_BADGE_REPAIR_NACK_THROTTLE
         bool "Adaptive throttle for v4 repair NACK uplink"
+        depends on DASHCDG_BADGE_ENABLE_REPAIR_NACK
         default y
         help
             Enforces a minimum time between repair NACK send attempts. The spacing grows when STA

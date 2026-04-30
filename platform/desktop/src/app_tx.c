@@ -160,6 +160,11 @@
 #define DASHCDG_TX_PTP_ANCHOR_RECOMPUTE_MIN_MS 250U
 /** v4_rx_stats: PTP never blocks on main state; apply in a batch on the main TX thread. */
 #define DASHCDG_TX_PTP_V4_RX_STATS_BATCH 32U
+#define DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_THRESHOLD 4U
+#define DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_COOLDOWN_MS 5000U
+/* Resume runway: small rewind + short hold so peers refill and lock before motion resumes. */
+#define DASHCDG_TX_RESUME_REWIND_MS 180U
+#define DASHCDG_TX_RESUME_RUNWAY_MS 140U
 #define DASHCDG_TX_THREAD_DEADLINE_MS 75U
 #define DASHCDG_TX_TX_THREAD_BUDGET_MS 25U
 #define DASHCDG_TX_CONTROL_THREAD_BUDGET_MS 100U
@@ -436,6 +441,7 @@ static void dashcdg_tx_handle_v4_repair_nack_locked(
         uint64_t now_ms,
         const struct dashcdg_v4_repair_nack_payload *nack
 );
+static void dashcdg_tx_force_rebroadcast_locked(void);
 static int dashcdg_tx_build_encoded_silence_for_codec(
         uint8_t codec_id,
         uint8_t *encoded_bytes,
@@ -741,6 +747,9 @@ struct dashcdg_tx_state {
     uint64_t v4_rx_nack_last_group_id;
     uint16_t v4_rx_nack_last_mask;
     uint8_t v4_rx_nack_last_resent;
+    uint32_t v4_rx_nack_full_group_streak;
+    uint64_t v4_rx_nack_last_full_group_id;
+    uint64_t v4_rx_nack_last_force_rebroadcast_ms;
     uint64_t v4_rx_unrecoverable_groups;
     uint64_t v4_rx_cdg_recovered_packets;
     uint64_t v4_rx_cdg_failed_packets;
@@ -2728,35 +2737,6 @@ static void dashcdg_tx_recompute_v4_anchor_interval_locked(uint64_t now_ms) {
     g_tx_state.v4_anchor_interval_effective_ms = eff;
 }
 
-static void dashcdg_tx_reset_rx_reporters_locked(void) {
-    memset(g_tx_state.rx_reporters, 0, sizeof(g_tx_state.rx_reporters));
-    g_tx_rx_measurements_last_refresh_ms = 0U;
-    g_tx_state.v4_rx_stats_packets_received = 0U;
-    g_tx_state.v4_rx_stats_reporters_active = 0U;
-    g_tx_state.v4_rx_stats_reporters_healthy = 0U;
-    g_tx_state.v4_rx_stats_reporters_degraded = 0U;
-    g_tx_state.v4_rx_stats_reporters_stale = 0U;
-    g_tx_state.v4_rx_stats_reporters_controller = 0U;
-    g_tx_state.v4_rx_nack_received = 0U;
-    g_tx_state.v4_rx_nack_resent_packets = 0U;
-    g_tx_state.v4_rx_nack_last_group_id = 0U;
-    g_tx_state.v4_rx_nack_last_mask = 0U;
-    g_tx_state.v4_rx_nack_last_resent = 0U;
-    g_tx_state.v4_rx_unrecoverable_groups = 0U;
-    g_tx_state.v4_rx_cdg_recovered_packets = 0U;
-    g_tx_state.v4_rx_cdg_failed_packets = 0U;
-    g_tx_state.v4_rx_phase_error_min_ms = 0;
-    g_tx_state.v4_rx_phase_error_max_ms = 0;
-    g_tx_state.v4_rx_group_target_latency_ms = 0U;
-    g_tx_state.v4_rx_worst_buffer_ms = 0U;
-    g_tx_state.v4_rx_best_buffer_ms = 0U;
-    g_tx_state.v4_rx_sync_leader_instance_id = 0U;
-    g_tx_state.v4_rx_sync_leader_trim_ppm = 0;
-    g_tx_state.v4_rx_sync_leader_last_switch_ms = 0U;
-    g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
-    g_tx_state.v4_group_sync_phase_spread_ms = 0;
-}
-
 static void dashcdg_tx_roll_session_rx_reporters_locked(void) {
     size_t i;
     g_tx_rx_measurements_last_refresh_ms = 0U;
@@ -4080,6 +4060,7 @@ static enum dashcdg_tx_rx_peer_health dashcdg_tx_classify_rx_reporter_locked(
     int32_t skew_abs_ms = 0;
     int32_t offset_abs_ms = 0;
     int desktop_like_peer = 0;
+    int network_audio_required = 1;
 
     if (latency_ms_out != NULL) {
         *latency_ms_out = 0;
@@ -4114,29 +4095,34 @@ static enum dashcdg_tx_rx_peer_health dashcdg_tx_classify_rx_reporter_locked(
         snprintf(slot->health_reason, sizeof(slot->health_reason), "bad-stage");
         return DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
     }
-    if (slot->stats.audio_buffer_ms > DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_BUFFER_MS) {
+    if (slot->stats.stats_generation >= 4U &&
+            (slot->stats.startup_flags & DASHCDG_V4_RX_STARTUP_FLAG_NETWORK_AUDIO_ENABLED) == 0U) {
+        network_audio_required = 0;
+    }
+    if (network_audio_required && slot->stats.audio_buffer_ms > DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_BUFFER_MS) {
         slot->health_state = (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
         slot->controller_eligible = 0U;
         slot->healthy_since_local_ms = 0U;
         snprintf(slot->health_reason, sizeof(slot->health_reason), "bad-buf");
         return DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
     }
-    if (slot->stats.audio_buffer_ms == 0U) {
+    if (network_audio_required && slot->stats.audio_buffer_ms == 0U) {
         slot->health_state = (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
         slot->controller_eligible = 0U;
         slot->healthy_since_local_ms = 0U;
         snprintf(slot->health_reason, sizeof(slot->health_reason), "empty-buf");
         return DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
     }
-    if (!has_latency) {
+    if (network_audio_required && !has_latency) {
         slot->health_state = (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
         slot->controller_eligible = 0U;
         slot->healthy_since_local_ms = 0U;
         snprintf(slot->health_reason, sizeof(slot->health_reason), "no-latency");
         return DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
     }
-    if (rx_latency_ms < DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS ||
-            rx_latency_ms > DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS) {
+    if (network_audio_required &&
+            (rx_latency_ms < DASHCDG_TX_RX_REPORTER_MIN_REASONABLE_LATENCY_MS ||
+            rx_latency_ms > DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS)) {
         slot->health_state = (uint8_t) DASHCDG_TX_RX_PEER_HEALTH_DEGRADED;
         slot->controller_eligible = 0U;
         slot->healthy_since_local_ms = 0U;
@@ -4190,7 +4176,10 @@ static enum dashcdg_tx_rx_peer_health dashcdg_tx_classify_rx_reporter_locked(
         slot->healthy_since_local_ms = now_ms;
     }
     healthy_age_ms = now_ms - slot->healthy_since_local_ms;
-    if (healthy_age_ms < DASHCDG_TX_RX_REPORTER_HEALTHY_HOLD_MS) {
+    if (!network_audio_required) {
+        slot->controller_eligible = 0U;
+        snprintf(slot->health_reason, sizeof(slot->health_reason), "video-only");
+    } else if (healthy_age_ms < DASHCDG_TX_RX_REPORTER_HEALTHY_HOLD_MS) {
         slot->controller_eligible = 0U;
         snprintf(slot->health_reason, sizeof(slot->health_reason), "health-hold");
     } else {
@@ -4517,9 +4506,18 @@ static void dashcdg_tx_handle_v4_repair_nack_locked(
 ) {
     uint8_t packet[DASHCDG_MAX_PACKET_SIZE];
     uint8_t resend_count = 0U;
+    uint8_t group_size = DASHCDG_CDG_GROUP_SIZE;
+    uint16_t full_group_mask;
+    int full_group_missing;
     if (nack == NULL || nack->stream_type != DASHCDG_STREAM_TYPE_CDG || nack->missing_member_mask == 0U) {
         return;
     }
+    if (nack->observed_group_size > 0U && nack->observed_group_size <= DASHCDG_CDG_GROUP_SIZE) {
+        group_size = (uint8_t)nack->observed_group_size;
+    }
+    full_group_mask = (group_size >= 16U) ? 0xFFFFU : (uint16_t)((1U << group_size) - 1U);
+    full_group_missing = ((nack->missing_member_mask & full_group_mask) == full_group_mask) ? 1 : 0;
+
     for (uint8_t i = 0U; i < DASHCDG_CDG_GROUP_SIZE; ++i) {
         size_t batch_index;
         if ((nack->missing_member_mask & (uint16_t) (1U << i)) == 0U) {
@@ -4539,6 +4537,33 @@ static void dashcdg_tx_handle_v4_repair_nack_locked(
     g_tx_state.v4_rx_nack_last_group_id = (uint64_t) nack->group_id;
     g_tx_state.v4_rx_nack_last_mask = nack->missing_member_mask;
     g_tx_state.v4_rx_nack_last_resent = resend_count;
+    if (full_group_missing) {
+        uint64_t group_id_u64 = (uint64_t) nack->group_id;
+        /*
+         * Floods are usually sequential group IDs (g, g+1, g+2...), not repeated single-group IDs.
+         * Treat contiguous full-group NACKs as one storm run.
+         */
+        if (g_tx_state.v4_rx_nack_last_full_group_id == group_id_u64 ||
+                g_tx_state.v4_rx_nack_last_full_group_id + 1U == group_id_u64) {
+            g_tx_state.v4_rx_nack_full_group_streak++;
+        } else {
+            g_tx_state.v4_rx_nack_last_full_group_id = group_id_u64;
+            g_tx_state.v4_rx_nack_full_group_streak = 1U;
+        }
+        g_tx_state.v4_rx_nack_last_full_group_id = group_id_u64;
+        if (g_tx_state.v4_rx_nack_full_group_streak >= DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_THRESHOLD &&
+                (g_tx_state.v4_rx_nack_last_force_rebroadcast_ms == 0U ||
+                 now_ms - g_tx_state.v4_rx_nack_last_force_rebroadcast_ms >=
+                         DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_COOLDOWN_MS)) {
+            dashcdg_tx_force_rebroadcast_locked();
+            g_tx_state.v4_rx_nack_last_force_rebroadcast_ms = now_ms;
+            g_tx_state.v4_rx_nack_full_group_streak = 0U;
+            TX_OUT("[tx] v4 repair-nack full-group storm (group=%u mask=0x%04x) -> force rebroadcast\n",
+                   (unsigned int)nack->group_id, (unsigned int)nack->missing_member_mask);
+        }
+    } else {
+        g_tx_state.v4_rx_nack_full_group_streak = 0U;
+    }
 }
 
 static void dashcdg_tx_log_v4_event_locked(const char *event_name, uint64_t now_ms, uint64_t playback_ms) {
@@ -4637,10 +4662,21 @@ static void dashcdg_tx_send_v4_track_bootstrap_locked(uint64_t now_ms) {
 
 static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
     uint64_t current_ms = dashcdg_tx_current_playback_ms_locked(now_ms);
+    int was_paused = g_tx_state.paused;
 
     g_tx_state.paused = paused;
     g_tx_state.playback_anchor_ms = current_ms;
     g_tx_state.playback_anchor_local_ms = now_ms;
+    if (was_paused && !paused) {
+        uint64_t rewind_ms = DASHCDG_TX_RESUME_REWIND_MS;
+
+        if (g_tx_state.playback_anchor_ms < rewind_ms) {
+            rewind_ms = g_tx_state.playback_anchor_ms;
+        }
+        g_tx_state.playback_anchor_ms -= rewind_ms;
+        g_tx_state.playback_anchor_local_ms = now_ms + DASHCDG_TX_RESUME_RUNWAY_MS;
+        g_tx_state.last_beacon_ms = 0U;
+    }
     g_tx_state.last_beacon_ms = 0;
     /*
      * Pause/unpause changes the canvas source (pause_state vs live_cdg_state) and playback flags.
@@ -4661,6 +4697,11 @@ static void dashcdg_tx_set_paused_locked(int paused, uint64_t now_ms) {
         dashcdg_tx_render_pause_state_locked(now_ms);
     } else {
         g_tx_state.last_pause_state_update_ms = 0U;
+        /*
+         * Send a short loading/anchor runway on resume so receivers settle before live deltas race.
+         */
+        g_tx_state.v4_first_anchor_local_ms = 0U;
+        g_tx_state.v4_first_loading_screen_local_ms = 0U;
     }
 }
 

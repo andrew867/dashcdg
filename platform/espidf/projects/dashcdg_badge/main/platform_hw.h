@@ -107,6 +107,11 @@ void dashcdg_platform_hw_karaoke_dac_stop(void);
 void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples);
 /** If a partial native-DAC DMA chunk is buffered, pad with mid-scale and flush (chunk size is KARAOKE_DAC_PCM_CHUNK). */
 void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
+/**
+ * Release SC8002B shutdown (amp on) when karaoke RX starts so the speaker path is not left muted
+ * until the first decoded frame (no startup click through DAC otherwise).
+ */
+void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void);
 
 /**
  * LVGL thread: non-zero panel command pending (1 = ST7789 sleep off, 2 = wake on).

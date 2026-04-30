@@ -116,10 +116,22 @@ typedef struct {
     uint8_t v4_repair_rx_socket_ok;
     /** Dedicated send-only socket for v4_rx_stats + repair-nack (never the media 24684 socket). */
     uint8_t v4_control_uplink_ok;
+    /** Unicast-duplicate RX: bit0=media bit1=stats bit2=repair (STA bind ok). */
+    uint8_t ucast_rx_mask;
 } dashcdg_badge_rx_stats_t;
+
+#define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U
+#define DASHCDG_BADGE_UCAST_RX_MASK_STATS  0x02U
+#define DASHCDG_BADGE_UCAST_RX_MASK_REPAIR 0x04U
 
 void dashcdg_badge_rx_start(void);
 void dashcdg_badge_rx_stop(void);
+/**
+ * After DHCP (IP_EVENT_STA_GOT_IP): re-open STA unicast UDP dup binds + re-join IGMP on mcast fds.
+ * If karaoke RX is not running yet, sets an internal flag so the next dashcdg_badge_rx_start() does
+ * extra IGMP + unicast bootstrap (_STA_GOT_IP cannot join without sockets).
+ */
+void dashcdg_badge_rx_notify_sta_got_ip(void);
 void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on);
 void dashcdg_badge_rx_get_decode_enabled(bool *video_on, bool *audio_on);
 /** Reload NVS tuning flags (repair NACK, v4 stats uplink). Safe before/during RX task. */

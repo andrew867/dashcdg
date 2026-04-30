@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 
+#include "sdkconfig.h"
 #include "esp_check.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
@@ -67,6 +68,7 @@ static void on_audio_decode_sw(lv_event_t *e)
     apply_decode_toggles();
 }
 
+#if defined(CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK) && CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK
 static void on_repair_nack_sw(lv_event_t *e)
 {
     lv_obj_t *sw = lv_event_get_target(e);
@@ -75,6 +77,7 @@ static void on_repair_nack_sw(lv_event_t *e)
     (void)dashcdg_badge_prefs_save_karaoke_repair_nack(on ? 1U : 0U);
     dashcdg_badge_rx_apply_rx_tuning_prefs();
 }
+#endif
 
 static void on_v4_stats_tx_sw(lv_event_t *e)
 {
@@ -170,11 +173,15 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
 
     uint8_t pref_video = 1U;
     uint8_t pref_audio = 1U;
-    uint8_t pref_nack = 1U;
     uint8_t pref_stx = 1U;
+#if defined(CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK) && CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK
+    uint8_t pref_nack = 1U;
+#endif
     (void)dashcdg_badge_prefs_load_karaoke_video_decode(&pref_video);
     (void)dashcdg_badge_prefs_load_karaoke_audio_decode(&pref_audio);
+#if defined(CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK) && CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK
     (void)dashcdg_badge_prefs_load_karaoke_repair_nack(&pref_nack);
+#endif
     (void)dashcdg_badge_prefs_load_karaoke_v4_stats_tx(&pref_stx);
 
     lv_obj_t *video_row = lv_obj_create(box);
@@ -238,6 +245,7 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
     lv_obj_set_style_pad_row(tune_box, 12, 0);
     ui_no_scroll(tune_box);
 
+#if defined(CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK) && CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK
     lv_obj_t *nack_row = lv_obj_create(tune_box);
     lv_obj_set_width(nack_row, lv_pct(100));
     lv_obj_set_height(nack_row, LV_SIZE_CONTENT);
@@ -257,6 +265,7 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
         lv_obj_remove_state(nack_sw, LV_STATE_CHECKED);
     }
     lv_obj_add_event_cb(nack_sw, on_repair_nack_sw, LV_EVENT_VALUE_CHANGED, NULL);
+#endif
 
     lv_obj_t *stx_row = lv_obj_create(tune_box);
     lv_obj_set_width(stx_row, lv_pct(100));
