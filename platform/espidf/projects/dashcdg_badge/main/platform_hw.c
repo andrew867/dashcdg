@@ -28,6 +28,8 @@
 #endif
 #endif
 #include "esp_check.h"
+#include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -209,17 +211,114 @@ static size_t s_dac_lab_fill;
 /** 1st-order low-pass state for light zipper / harmonic taming at 24 kHz. */
 static uint8_t s_dac_lp_u8 = 128;
 /*
- * 48 kHz mono 8-bit DAC stream. Chunk must divide AMR-WB decode length (960 samples) so we never
- * pad mid-frame with silence (512 did not divide 960 → audible "picket fence").
+ * Mono 8-bit DAC stream. ESP32 DAC DMA cannot always clock very low sample rates directly; we clamp
+ * hardware `freq_hz` to a safe floor and upsample in software when needed.
+ * DMA chunk in samples: 160 @ ≤12 kHz nominal (20 ms @ 8 k), else 320.
  */
-#define KARAOKE_DAC_PCM_CHUNK 320u
+#define KARAOKE_DAC_CHUNK_SAMPLES_MAX 512u
+#define KARAOKE_DAC_MIN_SAFE_HZ 24000u
 /** Linear PCM → 8-bit DAC sample gain numerator (denominator 32768); higher = louder line-out. */
 #ifndef KARAOKE_DAC_PCM_GAIN_NUM
 #define KARAOKE_DAC_PCM_GAIN_NUM 200
 #endif
 static dac_continuous_handle_t s_karaoke_dac_handle;
-static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_PCM_CHUNK];
+static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_CHUNK_SAMPLES_MAX];
 static size_t s_karaoke_dac_fill;
+static size_t s_karaoke_dac_chunk_samples = 320u;
+static uint32_t s_karaoke_dac_open_nominal_hz;
+static uint32_t s_karaoke_dac_open_effective_hz;
+static int32_t s_karaoke_dac_trim_ppm;
+static uint32_t s_karaoke_dac_upsample_accum;
+/*
+ * When DMA buffer alloc fails (NO_MEM), badge_rx was calling begin() on every push → hundreds of
+ * failed allocs/sec, no headroom recovery, and amp/DAC "pop" as enable is retried forever.
+ */
+static TickType_t s_karaoke_dac_begin_cool_until_tick;
+
+static uint32_t karaoke_dac_effective_hz(uint32_t nominal_hz, int32_t ppm)
+{
+    uint64_t n64 = (uint64_t)nominal_hz;
+    int64_t ppm64 = (int64_t)ppm;
+    uint64_t adj;
+
+    if (nominal_hz == 0U) {
+        return 48000U;
+    }
+    if (ppm64 > 500000LL) {
+        ppm64 = 500000LL;
+    } else if (ppm64 < -500000LL) {
+        ppm64 = -500000LL;
+    }
+    adj = (n64 * (uint64_t)(1000000LL + ppm64)) / 1000000ULL;
+    if (adj < (uint64_t)KARAOKE_DAC_MIN_SAFE_HZ) {
+        adj = (uint64_t)KARAOKE_DAC_MIN_SAFE_HZ;
+    }
+    if (adj > 96000ULL) {
+        adj = 96000ULL;
+    }
+    return (uint32_t)adj;
+}
+
+static size_t karaoke_dac_pick_chunk_samples(uint32_t nominal_hz)
+{
+    if (nominal_hz <= 12000U) {
+        return 160U;
+    }
+    return 320U;
+}
+
+/*
+ * Software upsampling (nom Hz PCM → eff Hz DAC) must emit an integer number of u8 samples per
+ * nominal frame (e.g. 160×24000/8000 = 480). If DMA chunk (often 320 @24k) does not divide that
+ * total, pad_partial inserts silence every frame → slow / broken playback.
+ */
+static size_t karaoke_dac_gcd_size(size_t a, size_t b)
+{
+    while (b != 0U) {
+        size_t t = a % b;
+
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+static size_t karaoke_dac_pick_output_chunk_samples(uint32_t nominal_hz, uint32_t eff_hz)
+{
+    size_t base_eff_chunk = karaoke_dac_pick_chunk_samples(eff_hz);
+    size_t nom_chunk;
+
+    if (nominal_hz == 0U || eff_hz <= nominal_hz) {
+        return base_eff_chunk;
+    }
+    nom_chunk = karaoke_dac_pick_chunk_samples(nominal_hz);
+    {
+        uint64_t p = (uint64_t)nom_chunk * (uint64_t)eff_hz;
+        uint64_t outw;
+
+        if ((p % (uint64_t)nominal_hz) != 0ULL) {
+            return base_eff_chunk;
+        }
+        outw = p / (uint64_t)nominal_hz;
+        if (outw == 0ULL) {
+            return base_eff_chunk;
+        }
+        if (outw <= (uint64_t)KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+            return (size_t)outw;
+        }
+        {
+            size_t g = karaoke_dac_gcd_size((size_t)outw, base_eff_chunk);
+
+            if (g > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+                g = KARAOKE_DAC_CHUNK_SAMPLES_MAX;
+            }
+            if (g < 64U) {
+                return base_eff_chunk;
+            }
+            return g;
+        }
+    }
+}
 #endif
 
 static int beep_kind_priority(beep_seq_kind_t k)
@@ -902,19 +1001,27 @@ static void lab_dac_flush_stop_and_ledc_restore_locked(void)
 
 static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
 {
+    size_t chunk = s_karaoke_dac_chunk_samples;
+
     if (s_karaoke_dac_handle == NULL) {
         return;
     }
+    if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+        chunk = 320U;
+    }
     while (s_karaoke_dac_fill > 0U) {
-        while (s_karaoke_dac_fill < KARAOKE_DAC_PCM_CHUNK) {
+        while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, KARAOKE_DAC_PCM_CHUNK, NULL, -1);
+        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, -1);
         s_karaoke_dac_fill = 0U;
     }
     (void)dac_continuous_disable(s_karaoke_dac_handle);
     (void)dac_continuous_del_channels(s_karaoke_dac_handle);
     s_karaoke_dac_handle = NULL;
+    s_karaoke_dac_open_nominal_hz = 0U;
+    s_karaoke_dac_open_effective_hz = 0U;
+    s_karaoke_dac_upsample_accum = 0U;
     /*
      * Never rebind LEDC here. Stop/start churn around karaoke transitions can race ownership and
      * emit "GPIO 26 not usable". Reattach is centralized in screen-transition logic when UI leaves
@@ -935,15 +1042,32 @@ void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
     xSemaphoreGive(s_mtx);
 }
 
-bool dashcdg_platform_hw_karaoke_dac_begin(void)
+bool dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(uint32_t nominal_hz)
 {
     esp_err_t de;
+    uint32_t eff_hz;
+    size_t chunk;
 
     if (!s_mtx) {
         return false;
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
         return false;
+    }
+    {
+        TickType_t now = xTaskGetTickCount();
+        if (s_karaoke_dac_begin_cool_until_tick != (TickType_t)0 && now < s_karaoke_dac_begin_cool_until_tick) {
+            xSemaphoreGive(s_mtx);
+            return false;
+        }
+    }
+    if (nominal_hz == 0U) {
+        nominal_hz = 48000U;
+    }
+    eff_hz = karaoke_dac_effective_hz(nominal_hz, s_karaoke_dac_trim_ppm);
+    chunk = karaoke_dac_pick_output_chunk_samples(nominal_hz, eff_hz);
+    if (chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+        chunk = KARAOKE_DAC_CHUNK_SAMPLES_MAX;
     }
     if (s_dac_lab_handle != NULL) {
         /*
@@ -957,26 +1081,48 @@ bool dashcdg_platform_hw_karaoke_dac_begin(void)
             return false;
         }
     }
-    if (s_karaoke_dac_handle != NULL) {
+    if (s_karaoke_dac_handle != NULL && s_karaoke_dac_open_nominal_hz == nominal_hz &&
+            s_karaoke_dac_open_effective_hz == eff_hz && s_karaoke_dac_chunk_samples == chunk) {
         xSemaphoreGive(s_mtx);
         return true;
     }
+    if (s_karaoke_dac_handle != NULL) {
+        karaoke_dac_flush_stop_and_ledc_restore_locked();
+    }
+    s_karaoke_dac_chunk_samples = chunk;
     beep_seq_abort_locked();
     (void)ledc_stop(LEDC_MODE, LEDC_CH_AUDIO, 0);
     {
         dac_continuous_config_t dcfg = {
             .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
-            .desc_num = 8,
-            .buf_size = KARAOKE_DAC_PCM_CHUNK,
-            .freq_hz = 48000,
+            /* Fewer descriptors → smaller DMA reservation; slight underrun risk if CPU stalls. */
+            .desc_num = 4,
+            .buf_size = (uint32_t)chunk,
+            .freq_hz = eff_hz,
             .offset = 0,
             .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
             .chan_mode = DAC_CHANNEL_MODE_SIMUL,
         };
         de = dac_continuous_new_channels(&dcfg, &s_karaoke_dac_handle);
         if (de != ESP_OK) {
-            ESP_LOGE(TAG, "karaoke dac_continuous_new_channels: %s", esp_err_to_name(de));
+            /*
+             * Log at most ~once per cooldown window; RX calls begin() every decode attempt otherwise.
+             */
+            static TickType_t s_karaoke_dac_err_log_suppress_until;
+            TickType_t nowt = xTaskGetTickCount();
+            if (nowt >= s_karaoke_dac_err_log_suppress_until) {
+                ESP_LOGE(TAG,
+                         "karaoke dac_continuous_new_channels: %s nom=%u eff=%u chunk=%u (internal_free=%u dma_free=%u largest_dma=%u)",
+                         esp_err_to_name(de), (unsigned)nominal_hz, (unsigned)eff_hz, (unsigned)chunk,
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+                s_karaoke_dac_err_log_suppress_until = nowt + pdMS_TO_TICKS(4000);
+            }
             s_karaoke_dac_handle = NULL;
+            if (de == ESP_ERR_NO_MEM) {
+                s_karaoke_dac_begin_cool_until_tick = nowt + pdMS_TO_TICKS(2500);
+            }
             (void)ledc_beep_audio_channel_attach_locked();
             xSemaphoreGive(s_mtx);
             return false;
@@ -992,11 +1138,36 @@ bool dashcdg_platform_hw_karaoke_dac_begin(void)
             return false;
         }
     }
+    s_karaoke_dac_open_nominal_hz = nominal_hz;
+    s_karaoke_dac_open_effective_hz = eff_hz;
+    s_karaoke_dac_upsample_accum = 0U;
+    s_karaoke_dac_begin_cool_until_tick = (TickType_t)0;
     s_karaoke_dac_fill = 0U;
     amp_set_run(true);
     __atomic_store_n(&s_karaoke_pcm_streaming, true, __ATOMIC_RELEASE);
     xSemaphoreGive(s_mtx);
     return true;
+}
+
+bool dashcdg_platform_hw_karaoke_dac_begin(void)
+{
+    return dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(48000U);
+}
+
+void dashcdg_platform_hw_karaoke_dac_set_trim_ppm(int32_t ppm)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) != pdTRUE) {
+        return;
+    }
+    /*
+     * Trim takes effect on the next `karaoke_dac_begin_nominal_hz`: effective Hz changes vs
+     * `s_karaoke_dac_open_effective_hz`, so the DAC is torn down and recreated (typically next RX push).
+     */
+    s_karaoke_dac_trim_ppm = ppm;
+    xSemaphoreGive(s_mtx);
 }
 
 void dashcdg_platform_hw_karaoke_dac_stop(void)
@@ -1008,31 +1179,58 @@ void dashcdg_platform_hw_karaoke_dac_stop(void)
         return;
     }
     karaoke_dac_flush_stop_and_ledc_restore_locked();
+    /* Next karaoke session should retry DAC alloc immediately (heap may have recovered). */
+    s_karaoke_dac_begin_cool_until_tick = (TickType_t)0;
+    s_karaoke_dac_trim_ppm = 0;
     beep_mute_locked();
     xSemaphoreGive(s_mtx);
 }
 
-void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples)
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t samples)
 {
+    size_t chunk = s_karaoke_dac_chunk_samples;
+    uint32_t nom_hz = s_karaoke_dac_open_nominal_hz;
+    uint32_t eff_hz = s_karaoke_dac_open_effective_hz;
+
     if (pcm == NULL || samples == 0U || s_karaoke_dac_handle == NULL) {
         return;
+    }
+    if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+        chunk = 320U;
     }
     amp_set_run(true);
     for (size_t i = 0U; i < samples; ++i) {
         int32_t s = (int32_t)pcm[i];
         int32_t u = (s * (int32_t)KARAOKE_DAC_PCM_GAIN_NUM) / 32768 + 128;
+        uint32_t emit = 1U;
+
         if (u < 16) {
             u = 16;
         }
         if (u > 239) {
             u = 239;
         }
-        s_karaoke_dac_chunk[s_karaoke_dac_fill++] = (uint8_t)u;
-        if (s_karaoke_dac_fill >= KARAOKE_DAC_PCM_CHUNK) {
-            (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, KARAOKE_DAC_PCM_CHUNK, NULL, -1);
-            s_karaoke_dac_fill = 0U;
+        if (nom_hz != 0U && eff_hz > nom_hz) {
+            uint64_t acc = (uint64_t)s_karaoke_dac_upsample_accum + (uint64_t)eff_hz;
+            emit = (uint32_t)(acc / (uint64_t)nom_hz);
+            s_karaoke_dac_upsample_accum = (uint32_t)(acc % (uint64_t)nom_hz);
+            if (emit == 0U) {
+                emit = 1U;
+            }
+        }
+        for (uint32_t r = 0U; r < emit; ++r) {
+            s_karaoke_dac_chunk[s_karaoke_dac_fill++] = (uint8_t)u;
+            if (s_karaoke_dac_fill >= chunk) {
+                (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, -1);
+                s_karaoke_dac_fill = 0U;
+            }
         }
     }
+}
+
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples)
+{
+    dashcdg_platform_hw_karaoke_dac_push_mono_s16(pcm, samples);
 }
 
 void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
@@ -1044,10 +1242,15 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
         return;
     }
     if (s_karaoke_dac_handle != NULL && s_karaoke_dac_fill > 0U) {
-        while (s_karaoke_dac_fill < KARAOKE_DAC_PCM_CHUNK) {
+        size_t chunk = s_karaoke_dac_chunk_samples;
+
+        if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+            chunk = 320U;
+        }
+        while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, KARAOKE_DAC_PCM_CHUNK, NULL, -1);
+        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, -1);
         s_karaoke_dac_fill = 0U;
     }
     xSemaphoreGive(s_mtx);
@@ -1057,12 +1260,29 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
 #if !CONFIG_IDF_TARGET_ESP32
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void) {}
 
+bool dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(uint32_t nominal_hz)
+{
+    (void)nominal_hz;
+    return false;
+}
+
 bool dashcdg_platform_hw_karaoke_dac_begin(void)
 {
     return false;
 }
 
 void dashcdg_platform_hw_karaoke_dac_stop(void) {}
+
+void dashcdg_platform_hw_karaoke_dac_set_trim_ppm(int32_t ppm)
+{
+    (void)ppm;
+}
+
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t samples)
+{
+    (void)pcm;
+    (void)samples;
+}
 
 void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples)
 {

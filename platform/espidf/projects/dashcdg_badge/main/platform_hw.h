@@ -99,13 +99,22 @@ void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8);
 uint8_t dashcdg_platform_hw_get_beep_volume_pct(void);
 
 /**
- * Karaoke v4 decoded PCM -> ESP32 native DAC (48 kHz mono, IO26). Call only from `badge_rx` task.
+ * Karaoke v4 decoded PCM -> ESP32 native DAC (mono, IO26). Call only from `badge_rx` task.
  * Mutual exclude with audio lab DAC (`dashcdg_platform_hw_lab_pcm_*`).
+ *
+ * `nominal_hz` is the PCM sample rate from decode (e.g. 8000 AMR-NB, 16000 AMR-WB, 48000 Opus).
+ * DAC continuous `freq_hz` is nominal adjusted by trim PPM (integer Hz; sub‑ppm drift needs drop/dup or SRC).
  */
+bool dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(uint32_t nominal_hz);
+/** Back-compat: same as begin_nominal_hz(48000). */
 bool dashcdg_platform_hw_karaoke_dac_begin(void);
 void dashcdg_platform_hw_karaoke_dac_stop(void);
+/** Playback trim in ppm (−500000…500000 typical); applied when opening DAC (integer Hz quantum). */
+void dashcdg_platform_hw_karaoke_dac_set_trim_ppm(int32_t ppm);
+void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t samples);
+/** @deprecated Use dashcdg_platform_hw_karaoke_dac_push_mono_s16 (same behavior). */
 void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples);
-/** If a partial native-DAC DMA chunk is buffered, pad with mid-scale and flush (chunk size is KARAOKE_DAC_PCM_CHUNK). */
+/** If a partial native-DAC DMA chunk is buffered, pad with mid-scale and flush. */
 void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
 /**
  * Release SC8002B shutdown (amp on) when karaoke RX starts so the speaker path is not left muted
