@@ -254,6 +254,12 @@ static int dashcdg_rx_should_use_legacy_recovery_fallback(void) {
 #define DASHCDG_RX_CDG_HARD_RESYNC_LOG_COOLDOWN_MS 1000U
 #define DASHCDG_RX_CLOCK_NOISY_OFFSET_MS 8
 #define DASHCDG_RX_CLOCK_NOISY_MIN_UPDATES 8U
+/*
+ * v4_clock_sync: same issue as ESP32 badge_rx — `header.sender_time_ms` can move in bursts; anchoring
+ * every packet snaps sender_clock and makes sender_playback_now_ms jump → CDG "stalls" vs audio,
+ * jitter mis-drains, and TX v4_rx_stats latency math thrashes. Beacon path already uses observe().
+ */
+#define DASHCDG_RX_V4_CLOCK_SYNC_OBSERVE_MAX_STEP_MS 15LL
 #define DASHCDG_RX_CDG_CATCHUP_RAMP_LAG_MEDIUM_MS 400U
 #define DASHCDG_RX_CDG_CATCHUP_RAMP_LAG_HIGH_MS 900U
 #define DASHCDG_RX_CDG_CATCHUP_RAMP_LAG_EXTREME_MS 1800U
@@ -332,6 +338,13 @@ struct dashcdg_rx_fec_group {
     uint8_t member_payloads[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE][DASHCDG_MAX_FEC_PAYLOAD_BYTES];
     /** LRU for fec slot eviction (avoid min group_id — breaks at uint32 wrap / track reset). */
     uint64_t fec_last_touch_local_ms;
+    /**
+     * Last CDG repair-nack we queued for this group (mask-aware cooldown).
+     * Without this, every media/parity tick changes missing_mask slightly and bypasses the global
+     * (group_id,mask) cooldown in dashcdg_rx_send_v4_repair_nack_now, causing NACK/log storms.
+     */
+    uint64_t cdg_repair_nack_last_local_ms;
+    uint16_t cdg_repair_nack_last_missing_mask;
 };
 
 struct dashcdg_rx_render_snapshot {
@@ -931,7 +944,7 @@ static size_t g_rx_nack_queue_head = 0U;
 static size_t g_rx_nack_queue_tail = 0U;
 static size_t g_rx_nack_queue_count = 0U;
 static uint64_t g_rx_nack_queue_dropped = 0U;
-static void dashcdg_rx_send_v4_repair_nack_locked(
+static int dashcdg_rx_send_v4_repair_nack_locked(
         uint64_t now_ms,
         uint8_t stream_type,
         uint32_t group_id,
@@ -4693,13 +4706,30 @@ static void dashcdg_rx_try_recover_cdg_group_locked(
             }
         }
         if (missing_mask != 0U) {
-            dashcdg_rx_send_v4_repair_nack_locked(
-                    now_ms,
-                    DASHCDG_STREAM_TYPE_CDG,
-                    group->group_id,
-                    group->expected_group_size,
-                    missing_mask
-            );
+            int allow_nack = 1;
+
+            if (group->cdg_repair_nack_last_local_ms != 0U &&
+                    now_ms >= group->cdg_repair_nack_last_local_ms &&
+                    now_ms - group->cdg_repair_nack_last_local_ms < (uint64_t) DASHCDG_RX_REPAIR_NACK_COOLDOWN_MS) {
+                /*
+                 * Suppress repeats while the missing set is still a subset of what we already NACKed.
+                 * Allow immediately if new members went missing (mask gained bits vs last send).
+                 */
+                if ((missing_mask & (uint16_t) ~group->cdg_repair_nack_last_missing_mask) == 0U) {
+                    allow_nack = 0;
+                }
+            }
+            if (allow_nack &&
+                    dashcdg_rx_send_v4_repair_nack_locked(
+                            now_ms,
+                            DASHCDG_STREAM_TYPE_CDG,
+                            group->group_id,
+                            group->expected_group_size,
+                            missing_mask
+                    )) {
+                group->cdg_repair_nack_last_local_ms = now_ms;
+                group->cdg_repair_nack_last_missing_mask = missing_mask;
+            }
         }
     }
     if (parity_count < miss_count) {
@@ -7207,7 +7237,14 @@ static void handle_v4_clock_sync(struct receiver_state *state, const struct dash
     session_epoch_changed =
             state->session_start_ms != 0U &&
             state->session_start_ms != view->v4_clock_sync.session_start_ms;
-    dashcdg_media_clock_anchor(&state->sender_clock, (int64_t) local_now_ms, (int64_t) view->header.sender_time_ms);
+    if (session_epoch_changed) {
+        dashcdg_media_clock_init(&state->sender_clock);
+    }
+    dashcdg_media_clock_observe(
+            &state->sender_clock,
+            (int64_t) local_now_ms,
+            (int64_t) view->header.sender_time_ms,
+            DASHCDG_RX_V4_CLOCK_SYNC_OBSERVE_MAX_STEP_MS);
     state->have_clock = 1;
     state->session_start_ms = view->v4_clock_sync.session_start_ms;
     if (session_epoch_changed) {
@@ -7754,8 +7791,18 @@ static void dashcdg_rx_send_v4_repair_nack_now(
         s_last_nack_group_id = group_id;
         s_last_nack_mask = missing_mask;
         g_receiver.repair_nack_tx++;
-        RX_OUT("[rx] repair-nack: group=%u size=%u mask=0x%04x\n", (unsigned int) group_id,
-               (unsigned int) observed_group_size, (unsigned int) missing_mask);
+        {
+            const char *log_nack = getenv("DASHCDG_RX_LOG_REPAIR_NACK");
+
+            if (log_nack != NULL && log_nack[0] != '\0') {
+                RX_OUT(
+                        "[rx] repair-nack: group=%u size=%u mask=0x%04x\n",
+                        (unsigned int) group_id,
+                        (unsigned int) observed_group_size,
+                        (unsigned int) missing_mask
+                );
+            }
+        }
     }
 }
 
@@ -7775,7 +7822,7 @@ static void *dashcdg_rx_repair_nack_thread_main(void *unused) {
     return NULL;
 }
 
-static void dashcdg_rx_send_v4_repair_nack_locked(
+static int dashcdg_rx_send_v4_repair_nack_locked(
         uint64_t now_ms,
         uint8_t stream_type,
         uint32_t group_id,
@@ -7783,12 +7830,15 @@ static void dashcdg_rx_send_v4_repair_nack_locked(
         uint16_t missing_mask
 ) {
     if (missing_mask == 0U || g_receiver.announced_transport_version != DASHCDG_PROTOCOL_VERSION_V4) {
-        return;
+        return 0;
     }
     pthread_mutex_lock(&g_rx_nack_queue_mutex);
     if (g_rx_nack_queue_count >= DASHCDG_RX_NACK_QUEUE_CAPACITY) {
         g_rx_nack_queue_dropped++;
-    } else {
+        pthread_mutex_unlock(&g_rx_nack_queue_mutex);
+        return 0;
+    }
+    {
         struct dashcdg_rx_nack_job *job = &g_rx_nack_queue[g_rx_nack_queue_tail];
 
         job->now_ms = now_ms;
@@ -7801,6 +7851,7 @@ static void dashcdg_rx_send_v4_repair_nack_locked(
         pthread_cond_signal(&g_rx_nack_queue_cond);
     }
     pthread_mutex_unlock(&g_rx_nack_queue_mutex);
+    return 1;
 }
 
 static void *network_thread(void *user_data) {
@@ -9277,7 +9328,9 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     }
     g_rx_stats_port = stats_port;
     g_rx_repair_port = (repair_port > 0 && repair_port != port) ? repair_port : 0;
-    RX_OUT("[rx] config: stats_ms=%u stats_port=%d repair_port=%d codec=%s hud=%s start_hold=%u..%ums nack_cooldown=%ums\n",
+    RX_OUT(
+            "[rx] config: stats_ms=%u stats_port=%d repair_port=%d codec=%s hud=%s start_hold=%u..%ums "
+            "nack_cooldown=%ums (per-group mask-aware; set DASHCDG_RX_LOG_REPAIR_NACK=1 for repair-nack lines)\n",
            (unsigned int) g_rx_stats_interval_ms,
            g_rx_stats_port,
            g_rx_repair_port > 0 ? g_rx_repair_port : port,
