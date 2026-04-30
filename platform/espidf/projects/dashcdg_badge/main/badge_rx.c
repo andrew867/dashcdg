@@ -77,6 +77,12 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_AUDIO_DRAIN_GUARD 32U
 #define BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED 6U
 #define BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET 2U
+/*
+ * Karaoke (no CDG video path): we can spend a few more drain steps per v4_audio_chunk so the
+ * jitter ring does not sit one burst behind the DAC clock — reduces AMR/opus picket-fencing when
+ * Wi-Fi delivers 20 ms frames in clumps.
+ */
+#define BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_KARAOKE 8U
 #define BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL 2U
 #if defined(DASHCDG_AUDIO_JITTER_HEAP_BACKED) && DASHCDG_AUDIO_JITTER_HEAP_BACKED
 /*
@@ -494,6 +500,15 @@ static void badge_rx_note_stream_media_sequence(uint32_t seq, uint8_t *inited, u
     }
 }
 
+/*
+ * Tracks `packet_header.sequence`, which the desktop TX advances **once for every datagram** on the
+ * main media socket (audio, CDG, clock_sync, session_info, anchors, …). Wi-Fi multicast routinely
+ * delivers those datagrams out of strict sequence order, so `wire_reorder_events` grows quickly even
+ * when the session is healthy. That is **not** the same thing as `media_sequence` reorder inside
+ * the audio jitter buffer — see `pl.reorder_events` in stats, which sums jitter-buffer counters to
+ * match desktop RX semantics. This wire-level tracker remains useful for coarse gap / missing
+ * estimates (`wire_missing_estimate`) on the same global sequence space.
+ */
 static void badge_rx_note_wire_sequence(uint64_t seq)
 {
     if (!s_wire_seq_inited) {
@@ -1187,7 +1202,17 @@ static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
         pl.cdg_fec_failed = s_stats.v4_video_repair_failed;
         pl.jitter_p95_ms = pl.jitter_rms_ms;
         pl.jitter_max_ms = pl.jitter_rms_ms;
-        pl.reorder_events = s_stats.wire_reorder_events;
+        {
+            uint64_t rsum = 0ULL;
+
+            if (s_audio_jb != NULL && s_audio_jb->initialized) {
+                rsum += s_audio_jb->reordered_packets;
+            }
+            if (s_jb != NULL && s_jb->initialized) {
+                rsum += s_jb->reordered_batches;
+            }
+            pl.reorder_events = rsum > 0xffffffffULL ? 0xffffffffU : (uint32_t)rsum;
+        }
         pl.receiver_instance_id = s_badge_receiver_instance_id;
         pl.fec_group_size_observed = BADGE_RX_CDG_REPAIR_GROUP_SIZE;
         pl.presented_audio_timestamp_ms = s_last_presented_audio_timestamp_ms;
@@ -2723,8 +2748,11 @@ static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64
      * Keep packet-path drain small while s_mtx is held. Full guard drains still run on
      * idle/clock paths; this avoids audio bursts starving video/datagram handling.
      */
-    badge_rx_drain_v4_audio_budget(local_now_ms, BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET,
-                                   BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL);
+    badge_rx_drain_v4_audio_budget(
+            local_now_ms,
+            s_video_decode_enabled ? BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET
+                                   : BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_KARAOKE,
+            BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL);
 }
 
 static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
