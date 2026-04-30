@@ -204,7 +204,7 @@ static int EncoderMMS( enum ModeNB mode, Word16 *param, UWord8 *stream, enum
       TXFrameType frame_type, enum ModeNB speech_mode )
 {
    Word32 j = 0, k;
-   Word16 *mask;
+   const Word16 *mask;
 
    memset(stream, 0, block_size[mode]);
 
@@ -355,7 +355,9 @@ static int EncoderMMS( enum ModeNB mode, Word16 *param, UWord8 *stream, enum
    }
 
    /* shift remaining bits */
-   if ( k = j % 8 )	*stream <<= ( 8 - k );
+   if ( (k = j % 8) != 0 ) {
+      *stream <<= ( 8 - k );
+   }
    return( (int)block_size[mode] );
 }
 
@@ -382,7 +384,7 @@ static int Encoder3GPP( enum Mode mode, Word16 *param, UWord8 *stream, enum
       TXFrameType frame_type, enum Mode speech_mode )
 {
    Word32 j = 0;
-   Word16 *mask;
+   const Word16 *mask;
 
    memset(stream, 0, block_size[mode]);
 

@@ -1291,6 +1291,16 @@ static void Build_CN_param( Word16 *seed, enum ModeNB mode, Word16 parm[] )
             parm[i] = ( Word16 )( *p++ & ~( 0xFFFF << bitno_MR475[i] ) );
          }
          break;
+
+      case MRDTX:
+         for ( i = 0; i < PRMNO_MRDTX; i++ ) {
+            parm[i] = ( Word16 )( *p++ & ~( 0xFFFF << bitno_MRDTX[i] ) );
+         }
+         break;
+
+      default:
+         /* N_MODES (sentinel) or unexpected — no parameters */
+         break;
    }
 }
 

@@ -197,7 +197,7 @@ enum ModeNB DecoderMMS( Word16 *param, UWord8 *stream, enum RXFrameType
 {
    enum ModeNB mode;
    Word32 j;
-   Word16 *mask;
+   const Word16 *mask;
 
 
    memset( param, 0, PRMNO_MR122 <<1 );
@@ -383,7 +383,7 @@ enum Mode Decoder3GPP( Word16 *param, UWord8 *stream, enum RXFrameType
 {
    enum Mode mode;
    Word32 j;
-   Word16 *mask;
+   const Word16 *mask;
 
 
    memset( param, 0, PRMNO_MR122 <<1 );
