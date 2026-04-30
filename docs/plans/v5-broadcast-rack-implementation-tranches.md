@@ -11,7 +11,7 @@
 **Intent:** Improve **clock accuracy** on installation LANs by standing up a real **PTP domain** (grandmaster on TX host + slaves on **desktop RX/player** and **ESP32**) per [`../specs/v5-broadcast-rack-protocol-spec.md`](../specs/v5-broadcast-rack-protocol-spec.md) §6.1.
 
 - **P3a** (grandmaster) and **P3b** (slaves) are the **primary schedule** for clock work: start **as soon as P0 is merged**; run **in parallel** with **P1/P2** where file conflict is low (new `third_party/` or `platform/desktop/src/ptp_*`, ESP-IDF components).
-- **Do not** vendor GPL **[ESP1588](https://github.com/leifclaesson/ESP1588)**; **do** integrate MIT **[IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP)** for the **TX GM** path only, with license files preserved.
+- **Do not** vendor GPL **[ESP1588](https://github.com/leifclaesson/ESP1588)**; **do** integrate MIT **[IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP)** for the **TX GM** path, and MIT **[flexPTP](https://github.com/epagris/flexPTP)** for **ESP32 / MCU slave** (submodule + `LICENSE.txt`), with license files preserved.
 - **Exit:** P3a smoke (GM announces domain; wire capture) → P3b desktop slave locks → P3b ESP32 slave locks → **V5-BR-CLK-04..06** in the test plan.
 
 ---
@@ -59,14 +59,14 @@
 
 ---
 
-## Tranche P3b — PTP slaves: desktop player + ESP32 (in-house stack)
+## Tranche P3b — PTP slaves: desktop player + ESP32 (MIT flexPTP on badge)
 
 | Item | Detail |
 | --- | --- |
-| **Goal** | **Our** IEEE‑1588 **slave** implementation (GPL **[ESP1588](https://github.com/leifclaesson/ESP1588)** is **reference only**, not copied in-tree). **Desktop:** integrate with `dashcdg_media_clock` / `app_rx.c` network thread — **optional** `EXTERNAL_GM` / `PTP_DOMAIN` profile. **ESP32:** IDF **lwIP** raw/socket path or dedicated task; map corrected time into the same **session timeline** contract as desktop. Start with **refactor-only** abstraction in `media_clock` if needed, then wire slave. |
-| **Primary files** | `core/src/media_clock.c`, `core/include/dashcdg/media_clock.h`, `platform/desktop/src/app_rx.c`, new `platform/desktop/src/ptp_slave_*` (or `core/src/ptp_1588_slave.c`); `platform/espidf/projects/dashcdg_badge/` new component + `badge_rx.c` hooks. |
+| **Goal** | **Desktop / player:** IEEE‑1588 **slave** feeding `dashcdg_media_clock` / `app_rx.c` — **optional** `EXTERNAL_GM` / `PTP_DOMAIN` profile (in-tree C or small MIT helper; avoid GPL). **ESP32:** integrate **[epagris/flexPTP](https://github.com/epagris/flexPTP)** (MIT): submodule under `third_party/flexptp/`, **lwIP** RX/TX **timestamp** path per upstream (often `pbuf` custom fields + `ethernetif` hooks), FreeRTOS task alignment with badge RX; map servo-corrected time into **session timeline**. GPL **[ESP1588](https://github.com/leifclaesson/ESP1588)** remains **reference only**, not vendored. Start with **refactor-only** abstraction in `media_clock` if needed, then wire slaves. |
+| **Primary files** | `core/src/media_clock.c`, `core/include/dashcdg/media_clock.h`, `platform/desktop/src/app_rx.c`, `platform/desktop/src/ptp_slave_*` (or `core/src/ptp_1588_slave.c`); `third_party/flexptp/` + `platform/espidf/projects/dashcdg_badge/` CMake/component glue, `ethernetif`/driver timestamps, `badge_rx.c` hooks. |
 | **Tests** | **V5-BR-CLK-01** (app baseline unchanged); **V5-BR-CLK-02** (HW/GM path = P3a GM); **V5-BR-CLK-03** (fallback); **V5-BR-CLK-05** (ESP32); enterprise soak rows as needed. |
-| **Exit** | Documented **fallback** when GM absent; no audio wedge; **no GPL** sources in default tree (**V5-BR-CLK-06**). |
+| **Exit** | Documented **fallback** when GM absent; no audio wedge; **no GPL** sources in default tree (**V5-BR-CLK-06**); flexPTP + IEEE1588-PTP **LICENSE** files in `third_party/`. |
 
 ---
 
@@ -145,7 +145,7 @@ P0 ──► P1 ──► P2 ──► P3c (optional extras)
 | Wire | `proto/include/dashcdg/protocol.h`, `proto/src/protocol.c` |
 | FEC | `proto/src/fec.c`, future `fec_rs` |
 | Jitter | `core/src/audio_jitter.c`, `core/src/cdg_batch_jitter.c` |
-| Clock | `core/src/media_clock.c`, PTP branches in `app_rx.c`, `ptp_grandmaster.*` / `ptp_slave_*`, `third_party/ieee1588-ptp/` (if vendored) |
+| Clock | `core/src/media_clock.c`, PTP branches in `app_rx.c`, `ptp_grandmaster.*` / `ptp_slave_*`, `third_party/ieee1588-ptp/`, `third_party/flexptp/` (ESP32) |
 | Runtime | `platform/desktop/src/app_tx.c`, `platform/desktop/src/app_rx.c` |
 | Embedded | `platform/espidf/projects/dashcdg_badge/main/badge_rx.c` |
 | Tests | `tests/test_core.c`, `tests/test_transport_udp.c` |

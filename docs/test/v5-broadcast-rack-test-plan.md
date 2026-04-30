@@ -42,7 +42,7 @@ Executable **test and soak matrix** for the phased move toward **discovery + tim
 | V5-BR-CLK-03 | Fallback | GM disconnected | Run 10 min | Receiver **degrades** to app clock **without** wedging audio (document behavior) |
 | V5-BR-CLK-04 | TX-hosted grandmaster | **P3a** landed; MIT **IEEE1588-PTP** master on TX interface ([bestvibes/IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP)) | Start GM; capture PTP on wire; start 2× RX with **P3b** slave | Multicast PTP present; slaves **lock** (state logged); offset sigma documented vs app-PTP-only baseline |
 | V5-BR-CLK-05 | ESP32 PTP slave | Badge build + **P3b**; same LAN as **V5-BR-CLK-04** | Join session; observe clock | No crash; timeline/offset behavior **documented**; Wi‑Fi vs Ethernet rows if both supported |
-| V5-BR-CLK-06 | License / SBOM | Release audit | `git grep` / build manifest | **No** GPL **ESP1588** sources in tree; **MIT** GM third_party **LICENSE** present; in-house slave files only project license |
+| V5-BR-CLK-06 | License / SBOM | Release audit | `git grep` / build manifest | **No** GPL **ESP1588** sources in tree; **MIT** `third_party/` (**IEEE1588-PTP**, **flexPTP**) **LICENSE** files present; desktop slave glue project-licensed |
 
 ---
 
