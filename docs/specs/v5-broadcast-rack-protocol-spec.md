@@ -78,6 +78,20 @@ struct dashcdg_clock_backend {
 
 **References:** [`operator-observability-and-sync-future-work.md`](operator-observability-and-sync-future-work.md), [`v4-group-playout-sync-idms.md`](v4-group-playout-sync-idms.md).
 
+### 6.1 Implementation strategy & third-party licenses (normative for shipping builds)
+
+**Goal:** Improve **LAN network timing accuracy** (sub-ms class where the network allows) by running a real **IEEE‑1588 PTP** domain alongside existing **in-band app PTP** (`DASHCDG_PACKET_PTP_*`), with a **clear license boundary**.
+
+| Role | Approach | License | Notes |
+| --- | --- | --- | --- |
+| **Grandmaster (TX host)** | Integrate a **PTP grandmaster** on the machine that runs **desktop-tx** (or a colocated service on the same L2 segment). Preferred spike: **[bestvibes/IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP)** — MIT — **master** side; bind to the venue interface, single PTP domain id documented in ops. | **MIT** — compatible with shipping dashcdg **without** infecting the core repo license. | Integration style TBD: **subprocess** with defined IPC, or **static link** of the C master into a small helper; either way **document** startup and VLAN in [`../plans/v5-broadcast-rack-implementation-tranches.md`](../plans/v5-broadcast-rack-implementation-tranches.md) **P3a** exit criteria. |
+| **Slave (desktop player / RX)** | **In-tree IEEE‑1588 client** (subset sufficient for our profile: sync / follow-up / delay if we enable it) feeding `dashcdg_media_clock` / offset path in **`app_rx.c`**. | **Project license** — implementation is **ours**. | Do **not** copy **[leifclaesson/ESP1588](https://github.com/leifclaesson/ESP1588)** (GPL‑3.0) into the repo. Use the IEEE‑1588 **state machine** and on-wire behavior as the spec; ESP1588 may be used as an **off-line behavioral reference** only (same as reading the standard). |
+| **Slave (ESP32 badge)** | Same as desktop: **our** PTP client stack under ESP‑IDF, shared conceptual mapping to session timeline. | **Project license** — no GPL vendored sources. | Code may live under `platform/espidf/...` as new modules; keep **SBOM** clean (see test plan **V5-BR-CLK-06**). |
+
+**Rationale:** GPL **ESP1588** is a useful proof that PTP-on-ESP32 is viable; **dashcdg** stays **permissive** and avoids derivative-work questions by **not** shipping that code. The **MIT** grandmaster stack is suitable to **link or fork** for TX-side GM with attribution.
+
+**Implementation order:** [`../plans/v5-broadcast-rack-implementation-tranches.md`](../plans/v5-broadcast-rack-implementation-tranches.md) — **P3a** (GM) then **P3b** (slaves), executed **ASAP** for timing accuracy ahead of purely cosmetic discovery/timeline polish where schedules allow.
+
 ## 7. Resilience plane — FEC, repair, Reed–Solomon
 
 **Current (v4):**
@@ -132,4 +146,6 @@ struct dashcdg_clock_backend {
 ## 12. References (external)
 
 - IEEE 802.1AS / IEEE 1588 (PTP) — **reference only**; we implement **subset** or **bridge**.
+- [bestvibes/IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP) (MIT) — **TX grandmaster** integration candidate; see §6.1.
+- [leifclaesson/ESP1588](https://github.com/leifclaesson/ESP1588) (GPL‑3.0) — **not** shipped; **behavioral** reference only for ESP32 PTP client work; see §6.1.
 - AMWA IS‑04 / IS‑05 — **future** discovery/connection **mapping**, not required for v5.0.

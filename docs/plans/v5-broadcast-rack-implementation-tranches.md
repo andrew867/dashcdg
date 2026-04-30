@@ -6,6 +6,14 @@
 
 **Rule:** ship **v4-safe** changes first; **bump** `DASHCDG_PROTOCOL_VERSION_V5` only in the tranche that intentionally breaks on-wire compatibility.
 
+### Priority lane — PTP network timing (execute ASAP)
+
+**Intent:** Improve **clock accuracy** on installation LANs by standing up a real **PTP domain** (grandmaster on TX host + slaves on **desktop RX/player** and **ESP32**) per [`../specs/v5-broadcast-rack-protocol-spec.md`](../specs/v5-broadcast-rack-protocol-spec.md) §6.1.
+
+- **P3a** (grandmaster) and **P3b** (slaves) are the **primary schedule** for clock work: start **as soon as P0 is merged**; run **in parallel** with **P1/P2** where file conflict is low (new `third_party/` or `platform/desktop/src/ptp_*`, ESP-IDF components).
+- **Do not** vendor GPL **[ESP1588](https://github.com/leifclaesson/ESP1588)**; **do** integrate MIT **[IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP)** for the **TX GM** path only, with license files preserved.
+- **Exit:** P3a smoke (GM announces domain; wire capture) → P3b desktop slave locks → P3b ESP32 slave locks → **V5-BR-CLK-04..06** in the test plan.
+
 ---
 
 ## Tranche P0 — Documentation & API sketch (no wire break)
@@ -40,14 +48,36 @@
 
 ---
 
-## Tranche P3 — Clock backends (app PTP → optional HW/GM)
+## Tranche P3a — TX PTP grandmaster (MIT IEEE1588-PTP)
 
 | Item | Detail |
 | --- | --- |
-| **Goal** | **Abstract** clock input behind `dashcdg_media_clock` usage; first implementation: **refactor-only**; then **optional** PHC/NIC or external PTP client **feeding** existing `sender_clock` / offset EMA in `app_rx.c`. |
-| **Primary files** | `core/src/media_clock.c`, `core/include/dashcdg/media_clock.h` (if extended), `platform/desktop/src/app_rx.c` (network thread PTP handlers), `platform/desktop/src/app_tx.c` (beacon sources), OS-specific glue under `platform/desktop/src/` (new small `.c` if needed). |
-| **Tests** | **V5-BR-CLK-01**; extend `docs/test/enterprise-group-sync-test-plan.md` scenarios if GM path lands. |
-| **Exit** | Documented **fallback** when GM absent; no audio wedge. |
+| **Goal** | Run a **PTP grandmaster** on the **TX host** (same machine as `desktop-tx` or sidecar) using **[bestvibes/IEEE1588-PTP](https://github.com/bestvibes/IEEE1588-PTP)** (MIT). Expose **domain id**, interface, and **startup** in docs/CLI so venue ops can align switches and receivers. Optional: feed a **shared time base** hint into TX scheduling (later tight coupling — document boundary). |
+| **Primary files** | New: `third_party/ieee1588-ptp/` **subtree** or git submodule **with LICENSE**; wrapper `platform/desktop/src/ptp_grandmaster.*` (or `tools/ptp_gm.c`); `docs/ops/` runbook; `app_tx.c` only if we add an explicit “GM managed by dashcdg” flag (prefer **external process** first). |
+| **Tests** | **V5-BR-CLK-04** (GM on air); **V5-BR-CLK-06** (license/SBOM); manual Wireshark **PTP** multicast. |
+| **Exit** | GM runs on Windows lab host; slaves (P3b) achieve **offset stability** vs this GM on wired LAN; **fallback** documented if GM not started. |
+
+---
+
+## Tranche P3b — PTP slaves: desktop player + ESP32 (in-house stack)
+
+| Item | Detail |
+| --- | --- |
+| **Goal** | **Our** IEEE‑1588 **slave** implementation (GPL **[ESP1588](https://github.com/leifclaesson/ESP1588)** is **reference only**, not copied in-tree). **Desktop:** integrate with `dashcdg_media_clock` / `app_rx.c` network thread — **optional** `EXTERNAL_GM` / `PTP_DOMAIN` profile. **ESP32:** IDF **lwIP** raw/socket path or dedicated task; map corrected time into the same **session timeline** contract as desktop. Start with **refactor-only** abstraction in `media_clock` if needed, then wire slave. |
+| **Primary files** | `core/src/media_clock.c`, `core/include/dashcdg/media_clock.h`, `platform/desktop/src/app_rx.c`, new `platform/desktop/src/ptp_slave_*` (or `core/src/ptp_1588_slave.c`); `platform/espidf/projects/dashcdg_badge/` new component + `badge_rx.c` hooks. |
+| **Tests** | **V5-BR-CLK-01** (app baseline unchanged); **V5-BR-CLK-02** (HW/GM path = P3a GM); **V5-BR-CLK-03** (fallback); **V5-BR-CLK-05** (ESP32); enterprise soak rows as needed. |
+| **Exit** | Documented **fallback** when GM absent; no audio wedge; **no GPL** sources in default tree (**V5-BR-CLK-06**). |
+
+---
+
+## Tranche P3c — Clock backends (NIC PHC / optional extras)
+
+| Item | Detail |
+| --- | --- |
+| **Goal** | After P3a/P3b, **optional** refinements: **NIC hardware timestamps** (Windows/Linux APIs), **delay request–response** if needed for Wi‑Fi, or **external** rack GM (not cohosted with TX). Same **pluggable** `dashcdg_clock_backend` idea as [`../specs/v5-broadcast-rack-protocol-spec.md`](../specs/v5-broadcast-rack-protocol-spec.md) §6. |
+| **Primary files** | `core/src/media_clock.c`, OS-specific glue under `platform/desktop/src/`. |
+| **Tests** | Extend **V5-BR-CLK-02**; impairment matrix if Wi‑Fi. |
+| **Exit** | Documented **fallback** when PHC absent. |
 
 ---
 
@@ -77,7 +107,7 @@
 
 | Item | Detail |
 | --- | --- |
-| **Goal** | Enable **only** when P1–P5 prove stable; set **`version=5`** for new payloads; maintain **v4 RX** path in parallel for **N releases** (policy TBD). |
+| **Goal** | Enable **only** when P1–P5 prove stable (including clock tranches **P3a–P3c**); set **`version=5`** for new payloads; maintain **v4 RX** path in parallel for **N releases** (policy TBD). |
 | **Primary files** | `proto/include/dashcdg/protocol.h`, `proto/src/protocol.c`, **all** packet emitters/parsers (`app_tx.c`, `app_rx.c`, badge), `tests/test_core.c`, `tests/test_transport_udp.c`. |
 | **Tests** | Full parse matrix; interoperability **TXv5→RXv4** fallbacks if promised. |
 | **Exit** | Release note + `docs/releases/v0.x.0.md` style changelog. |
@@ -97,12 +127,14 @@
 ## Dependency graph (summary)
 
 ```
-P0 ──► P1 ──► P2 ──► P3
-              │
-              ├──► P4 ──► P5 ──► P6 ──► P7
+P0 ──► P1 ──► P2 ──► P3c (optional extras)
+ │              │
+ │              └──► P4 ──► P5 ──► P6 ──► P7
+ │
+ └──► P3a (TX GM) ──► P3b (slaves) ──► P3c
 ```
 
-**Parallelism:** P4 can start after **P2** if FEC work does not need clock abstraction; **recommended** P3 before RS for stable timestamps under loss.
+**Parallelism:** **P3a → P3b** is the **priority lane** for network timing (see top of this doc). P4 can start after **P2** if FEC work does not need clock abstraction; **recommended** finish **P3b** (or at least desktop slave) before heavy RS soak so timestamps under loss are meaningful.
 
 ---
 
@@ -113,7 +145,7 @@ P0 ──► P1 ──► P2 ──► P3
 | Wire | `proto/include/dashcdg/protocol.h`, `proto/src/protocol.c` |
 | FEC | `proto/src/fec.c`, future `fec_rs` |
 | Jitter | `core/src/audio_jitter.c`, `core/src/cdg_batch_jitter.c` |
-| Clock | `core/src/media_clock.c`, PTP branches in `app_rx.c` |
+| Clock | `core/src/media_clock.c`, PTP branches in `app_rx.c`, `ptp_grandmaster.*` / `ptp_slave_*`, `third_party/ieee1588-ptp/` (if vendored) |
 | Runtime | `platform/desktop/src/app_tx.c`, `platform/desktop/src/app_rx.c` |
 | Embedded | `platform/espidf/projects/dashcdg_badge/main/badge_rx.c` |
 | Tests | `tests/test_core.c`, `tests/test_transport_udp.c` |
