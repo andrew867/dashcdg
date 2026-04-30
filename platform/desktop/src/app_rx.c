@@ -330,6 +330,8 @@ struct dashcdg_rx_fec_group {
     uint8_t member_present[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
     uint16_t member_lengths[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE];
     uint8_t member_payloads[DASHCDG_MAX_TRACKED_FEC_GROUP_SIZE][DASHCDG_MAX_FEC_PAYLOAD_BYTES];
+    /** LRU for fec slot eviction (avoid min group_id — breaks at uint32 wrap / track reset). */
+    uint64_t fec_last_touch_local_ms;
 };
 
 struct dashcdg_rx_render_snapshot {
@@ -4315,15 +4317,18 @@ static struct dashcdg_rx_fec_group *dashcdg_rx_get_fec_group_locked(
         uint32_t group_id
 ) {
     struct dashcdg_rx_fec_group *free_group = NULL;
-    struct dashcdg_rx_fec_group *oldest_group = NULL;
+    struct dashcdg_rx_fec_group *lru_group = NULL;
+    uint64_t now_ms = dashcdg_clock_now_ms();
 
     for (size_t i = 0; i < DASHCDG_TRACKED_FEC_GROUPS; ++i) {
         if (groups[i].occupied) {
             if (groups[i].group_id == group_id) {
+                groups[i].fec_last_touch_local_ms = now_ms;
                 return &groups[i];
             }
-            if (oldest_group == NULL || groups[i].group_id < oldest_group->group_id) {
-                oldest_group = &groups[i];
+            if (lru_group == NULL ||
+                    groups[i].fec_last_touch_local_ms < lru_group->fec_last_touch_local_ms) {
+                lru_group = &groups[i];
             }
         } else if (free_group == NULL) {
             free_group = &groups[i];
@@ -4334,14 +4339,16 @@ static struct dashcdg_rx_fec_group *dashcdg_rx_get_fec_group_locked(
         dashcdg_rx_clear_fec_group(free_group);
         free_group->occupied = 1;
         free_group->group_id = group_id;
+        free_group->fec_last_touch_local_ms = now_ms;
         return free_group;
     }
 
-    if (oldest_group != NULL) {
-        dashcdg_rx_clear_fec_group(oldest_group);
-        oldest_group->occupied = 1;
-        oldest_group->group_id = group_id;
-        return oldest_group;
+    if (lru_group != NULL) {
+        dashcdg_rx_clear_fec_group(lru_group);
+        lru_group->occupied = 1;
+        lru_group->group_id = group_id;
+        lru_group->fec_last_touch_local_ms = now_ms;
+        return lru_group;
     }
 
     return NULL;
@@ -4960,22 +4967,25 @@ static int dashcdg_rx_store_audio_frame_locked(struct receiver_state *state, con
 }
 
 static int dashcdg_rx_store_cdg_batch_locked(struct receiver_state *state, const struct dashcdg_packet_view *view) {
+    int inserted;
+
     if (state == NULL || view == NULL || view->cdg_batch.packet_bytes == NULL) {
         return 0;
     }
 
-    if (!dashcdg_rx_insert_cdg_pending_locked(
-                state,
-                view->cdg_batch.packet_start_index,
-                view->cdg_batch.packet_count,
-                view->cdg_batch.packet_bytes,
-                1
-        )) {
-        return 0;
-    }
-
+    inserted = dashcdg_rx_insert_cdg_pending_locked(
+            state,
+            view->cdg_batch.packet_start_index,
+            view->cdg_batch.packet_count,
+            view->cdg_batch.packet_bytes,
+            1
+    );
+    /*
+     * FEC observation must not depend on jitter insert success: under CDG ring pressure the batch may be
+     * dropped while the datagram was still valid — skipping FEC made groups look fully missing (0x01ff).
+     */
     dashcdg_rx_observe_cdg_for_fec_locked(state, view);
-    return 1;
+    return inserted ? 1 : 0;
 }
 
 static void dashcdg_rx_pcm48_mono_to_interleaved_stereo(
@@ -7080,15 +7090,14 @@ static void handle_v4_audio_chunk(
     }
 
     dashcdg_rx_note_audio_chunk_arrival_locked(state, dashcdg_clock_now_ms());
-    if (dashcdg_rx_store_v4_audio_frame_locked(state, view)) {
-        dashcdg_rx_observe_audio_payload_for_fec_locked(
-                state,
-                view->v4_audio_chunk.group_id,
-                view->v4_audio_chunk.group_index,
-                view->v4_audio_chunk.encoded_bytes,
-                view->v4_audio_chunk.encoded_length
-        );
-    }
+    (void) dashcdg_rx_store_v4_audio_frame_locked(state, view);
+    dashcdg_rx_observe_audio_payload_for_fec_locked(
+            state,
+            view->v4_audio_chunk.group_id,
+            view->v4_audio_chunk.group_index,
+            view->v4_audio_chunk.encoded_bytes,
+            view->v4_audio_chunk.encoded_length
+    );
 }
 
 static void handle_v4_video_delta(struct receiver_state *state, const struct dashcdg_packet_view *view) {
@@ -7102,21 +7111,20 @@ static void handle_v4_video_delta(struct receiver_state *state, const struct das
         return;
     }
 
-    if (dashcdg_rx_insert_cdg_pending_locked(
+    (void) dashcdg_rx_insert_cdg_pending_locked(
             state,
             view->v4_video_delta.packet_start_index,
             view->v4_video_delta.packet_count,
             view->v4_video_delta.delta_bytes,
             1
-    )) {
-        dashcdg_rx_observe_cdg_payload_for_fec_locked(
-                state,
-                view->v4_video_delta.group_id,
-                view->v4_video_delta.group_index,
-                view->v4_video_delta.packet_count,
-                view->v4_video_delta.delta_bytes
-        );
-    }
+    );
+    dashcdg_rx_observe_cdg_payload_for_fec_locked(
+            state,
+            view->v4_video_delta.group_id,
+            view->v4_video_delta.group_index,
+            view->v4_video_delta.packet_count,
+            view->v4_video_delta.delta_bytes
+    );
 }
 
 static void handle_v4_repair_window(struct receiver_state *state, const struct dashcdg_packet_view *view) {
