@@ -48,6 +48,12 @@ void dashcdg_pcm_interleaved_s16_soft_limit_inplace(int16_t *pcm, size_t frame_c
  * -6 dB pad before encode so loud sections do not turn into gritty/rattly modulation.
  */
 #define DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15 16384
+/*
+ * AMR-NB only (desktop TX): IF2 encode after 48 k→8 k decimation can clip on rare hot peaks; the
+ * former shared narrowband path used −6 dB here and sounded very quiet. ~−0.5 dB (0.944×) is a
+ * minimal safety margin (round(32768 * 10^(-0.5/20))).
+ */
+#define DASHCDG_AMR_NB_ENCODE_HEADROOM_GAIN_Q15 30935
 
 void dashcdg_pcm_interleaved_s16_gain_q15_inplace(
         int16_t *pcm,
