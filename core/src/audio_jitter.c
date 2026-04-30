@@ -3,6 +3,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
+#ifdef DASHCDG_USE_ESP_HEAP_CAPS
+#include "esp_heap_caps.h"
+static void *aj_heap_calloc(size_t nmemb, size_t size)
+{
+    return heap_caps_calloc(nmemb, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+static void aj_heap_free(void *p)
+{
+    if (p != NULL) {
+        heap_caps_free(p);
+    }
+}
+#else
+#define aj_heap_calloc(nmemb, size) calloc((nmemb), (size))
+#define aj_heap_free(p) free((p))
+#endif
+#endif
+
 static size_t audio_jb_capacity(const struct dashcdg_audio_jitter_buffer *jb) {
 #ifdef DASHCDG_AUDIO_JITTER_HEAP_BACKED
     return (jb != NULL) ? jb->slot_capacity : 0U;
@@ -122,13 +141,13 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
     old_reordered_packets = jb->reordered_packets;
     old_pending_drops = jb->pending_drops;
 
-    slots = (struct dashcdg_audio_jitter_frame *) calloc(slot_count, sizeof(*slots));
+    slots = (struct dashcdg_audio_jitter_frame *) aj_heap_calloc(slot_count, sizeof(*slots));
     if (slots == NULL) {
         return 0;
     }
-    pool = (uint8_t *) calloc(slot_count, DASHCDG_AUDIO_JITTER_MAX_PAYLOAD);
+    pool = (uint8_t *) aj_heap_calloc(slot_count, DASHCDG_AUDIO_JITTER_MAX_PAYLOAD);
     if (pool == NULL) {
-        free(slots);
+        aj_heap_free(slots);
         return 0;
     }
     for (size_t i = 0; i < slot_count; ++i) {
@@ -149,7 +168,7 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
     jb->pending_drops = old_pending_drops;
 
     if (old_slots != NULL && old_cap > 0U && old_initialized) {
-        picked = (uint8_t *) calloc(old_cap, sizeof(uint8_t));
+        picked = (uint8_t *) aj_heap_calloc(old_cap, sizeof(uint8_t));
         if (picked == NULL) {
             jb->pending_drops++;
         } else {
@@ -183,7 +202,7 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
                 copied_any = 1;
                 copied++;
             }
-            free(picked);
+            aj_heap_free(picked);
         }
         if (copied_any) {
             jb->initialized = 1;
@@ -192,10 +211,10 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
     }
 
     if (old_slots != NULL) {
-        free(old_slots);
+        aj_heap_free(old_slots);
     }
     if (old_pool != NULL) {
-        free(old_pool);
+        aj_heap_free(old_pool);
     }
     return 1;
 }
@@ -205,10 +224,10 @@ void dashcdg_audio_jitter_release(struct dashcdg_audio_jitter_buffer *jb) {
         return;
     }
     if (jb->slots != NULL) {
-        free(jb->slots);
+        aj_heap_free(jb->slots);
     }
     if (jb->payload_pool != NULL) {
-        free(jb->payload_pool);
+        aj_heap_free(jb->payload_pool);
     }
     memset(jb, 0, sizeof(*jb));
 }

@@ -5,6 +5,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
+#ifdef DASHCDG_USE_ESP_HEAP_CAPS
+#include "esp_heap_caps.h"
+static void *cj_heap_calloc(size_t nmemb, size_t size)
+{
+    return heap_caps_calloc(nmemb, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+static void cj_heap_free(void *p)
+{
+    if (p != NULL) {
+        heap_caps_free(p);
+    }
+}
+#else
+#define cj_heap_calloc(nmemb, size) calloc((nmemb), (size))
+#define cj_heap_free(p) free((p))
+#endif
+#endif
+
 static size_t cdg_jb_capacity(const struct dashcdg_cdg_batch_jitter_buffer *jb) {
 #ifdef DASHCDG_CDG_BATCH_JITTER_HEAP_BACKED
     return (jb != NULL) ? jb->slot_capacity : 0U;
@@ -98,13 +117,13 @@ int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, 
     old_reordered_batches = jb->reordered_batches;
     old_pending_drops = jb->pending_drops;
 
-    slots = (struct dashcdg_cdg_batch_jitter_frame *) calloc(slot_count, sizeof(*slots));
+    slots = (struct dashcdg_cdg_batch_jitter_frame *) cj_heap_calloc(slot_count, sizeof(*slots));
     if (slots == NULL) {
         return 0;
     }
-    pool = (uint8_t *) calloc(slot_count, slot_bytes);
+    pool = (uint8_t *) cj_heap_calloc(slot_count, slot_bytes);
     if (pool == NULL) {
-        free(slots);
+        cj_heap_free(slots);
         return 0;
     }
     for (size_t i = 0; i < slot_count; ++i) {
@@ -125,7 +144,7 @@ int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, 
     jb->pending_drops = old_pending_drops;
 
     if (old_slots != NULL && old_cap > 0U && old_initialized) {
-        picked = (uint8_t *) calloc(old_cap, sizeof(uint8_t));
+        picked = (uint8_t *) cj_heap_calloc(old_cap, sizeof(uint8_t));
         if (picked == NULL) {
             jb->pending_drops++;
         } else {
@@ -158,7 +177,7 @@ int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, 
                 copied_any = 1;
                 copied++;
             }
-            free(picked);
+            cj_heap_free(picked);
         }
         if (copied_any) {
             jb->initialized = 1;
@@ -167,10 +186,10 @@ int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, 
     }
 
     if (old_slots != NULL) {
-        free(old_slots);
+        cj_heap_free(old_slots);
     }
     if (old_pool != NULL) {
-        free(old_pool);
+        cj_heap_free(old_pool);
     }
     return 1;
 }
@@ -180,10 +199,10 @@ void dashcdg_cdg_batch_jitter_release(struct dashcdg_cdg_batch_jitter_buffer *jb
         return;
     }
     if (jb->slots != NULL) {
-        free(jb->slots);
+        cj_heap_free(jb->slots);
     }
     if (jb->payload_pool != NULL) {
-        free(jb->payload_pool);
+        cj_heap_free(jb->payload_pool);
     }
     memset(jb, 0, sizeof(*jb));
 }
