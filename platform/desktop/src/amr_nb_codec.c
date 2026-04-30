@@ -147,3 +147,37 @@ int dashcdg_amr_nb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, i
     ctx->stream_samples += DASHCDG_AMR_NB_PCM8K;
     return (int) DASHCDG_AMR_NB_PCM48K;
 }
+
+int dashcdg_amr_nb_decoder_run_native(void *opaque, const uint8_t *in, size_t in_len, int16_t *pcm8k_160, size_t pcm_cap_samples)
+{
+    struct dashcdg_amr_nb_codec_ctx *ctx = (struct dashcdg_amr_nb_codec_ctx *) opaque;
+
+    if (ctx == NULL || ctx->codec == NULL || in == NULL || in_len == 0U || pcm8k_160 == NULL ||
+            pcm_cap_samples < DASHCDG_AMR_NB_PCM8K) {
+        return 0;
+    }
+    if (in_len > 64U) {
+        return 0;
+    }
+    {
+        unsigned char bits[64];
+        memcpy(bits, in, in_len);
+        Decoder_Interface_Decode(ctx->codec, bits, (short *)pcm8k_160, 0);
+    }
+    ctx->stream_samples += DASHCDG_AMR_NB_PCM8K;
+    return (int)DASHCDG_AMR_NB_PCM8K;
+}
+
+int dashcdg_amr_nb_decoder_run_lost_native(void *opaque, int16_t *pcm8k_160, size_t pcm_cap_samples)
+{
+    struct dashcdg_amr_nb_codec_ctx *ctx = (struct dashcdg_amr_nb_codec_ctx *) opaque;
+    unsigned char bits[64];
+
+    if (ctx == NULL || ctx->codec == NULL || pcm8k_160 == NULL || pcm_cap_samples < DASHCDG_AMR_NB_PCM8K) {
+        return 0;
+    }
+    memset(bits, 0, sizeof(bits));
+    Decoder_Interface_Decode(ctx->codec, bits, (short *)pcm8k_160, 1);
+    ctx->stream_samples += DASHCDG_AMR_NB_PCM8K;
+    return (int)DASHCDG_AMR_NB_PCM8K;
+}

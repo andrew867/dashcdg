@@ -177,3 +177,37 @@ int dashcdg_amr_wb_decoder_run_lost(void *opaque, int16_t *pcm48_960, size_t pcm
     ctx->stream_samples += DASHCDG_AMR_WB_PCM16K;
     return (int) DASHCDG_AMR_WB_PCM48K;
 }
+
+int dashcdg_amr_wb_decoder_run_native(void *opaque, const uint8_t *in, size_t in_len, int16_t *pcm16k_320, size_t pcm_cap_samples)
+{
+    struct dashcdg_amr_wb_codec_ctx *ctx = (struct dashcdg_amr_wb_codec_ctx *) opaque;
+
+    if (ctx == NULL || ctx->codec == NULL || in == NULL || in_len == 0U || pcm16k_320 == NULL ||
+            pcm_cap_samples < DASHCDG_AMR_WB_PCM16K) {
+        return 0;
+    }
+    if (in_len > (size_t) NB_SERIAL_MAX) {
+        return 0;
+    }
+    {
+        UWord8 bits[NB_SERIAL_MAX];
+        memcpy(bits, in, in_len);
+        D_IF_decode(ctx->codec, bits, (Word16 *)pcm16k_320, _good_frame);
+    }
+    ctx->stream_samples += DASHCDG_AMR_WB_PCM16K;
+    return (int)DASHCDG_AMR_WB_PCM16K;
+}
+
+int dashcdg_amr_wb_decoder_run_lost_native(void *opaque, int16_t *pcm16k_320, size_t pcm_cap_samples)
+{
+    struct dashcdg_amr_wb_codec_ctx *ctx = (struct dashcdg_amr_wb_codec_ctx *) opaque;
+    UWord8 bits[NB_SERIAL_MAX];
+
+    if (ctx == NULL || ctx->codec == NULL || pcm16k_320 == NULL || pcm_cap_samples < DASHCDG_AMR_WB_PCM16K) {
+        return 0;
+    }
+    memset(bits, 0, sizeof(bits));
+    D_IF_decode(ctx->codec, bits, (Word16 *)pcm16k_320, (Word32)_lost_frame);
+    ctx->stream_samples += DASHCDG_AMR_WB_PCM16K;
+    return (int)DASHCDG_AMR_WB_PCM16K;
+}
