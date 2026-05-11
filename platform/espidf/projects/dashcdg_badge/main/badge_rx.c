@@ -137,11 +137,6 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY                  6U
 /** UART ESP_LOGI cadence for audio-only tuning (matches stats summary grep). */
 #define BADGE_RX_UART_AUDIO_STATS_MS                          1000U
-/**
- * LVGL timer (karaoke_ui ~33 Hz): extra jitter→DAC drain while video decode is off so playout keeps up
- * when the RX task spends long stretches in `recvfrom`/UDP bursts without hitting the select-timeout path.
- */
-#define BADGE_RX_LVGL_COOP_AUDIO_DRAIN_STEPS                  32U
 #if defined(DASHCDG_AUDIO_JITTER_HEAP_BACKED) && DASHCDG_AUDIO_JITTER_HEAP_BACKED
 /*
  * `dashcdg_audio_jitter_init` allocates the slot+payload pool with calloc(30, …). Under A/V on,
@@ -5558,25 +5553,6 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
     badge_rx_stats_finalize_public_view(out, snap_vdec, snap_adec);
 }
 
-static void badge_rx_lvgl_cooperative_audio_only_drain(uint64_t local_now_ms)
-{
-    if (!badge_rx_is_audio_only_decode() || s_audio_decode_enabled == 0U) {
-        return;
-    }
-    if (s_audio_jb == NULL || !s_audio_jb->initialized) {
-        return;
-    }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(5)) != pdTRUE) {
-        return;
-    }
-    badge_rx_drain_v4_audio_budget(
-            local_now_ms,
-            BADGE_RX_LVGL_COOP_AUDIO_DRAIN_STEPS,
-            BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY);
-    s_stats.lvgl_coop_audio_drains++;
-    xSemaphoreGive(s_mtx);
-}
-
 void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, dashcdg_badge_rx_stats_t *out)
 {
     uint8_t snap_vdec = 0U;
@@ -5590,7 +5566,11 @@ void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, das
         dashcdg_sp_blit_worker_try_init();
     }
 #endif
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
+    /*
+     * Short timeout: stale HUD stats are fine; blocking LVGL 50 ms per tick made the whole UI feel
+     * frozen (especially with audio-only + RX contention).
+     */
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(10)) != pdTRUE) {
         dashcdg_badge_rx_get_stats(out);
         return;
     }
@@ -5626,13 +5606,11 @@ void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, das
      * CDG blit must not run under the same `s_mtx` hold as stats refresh: deferred enqueue would
      * block the RX task for tens of ms (pool wait × bands) and breaks A+V (black video + dead audio).
      * Re-enter via `dashcdg_badge_rx_cdg_overlay_tick` (short mutex scope around raster + queue only).
+     * Audio-only: skip entirely — avoids a second `s_mtx` wait every LVGL tick (was freezing UI).
      */
-    dashcdg_badge_rx_cdg_overlay_tick(cdg_lv_slot);
-    /*
-     * Audio-only: feed jitter→DAC from the LVGL task as well. The RX loop often stays in UDP recv/drain
-     * paths; without this, chop came from starving idle/postburst drains under mutex load.
-     */
-    badge_rx_lvgl_cooperative_audio_only_drain(dashcdg_clock_now_ms());
+    if (snap_vdec != 0U) {
+        dashcdg_badge_rx_cdg_overlay_tick(cdg_lv_slot);
+    }
 }
 
 void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
@@ -5933,7 +5911,7 @@ void dashcdg_badge_rx_cdg_overlay_tick(lv_obj_t *cdg_lv_slot)
         return;
     }
 
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(16)) != pdTRUE) {
         return;
     }
     if (s_cdg == NULL) {
