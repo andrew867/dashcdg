@@ -82,4 +82,72 @@ menu "DashCDG badge"
         range 0 400
         default 200
 
+    config DASHCDG_BADGE_PERF_PROBES
+        bool "Perf probes: mutex/blit timing counters (UART optional)"
+        default n
+        help
+            When enabled, records high-water mutex dwell and SPI blit time for T0 baselines.
+            Counters are exposed via dashcdg_badge_rx_get_stats / optional periodic ESP_LOGI.
+
+    config DASHCDG_BADGE_CDG_DEFERRED_BLIT
+        bool "CDG overlay: deferred SPI blit worker (experimental; validate on HW)"
+        default n
+        help
+            LVGL enqueues RGB565 band jobs; a dedicated FreeRTOS task performs esp_lcd_panel_draw_bitmap
+            + inter-band settle delay so badge_rx s_mtx is not held across SPI/DMA.
+
+    config DASHCDG_BADGE_SP_BLIT_POOL_SLOTS
+        int "Deferred CDG blit: RGB565 band pool slots (2-16)"
+        depends on DASHCDG_BADGE_CDG_DEFERRED_BLIT
+        range 2 16
+        default 8
+        help
+            Each slot holds one band (288x12 RGB565). More slots reduce drops under SPI back-pressure;
+            each slot costs ~6.9 KiB internal DRAM.
+
+    config DASHCDG_BADGE_SP_BLIT_TASK_PRIO
+        int "Deferred CDG blit worker task priority (FreeRTOS)"
+        depends on DASHCDG_BADGE_CDG_DEFERRED_BLIT
+        range 1 15
+        default 4
+        help
+            Keep below or near the badge RX task (5) so real-time UDP decode is not starved.
+
+    config DASHCDG_BADGE_RX_PUMP_MUTEX_MS
+        int "RX media pump: s_mtx wait timeout ms (0 = wait forever)"
+        range 0 5000
+        default 400
+        help
+            Bounds xSemaphoreTake in badge_rx_pump_main_fd. On rare timeout the datagram is dropped
+            (counter rx_mtx_pump_timeouts). Use 0 only for legacy debugging.
+
+    config DASHCDG_BADGE_RX_REPAIR_MUTEX_MS
+        int "RX repair recv: s_mtx wait timeout ms (0 = wait forever)"
+        range 0 5000
+        default 400
+        help
+            Same semantics as pump timeout for repair/FEC recv loops.
+
+    config DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS
+        int "Karaoke DAC: dac_continuous_write max block ms (0 = infinite)"
+        range 0 200
+        default 12
+        help
+            Finite timeout avoids unbounded block when DMA back-pressures. 0 restores legacy -1 wait.
+
+    config DASHCDG_BADGE_RX_SELECT_TIMEOUT_MS
+        int "RX select timeout when video decode is on (ms)"
+        range 4 80
+        default 12
+        help
+            `select` wake period for CDG+LVGL coex vs Wi-Fi modem sleep / IGMP refresh. Lower = more
+            CPU wakeups; higher = riskier audio underrun. Tuned with `platform_hw` karaoke PS_NONE.
+
+    config DASHCDG_BADGE_RX_SELECT_TIMEOUT_AUDIO_ONLY_MS
+        int "RX select timeout when audio-only decode (ms)"
+        range 2 50
+        default 6
+        help
+            Shorter wake when CDG drain is off — keeps DAC + Opus drain cadence tighter.
+
 endmenu
