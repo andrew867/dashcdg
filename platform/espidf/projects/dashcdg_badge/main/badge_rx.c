@@ -471,6 +471,8 @@ static struct {
     uint32_t idle_miss;
     uint32_t post_miss;
     uint32_t coop;
+    uint32_t dac_dma_ok;
+    uint32_t dac_dma_err;
 } s_uart_audio_chop_prev;
 static uint32_t s_v4_stats_suppressed;
 static uint64_t s_last_select_enomem_local_ms;
@@ -1411,6 +1413,16 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
     xSemaphoreGive(s_mtx);
 
     if (badge_rx_is_audio_only_decode()) {
+        uint32_t dac_dma_ok = 0U;
+        uint32_t dac_dma_err = 0U;
+        uint32_t dac_hz_eff = 0U;
+        uint32_t dac_chunk_u8 = 0U;
+        uint32_t expect_dma_per_s = 0U;
+
+        dashcdg_platform_hw_karaoke_dac_get_uart_health(&dac_dma_ok, &dac_dma_err, &dac_hz_eff, &dac_chunk_u8);
+        if (dac_chunk_u8 > 0U && dac_hz_eff > 0U) {
+            expect_dma_per_s = dac_hz_eff / dac_chunk_u8;
+        }
         ESP_LOGI(TAG,
                  "audio_only a_rx=%lu a_out=%lu jb=%lu/%lu skip=%lu deg=%lu dec_fail=%lu dac_begin_fail=%lu "
                  "profile=%u clock=%d primed=%d ms_since_pcm=%llu mtx_idle_miss=%lu mtx_post_miss=%lu lvgl_coop=%lu "
@@ -1422,6 +1434,16 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
                  s_audio_decode_primed, (unsigned long long)ms_since_pcm,
                  (unsigned long)snap.rx_mtx_idle_drain_miss, (unsigned long)snap.rx_mtx_postburst_drain_miss,
                  (unsigned long)snap.lvgl_coop_audio_drains, (unsigned long)snap.rx_mtx_pump_timeouts);
+        /*
+         * Proof line (grep AUDIO_UART_PROOF): dac_dma_err must stay 0; d_dma_ok/s ~ expect_dma_per_s when sound plays.
+         * If dac_dma_ok frozen while a_rx climbs → decode/DAC path stuck; if dac_dma_err > 0 → ESP-IDF DMA reject.
+         */
+        ESP_LOGI(TAG,
+                 "AUDIO_UART_PROOF dac_dma_ok=%lu dac_dma_err=%lu hz_eff=%lu chunk_u8=%lu expect_dma_per_s=%lu "
+                 "vol_pct=%u",
+                 (unsigned long)dac_dma_ok, (unsigned long)dac_dma_err, (unsigned long)dac_hz_eff,
+                 (unsigned long)dac_chunk_u8, (unsigned long)expect_dma_per_s,
+                 (unsigned)dashcdg_platform_hw_get_karaoke_output_volume_pct());
     }
 
     {
@@ -1457,6 +1479,8 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             s_uart_audio_chop_prev.idle_miss = snap.rx_mtx_idle_drain_miss;
             s_uart_audio_chop_prev.post_miss = snap.rx_mtx_postburst_drain_miss;
             s_uart_audio_chop_prev.coop = snap.lvgl_coop_audio_drains;
+            dashcdg_platform_hw_karaoke_dac_get_uart_health(&s_uart_audio_chop_prev.dac_dma_ok,
+                                                            &s_uart_audio_chop_prev.dac_dma_err, NULL, NULL);
             s_uart_audio_chop_warmed = 1U;
         } else {
             uint32_t d_skip = snap.v4_audio_jitter_skip_events - s_uart_audio_chop_prev.skips;
@@ -1478,13 +1502,21 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             uint32_t d_imiss = snap.rx_mtx_idle_drain_miss - s_uart_audio_chop_prev.idle_miss;
             uint32_t d_pmiss = snap.rx_mtx_postburst_drain_miss - s_uart_audio_chop_prev.post_miss;
             uint32_t d_coop = snap.lvgl_coop_audio_drains - s_uart_audio_chop_prev.coop;
+            uint32_t dac_cur_ok = 0U;
+            uint32_t dac_cur_err = 0U;
+            uint32_t d_dma_ok = 0U;
+            uint32_t d_dma_err = 0U;
+
+            dashcdg_platform_hw_karaoke_dac_get_uart_health(&dac_cur_ok, &dac_cur_err, NULL, NULL);
+            d_dma_ok = dac_cur_ok - s_uart_audio_chop_prev.dac_dma_ok;
+            d_dma_err = dac_cur_err - s_uart_audio_chop_prev.dac_dma_err;
 
             ESP_LOGI(
                     TAG,
                     "audio_chop iv_ms=%llu jb_pk=%u jb=%u/%u d_skip=%u d_dec=%u d_deg=%u d_dac=%u d_out=%u d_rx=%u "
                     "d_udp=%llu d_wm=%llu d_wr=%u d_amiss=%u d_jbe=%u d_jbr=%llu d_jbd=%llu d_ru=%u d_rz=%u d_rs=%u "
-                    "d_imiss=%u d_pmiss=%u d_coop=%u codec_ann=%u codec_wire=%u eff=%u ms_sf=%llu heap_i=%u rssi=%d "
-                    "mcast=%u ucast=%u dup=%u a_only=%d",
+                    "d_imiss=%u d_pmiss=%u d_coop=%u d_dma_ok=%u d_dma_err=%u codec_ann=%u codec_wire=%u eff=%u "
+                    "ms_sf=%llu heap_i=%u rssi=%d mcast=%u ucast=%u dup=%u a_only=%d",
                     (unsigned long long)iv_ms,
                     (unsigned)jb_pk,
                     (unsigned)occ,
@@ -1508,6 +1540,8 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
                     (unsigned)d_imiss,
                     (unsigned)d_pmiss,
                     (unsigned)d_coop,
+                    (unsigned)d_dma_ok,
+                    (unsigned)d_dma_err,
                     (unsigned)(unsigned int)announced_codec,
                     (unsigned)(unsigned int)last_codec,
                     (unsigned)(unsigned int)eff_codec,
@@ -1538,6 +1572,8 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             s_uart_audio_chop_prev.idle_miss = snap.rx_mtx_idle_drain_miss;
             s_uart_audio_chop_prev.post_miss = snap.rx_mtx_postburst_drain_miss;
             s_uart_audio_chop_prev.coop = snap.lvgl_coop_audio_drains;
+            s_uart_audio_chop_prev.dac_dma_ok = dac_cur_ok;
+            s_uart_audio_chop_prev.dac_dma_err = dac_cur_err;
         }
         s_uart_audio_chop_jb_peak = 0U;
     }

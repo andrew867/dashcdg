@@ -40,6 +40,8 @@ PATTERNS = {
     "audio_chop_uart_stats": re.compile(r"badge_rx:\s+audio_chop\s+", re.IGNORECASE),
     # Audio-only cumulative line (mtx_idle_miss / lvgl_coop / rx_mtx_to)
     "audio_only_uart_mtx": re.compile(r"badge_rx:\s+audio_only\s+.*mtx_idle_miss=", re.IGNORECASE),
+    # Hardware proof: DAC DMA chunks accepted vs ESP-IDF errors (grep AUDIO_UART_PROOF)
+    "audio_uart_proof": re.compile(r"badge_rx:\s+AUDIO_UART_PROOF\s+", re.IGNORECASE),
 }
 
 
@@ -82,6 +84,7 @@ def print_table(rows: list[dict[str, int | str]]) -> None:
         "audio_only_uart_stats",
         "audio_chop_uart_stats",
         "audio_only_uart_mtx",
+        "audio_uart_proof",
     ]
     widths = {c: len(c) for c in cols}
     for row in rows:

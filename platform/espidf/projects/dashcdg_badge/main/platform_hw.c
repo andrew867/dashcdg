@@ -238,6 +238,29 @@ static void karaoke_dac_io_mutex_init(void)
     }
 }
 
+/** Count full DMA chunk submits (UART proof: should climb ~eff_hz/chunk_samps per second at 48 k). */
+static uint32_t s_karaoke_dac_dma_chunks_ok;
+static uint32_t s_karaoke_dac_dma_write_err;
+static TickType_t s_karaoke_dac_write_warn_suppress;
+
+static void karaoke_dac_note_dma_write_result(esp_err_t e)
+{
+    if (e == ESP_OK) {
+        s_karaoke_dac_dma_chunks_ok++;
+    } else {
+        s_karaoke_dac_dma_write_err++;
+        {
+            TickType_t nowt = xTaskGetTickCount();
+
+            if (nowt - s_karaoke_dac_write_warn_suppress >= pdMS_TO_TICKS(400)) {
+                s_karaoke_dac_write_warn_suppress = nowt;
+                ESP_LOGW(TAG, "karaoke dac_continuous_write: %s (UART proof: dma_err_total=%lu)",
+                         esp_err_to_name(e), (unsigned long)s_karaoke_dac_dma_write_err);
+            }
+        }
+    }
+}
+
 /** 0–100 linear gain before `KARAOKE_DAC_PCM_GAIN_NUM`; 0 ⇒ no samples fed (see `dashcdg_platform_hw_set_karaoke_output_volume_pct`). */
 static volatile uint8_t s_karaoke_out_vol_pct = 85U;
 
@@ -1023,7 +1046,8 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks());
+        karaoke_dac_note_dma_write_result(
+                dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks()));
         s_karaoke_dac_fill = 0U;
     }
     (void)dac_continuous_disable(s_karaoke_dac_handle);
@@ -1129,6 +1153,9 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
     s_karaoke_dac_upsample_accum = 0U;
     s_karaoke_dac_begin_cool_until_tick = (TickType_t)0;
     s_karaoke_dac_fill = 0U;
+    s_karaoke_dac_dma_chunks_ok = 0U;
+    s_karaoke_dac_dma_write_err = 0U;
+    s_karaoke_dac_write_warn_suppress = (TickType_t)0;
     amp_set_run(true);
     __atomic_store_n(&s_karaoke_pcm_streaming, true, __ATOMIC_RELEASE);
     return true;
@@ -1240,8 +1267,8 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
         for (uint32_t r = 0U; r < emit; ++r) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = (uint8_t)u;
             if (s_karaoke_dac_fill >= chunk) {
-                (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL,
-                                           karaoke_dac_write_timeout_ticks());
+                karaoke_dac_note_dma_write_result(dac_continuous_write(
+                        s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks()));
                 s_karaoke_dac_fill = 0U;
             }
         }
@@ -1290,11 +1317,28 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL,
-                                   karaoke_dac_write_timeout_ticks());
+        karaoke_dac_note_dma_write_result(dac_continuous_write(
+                s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks()));
         s_karaoke_dac_fill = 0U;
     }
     xSemaphoreGive(s_karaoke_dac_io_mtx);
+}
+
+void dashcdg_platform_hw_karaoke_dac_get_uart_health(
+        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out)
+{
+    if (dma_chunks_ok != NULL) {
+        *dma_chunks_ok = s_karaoke_dac_dma_chunks_ok;
+    }
+    if (dma_write_err != NULL) {
+        *dma_write_err = s_karaoke_dac_dma_write_err;
+    }
+    if (eff_hz_out != NULL) {
+        *eff_hz_out = s_karaoke_dac_open_effective_hz;
+    }
+    if (chunk_u8_out != NULL) {
+        *chunk_u8_out = (uint32_t)s_karaoke_dac_chunk_samples;
+    }
 }
 #endif
 
@@ -1323,6 +1367,23 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
 {
     (void)pcm;
     (void)samples;
+}
+
+void dashcdg_platform_hw_karaoke_dac_get_uart_health(
+        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out)
+{
+    if (dma_chunks_ok != NULL) {
+        *dma_chunks_ok = 0U;
+    }
+    if (dma_write_err != NULL) {
+        *dma_write_err = 0U;
+    }
+    if (eff_hz_out != NULL) {
+        *eff_hz_out = 0U;
+    }
+    if (chunk_u8_out != NULL) {
+        *chunk_u8_out = 0U;
+    }
 }
 
 void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_t samples)

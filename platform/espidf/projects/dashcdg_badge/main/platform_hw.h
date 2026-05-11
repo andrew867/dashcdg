@@ -117,6 +117,12 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_
 /** If a partial native-DAC DMA chunk is buffered, pad with mid-scale and flush. */
 void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
 /**
+ * UART proof counters (ESP32): successful `dac_continuous_write` chunk count vs failures.
+ * Reset when karaoke DAC opens successfully. eff_hz_out/chunk_u8_out describe active DMA timing.
+ */
+void dashcdg_platform_hw_karaoke_dac_get_uart_health(
+        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out);
+/**
  * Release SC8002B shutdown (amp on) when karaoke RX starts so the speaker path is not left muted
  * until the first decoded frame (no startup click through DAC otherwise).
  */
