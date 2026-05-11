@@ -80,6 +80,28 @@ Firmware should inherit this **stabilized desktop v4 contract** — see **`docs/
 
 Desktop soak and operator guidance now explicitly include an external/network-mounted media lane in addition to repo-local media paths; keep this reflected in new validation notes.
 
+## ESP32 badge: known-good Windows build/flash flow
+
+For `platform/espidf/projects/dashcdg_badge`, use native Windows shells only (`powershell.exe` or `cmd.exe`).
+
+- Preferred command:
+  - `powershell.exe -ExecutionPolicy Bypass -NoProfile -File "C:\Users\andrew\OneDrive - Green O365\Documents\GitHub\dashcdg\scripts\idf_build_flash_badge.ps1"`
+- Build-only helper:
+  - `scripts/idf_build_badge.cmd`
+- Expected serial port in current setup:
+  - `COM6` (update script if port changes).
+- Optional debug automation:
+  - `CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP=y` auto-opens Karaoke after first DHCP once per boot; **does not override** karaoke audio/video decode toggles from settings / NVS.
+
+If ESP-IDF activation reports `MSys/Mingw is not supported`, the session inherited Git Bash/MSYS environment context. Start a fresh native PowerShell/CMD process and rerun.
+
+After flashing, run the automated UART cycle and summary:
+
+- `python scripts/esp32_badge_debug_cycle.py --skip-build-flash --iterations 1 --log-seconds 120 --port COM6`
+- `python scripts/esp32_badge_log_summary.py <log-file>`
+
+During automated validation, wait for DHCP (`sta ip:` marker), then launch the CDG app on-device before evaluating playout stability counters.
+
 ### ESP32 badge LVGL (`platform/espidf/projects/dashcdg_badge/main/`)
 
 - **User-visible strings must be 7-bit ASCII** in C string literals passed to LVGL labels, buttons, `snprintf` text, and modal copy. Do **not** use Unicode punctuation or symbols (middle dot, em dash, smart quotes, Unicode ellipsis, non-breaking space, etc.): the default **Montserrat** subset often has **no glyphs** for those code points, so text renders as **missing tofu** or blank gaps.
