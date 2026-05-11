@@ -16,6 +16,9 @@
 /** Panel band blit height (scratch = W * H * 2 bytes, no full framebuffer). */
 #define DASHCDG_BADGE_RX_BLIT_BAND_H 12
 
+/** Inter-band panel settle after partial RGB565 blit (us); must match deferred blit worker. */
+#define DASHCDG_BADGE_RX_PANEL_BAND_SETTLE_US 2200U
+
 typedef struct {
     uint64_t datagrams;
     uint32_t parse_failures;
@@ -136,6 +139,18 @@ typedef struct {
     /** Karaoke settings snapshot: affects HUD (audio-only must not require CDG heap). */
     uint8_t video_decode_enabled;
     uint8_t audio_decode_enabled;
+    /** RX pump: xSemaphoreTake(s_mtx) hit timeout (datagram dropped that iteration). */
+    uint32_t rx_mtx_pump_timeouts;
+    /** Repair recv loops: s_mtx take timeout count. */
+    uint32_t rx_mtx_repair_timeouts;
+    /** CDG overlay: band not queued (pool/work queue full or non-blocking slot wait). */
+    uint32_t cdg_blit_band_drop;
+    /** Max observed s_mtx hold (us) in media pump one datagram (0 if CONFIG_DASHCDG_BADGE_PERF_PROBES off). */
+    uint32_t perf_mtx_pump_max_us;
+    /** Max s_mtx hold (us) CDG overlay RGB565 prep when deferred blit enabled. */
+    uint32_t perf_mtx_overlay_rgb_max_us;
+    /** Max SPI band (blit + settle) on deferred worker (us). */
+    uint32_t perf_sp_blit_band_max_us;
 } dashcdg_badge_rx_stats_t;
 
 #define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U
@@ -159,6 +174,13 @@ void dashcdg_badge_rx_apply_rx_tuning_prefs(void);
 /** After LVGL freed widgets / heap settled, try calloc CDG+jitter again (no-op if already ok). */
 void dashcdg_badge_rx_try_upgrade_cdg_heap(void);
 void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out);
+/**
+ * LVGL tick helper (T4): one `s_mtx` acquisition — refresh `s_stats` mirror, copy to `out`, optional CDG
+ * overlay blit (same rules as `dashcdg_badge_rx_cdg_overlay_tick`). Call from the LVGL task only.
+ */
+void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, dashcdg_badge_rx_stats_t *out);
+/** Deferred SPI blit worker: record one band blit+settle duration (us) for perf max. */
+void dashcdg_badge_rx_perf_note_sp_blit_band_us(uint32_t band_spi_us);
 
 /** Multi-line status for karaoke mcast modal (Wi-Fi, IGMP, wire counters). */
 void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz);
