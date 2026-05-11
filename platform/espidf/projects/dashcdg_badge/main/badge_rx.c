@@ -2912,6 +2912,15 @@ static void badge_rx_drain_v4_audio_budget(uint64_t local_now_ms, uint32_t max_s
                     (local_now_ms > s_last_audio_jitter_apply_local_ms) ? (local_now_ms - s_last_audio_jitter_apply_local_ms) : 0U;
         }
         din.primed_decode = s_audio_decode_primed;
+        /*
+         * Audio-only with <2 frames buffered: clock-driven empty-hole SKIP advances next_media_sequence
+         * without wire data; inserts then look stale (jb empty, skip count explodes, a_out stalls).
+         * Treat as no sender playback until depth returns (same idea as audio_jitter cold join ~407).
+         */
+        if (badge_rx_is_audio_only_decode() && s_audio_jb != NULL &&
+                dashcdg_audio_jitter_occupied_count(s_audio_jb) < 2U) {
+            din.have_sender_playback = 0;
+        }
 
         step = dashcdg_audio_jitter_drain_step(s_audio_jb, &din, &frame, &miss_delta);
         if (step == DASHCDG_AUDIO_DRAIN_SKIP) {
