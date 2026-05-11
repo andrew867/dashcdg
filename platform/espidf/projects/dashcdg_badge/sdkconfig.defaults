@@ -40,8 +40,8 @@ CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP=y
 # CDG SPI: inline blit from LVGL tick (proven). Deferred worker + second-task `lvgl_port_lock` caused
 # persistent black CDG / starvation; keep off unless re-validating end-to-end on hardware.
 # CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT is not set
-# Slightly longer than one 48 kHz chunk period under Wi‑Fi + CDG SPI contention (avoids timeout chop).
-CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS=25
+# 0 = wait until DMA accepts full chunk (no truncated `dac_continuous_write` bursty chop).
+CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS=0
 # Opus: mono decoder only (~smaller heap blob than stereo); TX should send mono for badge.
 CONFIG_DASHCDG_BADGE_OPUS_MONO_ONLY=y
 # Strip v4 repair NACK uplink (saves code/RAM; enable in menuconfig if needed).

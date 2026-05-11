@@ -228,6 +228,16 @@ static uint32_t s_karaoke_dac_upsample_accum;
  * failed allocs/sec, no headroom recovery, and amp/DAC "pop" as enable is retried forever.
  */
 static TickType_t s_karaoke_dac_begin_cool_until_tick;
+/** Serializes `s_karaoke_dac_fill` / chunk DMA writes — badge_rx + LVGL cooperative drain + idle pad run on different tasks. */
+static SemaphoreHandle_t s_karaoke_dac_io_mtx;
+
+static void karaoke_dac_io_mutex_init(void)
+{
+    if (s_karaoke_dac_io_mtx == NULL) {
+        s_karaoke_dac_io_mtx = xSemaphoreCreateMutex();
+    }
+}
+
 /** 0–100 linear gain before `KARAOKE_DAC_PCM_GAIN_NUM`; 0 ⇒ no samples fed (see `dashcdg_platform_hw_set_karaoke_output_volume_pct`). */
 static volatile uint8_t s_karaoke_out_vol_pct = 85U;
 
@@ -998,6 +1008,14 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
     if (s_karaoke_dac_handle == NULL) {
         return;
     }
+    karaoke_dac_io_mutex_init();
+    /*
+     * Must drain competing producers (`karaoke_dac_push`, idle pad, lab PCM) before tearing down DMA.
+     * Caller holds `s_mtx` (platform); I/O mutex is inner — same ordering as push (I/O only).
+     */
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
         chunk = 320U;
     }
@@ -1020,6 +1038,7 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
      * karaoke mode.
      */
     __atomic_store_n(&s_karaoke_pcm_streaming, false, __ATOMIC_RELEASE);
+    xSemaphoreGive(s_karaoke_dac_io_mtx);
 }
 
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
@@ -1064,8 +1083,8 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
     {
         dac_continuous_config_t dcfg = {
             .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
-            /* Fewer descriptors → smaller DMA descriptor RAM (ESP_ERR_NO_MEM when internal+DMA heap fragmented). */
-            .desc_num = 2,
+            /* More descriptors reduce underrun clicks when Wi‑Fi/LVGL delays `dac_continuous_write`; costs ~a few× descriptor RAM. */
+            .desc_num = 8,
             .buf_size = (uint32_t)chunk,
             .freq_hz = eff_hz,
             .offset = 0,
@@ -1191,6 +1210,10 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
     if (vol_pct == 0U) {
         return;
     }
+    karaoke_dac_io_mutex_init();
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
         chunk = 320U;
     }
@@ -1223,6 +1246,7 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
             }
         }
     }
+    xSemaphoreGive(s_karaoke_dac_io_mtx);
 }
 
 uint8_t dashcdg_platform_hw_get_karaoke_output_volume_pct(void)
@@ -1249,10 +1273,12 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_
 
 void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
 {
-    if (!s_mtx) {
-        return;
-    }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(8)) != pdTRUE) {
+    karaoke_dac_io_mutex_init();
+    /*
+     * Same mutex as push — do not use `s_mtx` here; RX drain does not hold platform mutex during PCM push,
+     * and mixing mutexes caused races with `karaoke_dac_push_mono_s16`.
+     */
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(8)) != pdTRUE) {
         return;
     }
     if (s_karaoke_dac_handle != NULL && s_karaoke_dac_fill > 0U) {
@@ -1268,7 +1294,7 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
                                    karaoke_dac_write_timeout_ticks());
         s_karaoke_dac_fill = 0U;
     }
-    xSemaphoreGive(s_mtx);
+    xSemaphoreGive(s_karaoke_dac_io_mtx);
 }
 #endif
 
