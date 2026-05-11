@@ -34,6 +34,8 @@ PATTERNS = {
     "rx_stopped_log": re.compile(r"badge_rx:\s+rx stopped", re.IGNORECASE),
     "igmp_bootstrap_pass": re.compile(r"IGMP bootstrap:", re.IGNORECASE),
     "sta_got_ip": re.compile(r"got ip:|STA_GOT_IP|esp_netif_handlers:\s+Got IP", re.IGNORECASE),
+    # badge_rx.c audio-only UART line: a_rx=chunks a_out=frames_to_dac jb=occ/cap ...
+    "audio_only_uart_stats": re.compile(r"badge_rx:\s+audio_only\s+a_rx=", re.IGNORECASE),
 }
 
 
@@ -73,6 +75,7 @@ def print_table(rows: list[dict[str, int | str]]) -> None:
         "v4_anchor_applied_log",
         "rx_task_exit",
         "sta_got_ip",
+        "audio_only_uart_stats",
     ]
     widths = {c: len(c) for c in cols}
     for row in rows:

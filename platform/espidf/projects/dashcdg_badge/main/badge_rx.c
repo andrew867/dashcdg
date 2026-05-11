@@ -73,6 +73,8 @@ static const char *TAG = "badge_rx";
 /* Slightly looser than desktop default: badge clock + Wi-Fi jitter; tight grace + false skips = picket-fence audio. */
 #define BADGE_RX_AUDIO_LATE_GRACE_MS 120U
 #define BADGE_RX_STATS_INTERVAL_MS 2000U
+/** When decode is audio-only, report v4_rx_stats to TX faster for tuning drain/jitter. */
+#define BADGE_RX_STATS_INTERVAL_AUDIO_ONLY_MS 1000U
 #define BADGE_RX_STATS_INTERVAL_STARTUP_MS 8000U
 #define BADGE_RX_STATS_INTERVAL_RECOVERY_MS 5000U
 #define BADGE_RX_STATS_SKIP_AFTER_ENOMEM_MS 4000U
@@ -88,7 +90,8 @@ static const char *TAG = "badge_rx";
  * `ms_since_prior_audio_apply` into hole-SKIP spirals, and (2) keep ESP32 `dac_continuous` fed
  * (~10.7 ms per 512-byte chunk @ 48 kHz). 200 ms idle was far too long — pops + choppy drops.
  */
-#define BADGE_RX_SELECT_TIMEOUT_MS 12U
+#define BADGE_RX_SELECT_TIMEOUT_MS           12U
+#define BADGE_RX_SELECT_TIMEOUT_AUDIO_ONLY_MS 6U
 /** Max audio jitter drain steps per call (AMR 20 ms frames; catch up after a UDP burst). */
 #define BADGE_RX_AUDIO_DRAIN_GUARD 32U
 #define BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED 6U
@@ -99,7 +102,15 @@ static const char *TAG = "badge_rx";
  * Wi-Fi delivers 20 ms frames in clumps.
  */
 #define BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_KARAOKE 8U
-#define BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL 2U
+/** Video decode off: match burstier UDP without leaving frames queued behind DAC timing. */
+#define BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_AUDIO_ONLY 40U
+#define BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED_AUDIO_ONLY          16U
+/** Full idle/post-burst drain cap when audio-only (packet path uses smaller per-chunk budgets). */
+#define BADGE_RX_AUDIO_DRAIN_GUARD_AUDIO_ONLY                 128U
+#define BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL                    2U
+#define BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY                  6U
+/** UART ESP_LOGI cadence for audio-only tuning (matches stats summary grep). */
+#define BADGE_RX_UART_AUDIO_STATS_MS                          1000U
 #if defined(DASHCDG_AUDIO_JITTER_HEAP_BACKED) && DASHCDG_AUDIO_JITTER_HEAP_BACKED
 /*
  * `dashcdg_audio_jitter_init` allocates the slot+payload pool with calloc(30, …). Under A/V on,
@@ -372,6 +383,8 @@ static uint64_t s_last_cdg_apply_local_ms;
 /** Network byte order; source IP of last unicast v4 datagram (TX host). */
 static uint32_t s_v4_tx_src_ipv4;
 static uint64_t s_last_v4_stats_sent_ms;
+/** Rate limit ESP_LOGI audio-only diagnostics on UART. */
+static uint64_t s_last_uart_audio_only_ms;
 static uint32_t s_v4_stats_suppressed;
 static uint64_t s_last_select_enomem_local_ms;
 static uint64_t s_last_igmp_refresh_local_ms;
@@ -1232,6 +1245,49 @@ static int badge_rx_control_tx_fd(void)
     return -1;
 }
 
+static int badge_rx_is_audio_only_decode(void)
+{
+    return (s_audio_decode_enabled != 0U && s_video_decode_enabled == 0U) ? 1 : 0;
+}
+
+/** Periodic UART line when karaoke decode is audio-only (CSV-ish tokens for log summarizers). */
+static void badge_rx_maybe_uart_log_audio_only(uint64_t now_ms)
+{
+    uint32_t occ;
+    uint32_t cap;
+    uint64_t ms_since_pcm;
+
+    if (!badge_rx_is_audio_only_decode()) {
+        return;
+    }
+    if (s_last_uart_audio_only_ms != 0U && (now_ms - s_last_uart_audio_only_ms) < (uint64_t)BADGE_RX_UART_AUDIO_STATS_MS) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(8)) != pdTRUE) {
+        return;
+    }
+    s_last_uart_audio_only_ms = now_ms;
+    occ = 0U;
+    cap = 0U;
+    if (s_audio_jb != NULL) {
+        occ = (uint32_t)dashcdg_audio_jitter_occupied_count(s_audio_jb);
+        cap = (uint32_t)dashcdg_audio_jitter_capacity(s_audio_jb);
+    }
+    ms_since_pcm = 0U;
+    if (s_last_audio_jitter_apply_local_ms != 0U && now_ms > s_last_audio_jitter_apply_local_ms) {
+        ms_since_pcm = now_ms - s_last_audio_jitter_apply_local_ms;
+    }
+    ESP_LOGI(TAG,
+             "audio_only a_rx=%lu a_out=%lu jb=%lu/%lu skip=%lu deg=%lu dec_fail=%lu dac_begin_fail=%lu "
+             "profile=%u clock=%d primed=%d ms_since_pcm=%llu",
+             (unsigned long)s_stats.v4_audio_chunk_rx, (unsigned long)s_stats.v4_audio_frames_out, (unsigned long)occ,
+             (unsigned long)cap, (unsigned long)s_stats.v4_audio_jitter_skip_events,
+             (unsigned long)s_stats.v4_audio_degraded_push, (unsigned long)s_stats.v4_audio_decode_fail,
+             (unsigned long)s_stats.v4_audio_dac_begin_fail, (unsigned)s_memory_profile, (int)s_stats.have_clock,
+             s_audio_decode_primed, (unsigned long long)ms_since_pcm);
+    xSemaphoreGive(s_mtx);
+}
+
 /** v4_rx_stats: primary session multicast so all receivers + TX see reports (timing convergence). */
 static void badge_rx_fill_v4_rx_stats_mcast_dst(struct sockaddr_in *dst)
 {
@@ -1262,6 +1318,10 @@ static void badge_rx_fill_v4_repair_nack_dst(struct sockaddr_in *dst)
 static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
 {
     uint32_t target_interval_ms = BADGE_RX_STATS_INTERVAL_MS;
+
+    if (s_audio_decode_enabled != 0U && s_video_decode_enabled == 0U) {
+        target_interval_ms = BADGE_RX_STATS_INTERVAL_AUDIO_ONLY_MS;
+    }
 
     if (!BADGE_RX_ENABLE_TX_V4_STATS || s_v4_stats_tx_enabled == 0U) {
         return;
@@ -1755,7 +1815,12 @@ static void drain_cdg_to_idle(uint64_t local_now_ms)
     }
     int guard = 0;
 
-    badge_rx_drain_v4_audio_budget(local_now_ms, BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED, BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL);
+    if (badge_rx_is_audio_only_decode()) {
+        badge_rx_drain_v4_audio_budget(
+                local_now_ms, BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED_AUDIO_ONLY, BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY);
+    } else {
+        badge_rx_drain_v4_audio_budget(local_now_ms, BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED, BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL);
+    }
 
     if (s_jb == NULL || !s_jb->initialized) {
         return;
@@ -3124,7 +3189,14 @@ static void badge_rx_drain_v4_audio_budget(uint64_t local_now_ms, uint32_t max_s
 
 static void badge_rx_drain_v4_audio(uint64_t local_now_ms)
 {
-    badge_rx_drain_v4_audio_budget(local_now_ms, BADGE_RX_AUDIO_DRAIN_GUARD, BADGE_RX_AUDIO_DRAIN_GUARD);
+    uint32_t guard_steps = BADGE_RX_AUDIO_DRAIN_GUARD;
+    uint32_t plc_ring = BADGE_RX_AUDIO_DRAIN_GUARD;
+
+    if (badge_rx_is_audio_only_decode()) {
+        guard_steps = BADGE_RX_AUDIO_DRAIN_GUARD_AUDIO_ONLY;
+        plc_ring = BADGE_RX_AUDIO_DRAIN_GUARD_AUDIO_ONLY;
+    }
+    badge_rx_drain_v4_audio_budget(local_now_ms, guard_steps, plc_ring);
 }
 
 static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64_t local_now_ms)
@@ -3187,12 +3259,20 @@ static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64
      * Keep packet-path drain small while s_mtx is held. Full guard drains still run on
      * idle/clock paths; this avoids audio bursts starving video/datagram handling.
      */
-    badge_rx_drain_v4_audio_budget(
-            local_now_ms,
-            (s_video_decode_enabled && s_memory_profile != BADGE_RX_MEM_PROFILE_AUDIO_PRIORITY)
-                    ? BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET
-                    : BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_KARAOKE,
-            BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL);
+    {
+        uint32_t pkt_budget;
+        uint32_t plc_budget = BADGE_RX_AUDIO_PLC_FRAMES_PER_CALL;
+
+        if (badge_rx_is_audio_only_decode()) {
+            pkt_budget = BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_AUDIO_ONLY;
+            plc_budget = BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY;
+        } else if (s_video_decode_enabled && s_memory_profile != BADGE_RX_MEM_PROFILE_AUDIO_PRIORITY) {
+            pkt_budget = BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET;
+        } else {
+            pkt_budget = BADGE_RX_AUDIO_DRAIN_BUDGET_ON_AUDIO_PACKET_KARAOKE;
+        }
+        badge_rx_drain_v4_audio_budget(local_now_ms, pkt_budget, plc_budget);
+    }
 }
 
 static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
@@ -4147,7 +4227,14 @@ static void badge_rx_task(void *arg)
         }
 #endif
         tv.tv_sec = 0;
-        tv.tv_usec = (int)(BADGE_RX_SELECT_TIMEOUT_MS * 1000U);
+        {
+            uint32_t sel_ms = BADGE_RX_SELECT_TIMEOUT_MS;
+
+            if (s_audio_decode_enabled != 0U && s_video_decode_enabled == 0U) {
+                sel_ms = BADGE_RX_SELECT_TIMEOUT_AUDIO_ONLY_MS;
+            }
+            tv.tv_usec = (int)(sel_ms * 1000U);
+        }
         rv = select(max_fd + 1, &rfds, NULL, NULL, &tv);
         if (rv < 0) {
             if (errno == EBADF || errno == EINVAL || !s_run) {
@@ -4185,8 +4272,11 @@ static void badge_rx_task(void *arg)
         if (rv == 0) {
             const uint64_t idle_now_ms = dashcdg_clock_now_ms();
             /* Audio decode needs periodic drain even when the mutex is busy (large UDP bursts). */
-            const TickType_t idle_mtx_ticks =
-                    (s_audio_decode_enabled != 0U) ? pdMS_TO_TICKS(48) : pdMS_TO_TICKS(12);
+            TickType_t idle_mtx_ticks = pdMS_TO_TICKS(12);
+
+            if (s_audio_decode_enabled != 0U) {
+                idle_mtx_ticks = badge_rx_is_audio_only_decode() ? pdMS_TO_TICKS(72) : pdMS_TO_TICKS(48);
+            }
 
             badge_rx_try_open_ucast_sockets();
             if (xSemaphoreTake(s_mtx, idle_mtx_ticks) == pdTRUE) {
@@ -4204,6 +4294,7 @@ static void badge_rx_task(void *arg)
             }
             dashcdg_platform_hw_karaoke_dac_pad_partial_chunk();
             badge_rx_maybe_send_v4_stats(idle_now_ms);
+            badge_rx_maybe_uart_log_audio_only(idle_now_ms);
             badge_rx_maybe_periodic_igmp_refresh(idle_now_ms);
             continue;
         }
@@ -4306,7 +4397,7 @@ static void badge_rx_task(void *arg)
             /* Audio-only: give the RX task more time to take the mutex after a burst; 12ms often lost
              * contending with the media pump, starving drain and causing decode/SKIP -> fuzz -> silence. */
             const TickType_t post_ticks = (s_audio_decode_enabled != 0U && s_video_decode_enabled == 0U)
-                                                  ? pdMS_TO_TICKS(48)
+                                                  ? pdMS_TO_TICKS(72)
                                                   : pdMS_TO_TICKS(12);
 
             if (xSemaphoreTake(s_mtx, post_ticks) == pdTRUE) {
@@ -4317,7 +4408,9 @@ static void badge_rx_task(void *arg)
         }
         {
             uint64_t loop_now_ms = dashcdg_clock_now_ms();
+
             badge_rx_maybe_send_v4_stats(loop_now_ms);
+            badge_rx_maybe_uart_log_audio_only(loop_now_ms);
             badge_rx_maybe_periodic_igmp_refresh(loop_now_ms);
         }
     }
