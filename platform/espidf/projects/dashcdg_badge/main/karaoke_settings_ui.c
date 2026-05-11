@@ -9,6 +9,7 @@
 
 #include "badge_prefs.h"
 #include "badge_rx.h"
+#include "karaoke_ui.h"
 #include "dashcdg/media_clock.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
@@ -52,6 +53,7 @@ static void apply_decode_toggles(void)
         a_on = false;
     }
     dashcdg_badge_rx_set_decode_enabled(v_on, a_on);
+    dashcdg_karaoke_ui_sync_decode_layout_from_prefs();
 }
 
 static void on_video_decode_sw(lv_event_t *e)

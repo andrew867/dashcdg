@@ -50,6 +50,9 @@ static lv_obj_t *s_audio_mute_lbl;
 static bool s_audio_vol_slider_guard;
 static uint8_t s_audio_vol_before_mute = 85U;
 static bool s_was_audio_only_mode;
+/** Cached NV karaoke decode prefs; refreshed only in `present` and `dashcdg_karaoke_ui_sync_decode_layout_from_prefs`. */
+static uint8_t s_kui_layout_pref_video = 1U;
+static uint8_t s_kui_layout_pref_audio = 1U;
 
 static lv_obj_t *s_bar_wifi;
 static lv_obj_t *s_bar_bat;
@@ -81,8 +84,13 @@ typedef struct {
 
 static tick_ctx_t s_tick_ctx;
 static uint32_t s_heap_retry_ticks;
-/** Modal body refresh ~2x/s to avoid heavy snprintf + relayout every CDG tick while scrolling. */
+/** Modal body refresh cadence (LVGL ticks); heavy dashboard work is throttled (T6). */
 static uint16_t s_mcast_modal_body_ticks;
+/** Cached heap snapshot for mcast modal SYSTEM card (refresh every N dashboard updates). */
+static unsigned long s_mcast_dash_heap_free;
+static unsigned long s_mcast_dash_heap_min;
+static unsigned long s_mcast_dash_int_largest;
+static uint8_t s_mcast_dash_heap_refresh_i;
 /** Next time (ms) to refresh Wi-Fi + battery in the status dock (~phone-like cadence). */
 static uint64_t s_status_slow_deadline_ms;
 
@@ -599,9 +607,19 @@ static void karaoke_mcast_modal_update_dashboard(void)
     dashcdg_badge_rx_stats_t st;
     char line[288];
     unsigned loss_x100 = 0U;
-    unsigned long heap_free = (unsigned long)esp_get_free_heap_size();
-    unsigned long heap_min = (unsigned long)esp_get_minimum_free_heap_size();
-    unsigned long int_largest = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    unsigned long heap_free;
+    unsigned long heap_min;
+    unsigned long int_largest;
+
+    if ((s_mcast_dash_heap_refresh_i++ % 4U) == 0U) {
+        s_mcast_dash_heap_free = (unsigned long)esp_get_free_heap_size();
+        s_mcast_dash_heap_min = (unsigned long)esp_get_minimum_free_heap_size();
+        s_mcast_dash_int_largest =
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    heap_free = s_mcast_dash_heap_free;
+    heap_min = s_mcast_dash_heap_min;
+    int_largest = s_mcast_dash_int_largest;
     unsigned audio_occ_pct = 0U;
     unsigned video_occ_pct = 0U;
     const char *profile = "bal";
@@ -788,6 +806,44 @@ static void karaoke_audio_refresh_vol_widgets(void)
     }
 }
 
+/*
+ * `s_audio_only_panel` and `s_stage_fill` both used flex_grow=1. HIDDEN alone still participates in
+ * flex on some LVGL layouts — the strip stole ~half the stage below CDG while video was on / audio
+ * decode off, leaving a tall blank band over the lyrics area.
+ */
+static void karaoke_stage_apply_audio_only_vs_video_layout(bool audio_only_karaoke)
+{
+    if (s_audio_only_panel != NULL && lv_obj_is_valid(s_audio_only_panel)) {
+        if (audio_only_karaoke) {
+            lv_obj_set_flex_grow(s_audio_only_panel, 1);
+            lv_obj_set_height(s_audio_only_panel, LV_SIZE_CONTENT);
+            lv_obj_remove_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_set_flex_grow(s_audio_only_panel, 0);
+            lv_obj_set_height(s_audio_only_panel, 0);
+            lv_obj_add_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_cdg_frame != NULL && lv_obj_is_valid(s_cdg_frame)) {
+        if (audio_only_karaoke) {
+            lv_obj_add_flag(s_cdg_frame, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_cdg_frame, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_stage_fill != NULL && lv_obj_is_valid(s_stage_fill)) {
+        if (audio_only_karaoke) {
+            lv_obj_set_flex_grow(s_stage_fill, 0);
+            lv_obj_set_height(s_stage_fill, 0);
+            lv_obj_add_flag(s_stage_fill, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_set_flex_grow(s_stage_fill, 1);
+            lv_obj_set_height(s_stage_fill, LV_SIZE_CONTENT);
+            lv_obj_remove_flag(s_stage_fill, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 static void on_audio_vol_slider(lv_event_t *e)
 {
     if (s_audio_vol_slider_guard) {
@@ -833,6 +889,74 @@ static void on_audio_mute_btn(lv_event_t *e)
     karaoke_audio_refresh_vol_widgets();
 }
 
+static void karaoke_ui_decode_layout_prefs_reload(void)
+{
+    uint8_t pv = 1U;
+    uint8_t pa = 1U;
+
+    (void)dashcdg_badge_prefs_load_karaoke_video_decode(&pv);
+    (void)dashcdg_badge_prefs_load_karaoke_audio_decode(&pa);
+    s_kui_layout_pref_video = (pv != 0U) ? 1U : 0U;
+    s_kui_layout_pref_audio = (pa != 0U) ? 1U : 0U;
+}
+
+static void karaoke_ui_apply_stage_from_cached_decode_prefs(const dashcdg_badge_rx_stats_t *st)
+{
+    bool audio_only = (s_kui_layout_pref_video == 0U && s_kui_layout_pref_audio != 0U);
+
+    if (audio_only != s_was_audio_only_mode) {
+        s_was_audio_only_mode = audio_only;
+        if (audio_only) {
+            karaoke_audio_refresh_vol_widgets();
+        }
+    }
+    if (audio_only) {
+        karaoke_stage_apply_audio_only_vs_video_layout(true);
+        if (s_audio_track_lbl && lv_obj_is_valid(s_audio_track_lbl) && st != NULL) {
+            static char prev_track[88];
+
+            if (strncmp(prev_track, st->song_id, sizeof(prev_track)) != 0) {
+                strncpy(prev_track, st->song_id, sizeof(prev_track) - 1U);
+                prev_track[sizeof(prev_track) - 1U] = '\0';
+                if (st->song_id[0] == '\0') {
+                    lv_label_set_text(s_audio_track_lbl, "Track: (waiting)");
+                } else {
+                    char buf[128];
+
+                    snprintf(buf, sizeof(buf), "Track:\n%s", st->song_id);
+                    lv_label_set_text(s_audio_track_lbl, buf);
+                }
+            }
+        }
+    } else {
+        karaoke_stage_apply_audio_only_vs_video_layout(false);
+    }
+}
+
+void dashcdg_karaoke_ui_sync_decode_layout_from_prefs(void)
+{
+    /*
+     * Decode toggles are written from settings UI; NV is the source of truth for stage layout so we
+     * do not depend on RX mutex latency. Avoid LVGL work when karaoke is not on-screen.
+     */
+    if (s_tick == NULL) {
+        karaoke_ui_decode_layout_prefs_reload();
+        return;
+    }
+    if (!lvgl_port_lock(1000)) {
+        ESP_LOGW(TAG, "sync decode layout: LVGL lock timeout");
+        return;
+    }
+    karaoke_ui_decode_layout_prefs_reload();
+    {
+        dashcdg_badge_rx_stats_t st;
+
+        dashcdg_badge_rx_get_stats(&st);
+        karaoke_ui_apply_stage_from_cached_decode_prefs(&st);
+    }
+    lvgl_port_unlock();
+}
+
 static void on_tick(lv_timer_t *t)
 {
     tick_ctx_t *c = (tick_ctx_t *)lv_timer_get_user_data(t);
@@ -846,17 +970,22 @@ static void on_tick(lv_timer_t *t)
             s_heap_retry_ticks = 0U;
             dashcdg_badge_rx_try_upgrade_cdg_heap();
         }
-        if (!karaoke_mcast_modal_is_open()) {
-            dashcdg_badge_rx_cdg_overlay_tick(s_cdg_slot);
-        }
         /* PM: CDG blit cadence proves the UI is alive even if jitter pending hits 0 between frames. */
         dashcdg_platform_hw_note_karaoke_cdg_overlay_tick(dashcdg_clock_now_ms());
         {
             const uint64_t now = dashcdg_clock_now_ms();
             dashcdg_badge_rx_stats_t st;
 
+            /*
+             * Decode layout NVS is not read here — only via prefs_poll (debounced save) and explicit
+             * sync when settings apply (KAR-03 / T10).
+             */
             dashcdg_badge_prefs_poll_karaoke_output_volume_save(now);
-            dashcdg_badge_rx_get_stats(&st);
+            if (!karaoke_mcast_modal_is_open()) {
+                dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(s_cdg_slot, &st);
+            } else {
+                dashcdg_badge_rx_get_stats(&st);
+            }
             /*
              * Stream OK for PM / backlight: video needs CDG jitter progress; audio-only needs chunks/frames.
              */
@@ -875,56 +1004,10 @@ static void on_tick(lv_timer_t *t)
             }
             karaoke_status_bar_update_fast(&st);
 
-            {
-                bool audio_only = (st.video_decode_enabled == 0U && st.audio_decode_enabled != 0U);
-
-                if (audio_only != s_was_audio_only_mode) {
-                    s_was_audio_only_mode = audio_only;
-                    if (audio_only) {
-                        karaoke_audio_refresh_vol_widgets();
-                    }
-                }
-                if (audio_only) {
-                    if (s_cdg_frame && lv_obj_is_valid(s_cdg_frame)) {
-                        lv_obj_add_flag(s_cdg_frame, LV_OBJ_FLAG_HIDDEN);
-                    }
-                    if (s_audio_only_panel && lv_obj_is_valid(s_audio_only_panel)) {
-                        lv_obj_remove_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
-                    }
-                    if (s_stage_fill && lv_obj_is_valid(s_stage_fill)) {
-                        lv_obj_add_flag(s_stage_fill, LV_OBJ_FLAG_HIDDEN);
-                    }
-                    if (s_audio_track_lbl && lv_obj_is_valid(s_audio_track_lbl)) {
-                        static char prev_track[88];
-
-                        if (strncmp(prev_track, st.song_id, sizeof(prev_track)) != 0) {
-                            strncpy(prev_track, st.song_id, sizeof(prev_track) - 1U);
-                            prev_track[sizeof(prev_track) - 1U] = '\0';
-                            if (st.song_id[0] == '\0') {
-                                lv_label_set_text(s_audio_track_lbl, "Track: (waiting)");
-                            } else {
-                                char buf[128];
-
-                                snprintf(buf, sizeof(buf), "Track:\n%s", st.song_id);
-                                lv_label_set_text(s_audio_track_lbl, buf);
-                            }
-                        }
-                    }
-                } else {
-                    if (s_cdg_frame && lv_obj_is_valid(s_cdg_frame)) {
-                        lv_obj_remove_flag(s_cdg_frame, LV_OBJ_FLAG_HIDDEN);
-                    }
-                    if (s_audio_only_panel && lv_obj_is_valid(s_audio_only_panel)) {
-                        lv_obj_add_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
-                    }
-                    if (s_stage_fill && lv_obj_is_valid(s_stage_fill)) {
-                        lv_obj_remove_flag(s_stage_fill, LV_OBJ_FLAG_HIDDEN);
-                    }
-                }
-            }
+            karaoke_ui_apply_stage_from_cached_decode_prefs(&st);
         }
         if (karaoke_mcast_modal_is_open()) {
-            if (++s_mcast_modal_body_ticks >= 20U) {
+            if (++s_mcast_modal_body_ticks >= 32U) {
                 s_mcast_modal_body_ticks = 0U;
                 karaoke_mcast_modal_update_dashboard();
             }
@@ -1220,6 +1303,8 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
         uint64_t t0 = dashcdg_clock_now_ms();
         dashcdg_badge_rx_stats_t st0;
         dashcdg_badge_rx_get_stats(&st0);
+        karaoke_ui_decode_layout_prefs_reload();
+        karaoke_ui_apply_stage_from_cached_decode_prefs(&st0);
         karaoke_status_bar_update_slow();
         karaoke_status_bar_update_fast(&st0);
         s_status_slow_deadline_ms = t0 + (uint64_t)KARAOKE_STATUS_SLOW_PERIOD_MS;

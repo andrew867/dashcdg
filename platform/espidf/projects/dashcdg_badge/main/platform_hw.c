@@ -29,6 +29,7 @@
 #endif
 #include "esp_check.h"
 #include "esp_err.h"
+#include "sdkconfig.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -981,6 +982,15 @@ static esp_err_t ledc_beep_audio_channel_attach_locked(void)
     return ledc_channel_config(&ch);
 }
 
+static TickType_t karaoke_dac_write_timeout_ticks(void)
+{
+#if CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS > 0
+    return pdMS_TO_TICKS(CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS);
+#else
+    return portMAX_DELAY;
+#endif
+}
+
 static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
 {
     size_t chunk = s_karaoke_dac_chunk_samples;
@@ -995,7 +1005,7 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, -1);
+        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks());
         s_karaoke_dac_fill = 0U;
     }
     (void)dac_continuous_disable(s_karaoke_dac_handle);
@@ -1207,7 +1217,8 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
         for (uint32_t r = 0U; r < emit; ++r) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = (uint8_t)u;
             if (s_karaoke_dac_fill >= chunk) {
-                (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, -1);
+                (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL,
+                                           karaoke_dac_write_timeout_ticks());
                 s_karaoke_dac_fill = 0U;
             }
         }
@@ -1253,7 +1264,8 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, -1);
+        (void)dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL,
+                                   karaoke_dac_write_timeout_ticks());
         s_karaoke_dac_fill = 0U;
     }
     xSemaphoreGive(s_mtx);
@@ -1637,7 +1649,10 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
                 atomic_store_explicit(&s_karaoke_last_mcast_rx_ms, 0ULL, memory_order_relaxed);
                 atomic_store_explicit(&s_karaoke_last_overlay_ms, 0ULL, memory_order_relaxed);
                 s_karaoke_mcast_act_throttle_ms = 0ULL;
-                /* Modem sleep adds multi-ms wake latency; multicast audio gaps read as choppy playout. */
+                /*
+                 * Modem sleep adds multi-ms wake latency; multicast audio gaps read as choppy playout.
+                 * Pairs with `badge_rx` `select` wake cadence (Kconfig `DASHCDG_BADGE_RX_SELECT_TIMEOUT_*`, T8).
+                 */
                 {
                     wifi_ps_type_t cur = WIFI_PS_NONE;
                     if (esp_wifi_get_ps(&cur) == ESP_OK) {

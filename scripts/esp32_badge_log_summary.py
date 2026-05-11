@@ -36,6 +36,8 @@ PATTERNS = {
     "sta_got_ip": re.compile(r"got ip:|STA_GOT_IP|esp_netif_handlers:\s+Got IP", re.IGNORECASE),
     # badge_rx.c audio-only UART line: a_rx=chunks a_out=frames_to_dac jb=occ/cap ...
     "audio_only_uart_stats": re.compile(r"badge_rx:\s+audio_only\s+a_rx=", re.IGNORECASE),
+    # Per-interval delta diagnostics (d_skip, d_udp, jb_pk, …) — compare logs before/after fixes
+    "audio_chop_uart_stats": re.compile(r"badge_rx:\s+audio_chop\s+", re.IGNORECASE),
 }
 
 
@@ -76,6 +78,7 @@ def print_table(rows: list[dict[str, int | str]]) -> None:
         "rx_task_exit",
         "sta_got_ip",
         "audio_only_uart_stats",
+        "audio_chop_uart_stats",
     ]
     widths = {c: len(c) for c in cols}
     for row in rows:
