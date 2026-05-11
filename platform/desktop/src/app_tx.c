@@ -384,24 +384,6 @@ static void dashcdg_tx_set_cdg_fec_level(unsigned level) {
     }
 }
 
-static void dashcdg_tx_apply_badge_robust_v4_profile(void) {
-    /*
-     * Badge robust preset:
-     * - Opus NB16k mode for lower payload/airtime pressure.
-     * - Stronger CDG repair parity.
-     * - Faster adaptive anchor cadence.
-     */
-    g_tx_state.transport_v4_enabled = 1;
-    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
-    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
-    g_tx_state.v4_opus_nb16k = 1U;
-    dashcdg_tx_set_cdg_fec_level(4U);
-    g_tx_state.v4_anchor_interval_auto = 1U;
-    if (g_tx_state.v4_anchor_interval_base_ms == 0U || g_tx_state.v4_anchor_interval_base_ms > 220U) {
-        g_tx_state.v4_anchor_interval_base_ms = 220U;
-    }
-}
-
 static void dashcdg_tx_update_adaptive_cdg_fec_locked(uint64_t now_ms);
 
 struct dashcdg_tx_audio_frame;
@@ -815,6 +797,25 @@ struct dashcdg_tx_state {
 #define DASHCDG_TX_SYNC_LEADER_TRIM_PPM_MAX 80
 
 static struct dashcdg_tx_state g_tx_state;
+
+static void dashcdg_tx_apply_badge_robust_v4_profile(void) {
+    /*
+     * Badge robust preset:
+     * - Opus NB16k mode for lower payload/airtime pressure.
+     * - Stronger CDG repair parity.
+     * - Faster adaptive anchor cadence.
+     */
+    g_tx_state.transport_v4_enabled = 1;
+    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+    g_tx_state.v4_opus_nb16k = 1U;
+    dashcdg_tx_set_cdg_fec_level(4U);
+    g_tx_state.v4_anchor_interval_auto = 1U;
+    if (g_tx_state.v4_anchor_interval_base_ms == 0U || g_tx_state.v4_anchor_interval_base_ms > 220U) {
+        g_tx_state.v4_anchor_interval_base_ms = 220U;
+    }
+}
+
 static struct dashcdg_tx_audio_domain g_tx_ad;
 static struct dashcdg_async_logger g_tx_logger;
 static int g_tx_logger_enabled;
