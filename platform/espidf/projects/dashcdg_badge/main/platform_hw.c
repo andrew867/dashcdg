@@ -209,7 +209,7 @@ static volatile bool s_karaoke_pcm_streaming;
  * hardware `freq_hz` to a safe floor and upsample in software when needed.
  * DMA chunk in samples: 160 @ ≤12 kHz nominal (20 ms @ 8 k), else 320.
  */
-#define KARAOKE_DAC_CHUNK_SAMPLES_MAX 512u
+#define KARAOKE_DAC_CHUNK_SAMPLES_MAX 1024u
 #define KARAOKE_DAC_MIN_SAFE_HZ 24000u
 /** Linear PCM → 8-bit DAC sample gain numerator (denominator 32768); higher = louder line-out. */
 #ifndef KARAOKE_DAC_PCM_GAIN_NUM
@@ -218,7 +218,7 @@ static volatile bool s_karaoke_pcm_streaming;
 static dac_continuous_handle_t s_karaoke_dac_handle;
 static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_CHUNK_SAMPLES_MAX];
 static size_t s_karaoke_dac_fill;
-static size_t s_karaoke_dac_chunk_samples = 320u;
+static size_t s_karaoke_dac_chunk_samples = 640u;
 static uint32_t s_karaoke_dac_open_nominal_hz;
 static uint32_t s_karaoke_dac_open_effective_hz;
 static int32_t s_karaoke_dac_trim_ppm;
@@ -293,7 +293,11 @@ static size_t karaoke_dac_pick_chunk_samples(uint32_t nominal_hz)
     if (nominal_hz <= 12000U) {
         return 160U;
     }
-    return 320U;
+    /*
+     * Larger chunks => fewer `dac_continuous_write` calls per second (fewer DMA descriptor waits).
+     * Must stay within `dac_continuous_config_t::buf_size` (<= 4092) and `KARAOKE_DAC_CHUNK_SAMPLES_MAX`.
+     */
+    return 640U;
 }
 
 /*
@@ -1015,13 +1019,22 @@ static esp_err_t ledc_beep_audio_channel_attach_locked(void)
     return ledc_channel_config(&ch);
 }
 
-static TickType_t karaoke_dac_write_timeout_ticks(void)
+/**
+ * `dac_continuous_write(..., timeout_ms)` expects milliseconds; negative => block forever (see ESP-IDF
+ * `dac_continuous.h`). Do not pass FreeRTOS ticks here — that becomes an accidental ~few-ms timeout.
+ */
+static int karaoke_dac_continuous_write_timeout_ms(void)
 {
 #if CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS > 0
-    return pdMS_TO_TICKS(CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS);
+    return (int)CONFIG_DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS;
 #else
-    return portMAX_DELAY;
+    return -1;
 #endif
+}
+
+static esp_err_t karaoke_dac_continuous_write_chunk_locked(uint8_t *buf, size_t len_bytes)
+{
+    return dac_continuous_write(s_karaoke_dac_handle, buf, len_bytes, NULL, karaoke_dac_continuous_write_timeout_ms());
 }
 
 static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
@@ -1040,14 +1053,13 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
-        chunk = 320U;
+        chunk = 640U;
     }
     while (s_karaoke_dac_fill > 0U) {
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        karaoke_dac_note_dma_write_result(
-                dac_continuous_write(s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks()));
+        karaoke_dac_note_dma_write_result(karaoke_dac_continuous_write_chunk_locked(s_karaoke_dac_chunk, chunk));
         s_karaoke_dac_fill = 0U;
     }
     (void)dac_continuous_disable(s_karaoke_dac_handle);
@@ -1105,17 +1117,29 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
     beep_seq_abort_locked();
     (void)ledc_stop(LEDC_MODE, LEDC_CH_AUDIO, 0);
     {
-        dac_continuous_config_t dcfg = {
-            .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
-            /* More descriptors reduce underrun clicks when Wi‑Fi/LVGL delays `dac_continuous_write`; costs ~a few× descriptor RAM. */
-            .desc_num = 8,
-            .buf_size = (uint32_t)chunk,
-            .freq_hz = eff_hz,
-            .offset = 0,
-            .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
-            .chan_mode = DAC_CHANNEL_MODE_SIMUL,
-        };
-        de = dac_continuous_new_channels(&dcfg, &s_karaoke_dac_handle);
+        static const uint8_t k_desc_candidates[] = {48U, 32U, 24U, 16U, 12U, 8U};
+
+        de = ESP_FAIL;
+        for (size_t di = 0U; di < sizeof(k_desc_candidates); di++) {
+            dac_continuous_config_t dcfg = {
+                .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
+                /* Deeper descriptor rings reduce transient timeouts under Wi‑Fi/LVGL load; fall back on NO_MEM. */
+                .desc_num = k_desc_candidates[di],
+                .buf_size = (uint32_t)chunk,
+                .freq_hz = eff_hz,
+                .offset = 0,
+                .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
+                .chan_mode = DAC_CHANNEL_MODE_SIMUL,
+            };
+            de = dac_continuous_new_channels(&dcfg, &s_karaoke_dac_handle);
+            if (de == ESP_OK) {
+                break;
+            }
+            s_karaoke_dac_handle = NULL;
+            if (de != ESP_ERR_NO_MEM) {
+                break;
+            }
+        }
         if (de != ESP_OK) {
             /*
              * Log at most ~once per cooldown window; RX calls begin() every decode attempt otherwise.
@@ -1242,7 +1266,7 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
-        chunk = 320U;
+        chunk = 640U;
     }
     amp_set_run(true);
     for (size_t i = 0U; i < samples; ++i) {
@@ -1267,8 +1291,8 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
         for (uint32_t r = 0U; r < emit; ++r) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = (uint8_t)u;
             if (s_karaoke_dac_fill >= chunk) {
-                karaoke_dac_note_dma_write_result(dac_continuous_write(
-                        s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks()));
+                karaoke_dac_note_dma_write_result(
+                        karaoke_dac_continuous_write_chunk_locked(s_karaoke_dac_chunk, chunk));
                 s_karaoke_dac_fill = 0U;
             }
         }
@@ -1312,13 +1336,12 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
         size_t chunk = s_karaoke_dac_chunk_samples;
 
         if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
-            chunk = 320U;
+            chunk = 640U;
         }
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
         }
-        karaoke_dac_note_dma_write_result(dac_continuous_write(
-                s_karaoke_dac_handle, s_karaoke_dac_chunk, chunk, NULL, karaoke_dac_write_timeout_ticks()));
+        karaoke_dac_note_dma_write_result(karaoke_dac_continuous_write_chunk_locked(s_karaoke_dac_chunk, chunk));
         s_karaoke_dac_fill = 0U;
     }
     xSemaphoreGive(s_karaoke_dac_io_mtx);

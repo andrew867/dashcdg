@@ -131,9 +131,11 @@ menu "DashCDG badge"
     config DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS
         int "Karaoke DAC: dac_continuous_write max block ms (0 = infinite)"
         range 0 200
-        default 12
+        default 0
         help
-            Finite timeout avoids unbounded block when DMA back-pressures. 0 restores legacy -1 wait.
+            Pass-through to ESP-IDF `dac_continuous_write(..., timeout_ms)` (negative only via 0 here).
+            Short finite values (e.g. 12 ms) cause `Get available descriptor timeout` under Wi-Fi/LVGL load.
+            Use 0 for infinite wait unless debugging stuck DAC.
 
     config DASHCDG_BADGE_RX_SELECT_TIMEOUT_MS
         int "RX select timeout when video decode is on (ms)"
