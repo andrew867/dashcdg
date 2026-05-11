@@ -500,6 +500,8 @@ static int badge_rx_ensure_opus_decoder(uint8_t frame_ms, const uint8_t *opus_pk
 static void badge_rx_free_audio_jitter(void);
 static void badge_rx_drain_v4_audio(uint64_t local_now_ms);
 static void badge_rx_drain_v4_audio_budget(uint64_t local_now_ms, uint32_t max_steps, uint32_t max_plc_frames);
+static int badge_rx_push_mono_resampled_to_karaoke_line(
+        uint64_t local_now_ms, const int16_t *pcm_native, size_t n_native, uint32_t native_hz);
 static int badge_rx_sta_has_ipv4(esp_netif_ip_info_t *out_ip);
 static void badge_rx_maybe_periodic_igmp_refresh(uint64_t now_ms);
 
@@ -2667,6 +2669,30 @@ static uint32_t badge_rx_karaoke_nominal_pcm_hz(void)
     return BADGE_RX_KARAOKE_LINE_HZ;
 }
 
+/** Opus decoder Fs (session); used to resample PCM to `BADGE_RX_KARAOKE_LINE_HZ` before DAC. */
+static uint32_t badge_rx_opus_pcm_native_hz(void)
+{
+    if (s_opus_decoder_ready != 0U && s_opus_decoder.sample_rate > 0) {
+        return (uint32_t)s_opus_decoder.sample_rate;
+    }
+    return s_announced_audio_sample_rate != 0U ? (uint32_t)s_announced_audio_sample_rate : BADGE_RX_KARAOKE_LINE_HZ;
+}
+
+/** Native Hz for `badge_rx_audio_push_degraded_mono` filler (matches decode path timeline). */
+static uint32_t badge_rx_degraded_pcm_native_hz(void)
+{
+    switch (badge_rx_effective_audio_codec_id()) {
+    case DASHCDG_V4_AUDIO_CODEC_OPUS:
+        return badge_rx_opus_pcm_native_hz();
+    case DASHCDG_V4_AUDIO_CODEC_AMR_WB:
+        return 16000U;
+    case DASHCDG_V4_AUDIO_CODEC_AMR_NB:
+        return 8000U;
+    default:
+        return BADGE_RX_KARAOKE_LINE_HZ;
+    }
+}
+
 static size_t badge_rx_degraded_mono_samples(void)
 {
     uint8_t c = badge_rx_effective_audio_codec_id();
@@ -2676,6 +2702,12 @@ static size_t badge_rx_degraded_mono_samples(void)
         return (size_t)s_opus_decoder.frame_size;
     }
     fms = s_announced_audio_frame_ms != 0U ? (uint32_t)s_announced_audio_frame_ms : 20U;
+    if (c == DASHCDG_V4_AUDIO_CODEC_AMR_WB) {
+        return (size_t)(((uint32_t)16000U * fms) / 1000U);
+    }
+    if (c == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        return (size_t)(((uint32_t)8000U * fms) / 1000U);
+    }
     return (size_t)(((uint32_t)BADGE_RX_KARAOKE_LINE_HZ * fms) / 1000U);
 }
 
@@ -2715,7 +2747,7 @@ static void badge_rx_audio_push_degraded_mono(uint64_t local_now_ms, size_t mono
     }
     s_stats.v4_audio_degraded_push++;
     badge_rx_audio_fill_degraded(buf, mono_samples);
-    (void)badge_rx_audio_push_mono_gated(local_now_ms, buf, mono_samples);
+    (void)badge_rx_push_mono_resampled_to_karaoke_line(local_now_ms, buf, mono_samples, badge_rx_degraded_pcm_native_hz());
 }
 
 /**
@@ -3013,10 +3045,12 @@ static void badge_rx_drain_v4_audio_budget(uint64_t local_now_ms, uint32_t max_s
                         }
                         if (s_opus_decoder.channels == 2) {
                             badge_rx_opus_stereo_interleaved_to_mono_inplace(s_amr_pcm48_scratch, (size_t)plc_ret);
-                            (void)badge_rx_audio_push_mono_gated(local_now_ms, s_amr_pcm48_scratch, (size_t)plc_ret);
+                            (void)badge_rx_push_mono_resampled_to_karaoke_line(
+                                    local_now_ms, s_amr_pcm48_scratch, (size_t)plc_ret, badge_rx_opus_pcm_native_hz());
                             badge_rx_audio_last_mono_store(s_amr_pcm48_scratch, (size_t)plc_ret);
                         } else {
-                            (void)badge_rx_audio_push_mono_gated(local_now_ms, s_amr_pcm48_scratch, (size_t)plc_ret);
+                            (void)badge_rx_push_mono_resampled_to_karaoke_line(
+                                    local_now_ms, s_amr_pcm48_scratch, (size_t)plc_ret, badge_rx_opus_pcm_native_hz());
                             badge_rx_audio_last_mono_store(s_amr_pcm48_scratch, (size_t)plc_ret);
                         }
                         if (plc_frames_left > 0U) {
@@ -3169,10 +3203,12 @@ static void badge_rx_drain_v4_audio_budget(uint64_t local_now_ms, uint32_t max_s
                 }
                 if (s_opus_decoder.channels == 2) {
                     badge_rx_opus_stereo_interleaved_to_mono_inplace(s_amr_pcm48_scratch, (size_t)dec_ret);
-                    (void)badge_rx_audio_push_mono_gated(local_now_ms, s_amr_pcm48_scratch, (size_t)dec_ret);
+                    (void)badge_rx_push_mono_resampled_to_karaoke_line(
+                            local_now_ms, s_amr_pcm48_scratch, (size_t)dec_ret, badge_rx_opus_pcm_native_hz());
                     badge_rx_audio_last_mono_store(s_amr_pcm48_scratch, (size_t)dec_ret);
                 } else {
-                    (void)badge_rx_audio_push_mono_gated(local_now_ms, s_amr_pcm48_scratch, (size_t)dec_ret);
+                    (void)badge_rx_push_mono_resampled_to_karaoke_line(
+                            local_now_ms, s_amr_pcm48_scratch, (size_t)dec_ret, badge_rx_opus_pcm_native_hz());
                     badge_rx_audio_last_mono_store(s_amr_pcm48_scratch, (size_t)dec_ret);
                 }
                 dashcdg_audio_jitter_note_applied(s_audio_jb, frame, frame_ms);
