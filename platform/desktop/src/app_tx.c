@@ -161,7 +161,8 @@
 /** v4_rx_stats: PTP never blocks on main state; apply in a batch on the main TX thread. */
 #define DASHCDG_TX_PTP_V4_RX_STATS_BATCH 32U
 #define DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_THRESHOLD 4U
-#define DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_COOLDOWN_MS 5000U
+#define DASHCDG_TX_V4_NACK_FULL_GROUP_REBROADCAST_COOLDOWN_MS 20000U
+#define DASHCDG_TX_V4_NACK_MAX_REPAIRS_PER_EVENT 3U
 /* Resume runway: small rewind + short hold so peers refill and lock before motion resumes. */
 #define DASHCDG_TX_RESUME_REWIND_MS 180U
 #define DASHCDG_TX_RESUME_RUNWAY_MS 140U
@@ -171,6 +172,8 @@
 #define DASHCDG_TX_STATUS_THREAD_BUDGET_MS 250U
 #define DASHCDG_TX_AUDIO_PRODUCER_BUDGET_MS 80U
 #define DASHCDG_TX_PLAYLIST_SCAN_BUDGET_MS 1200U
+#define DASHCDG_TX_PLAYLIST_EMPTY_RESCAN_MS 3000U
+#define DASHCDG_TX_PLAYLIST_EMPTY_LOG_MS 10000U
 #define DASHCDG_TX_PTP_RX_FLUSH_BUDGET_MS 8U
 #define DASHCDG_TX_STATUS_BAR_INTERVAL_MS 125U
 /** Full-screen ANSI dashboard or ncurses TUI refresh — slower than the thin status strip to reduce stdout contention. */
@@ -381,6 +384,24 @@ static void dashcdg_tx_set_cdg_fec_level(unsigned level) {
     }
 }
 
+static void dashcdg_tx_apply_badge_robust_v4_profile(void) {
+    /*
+     * Badge robust preset:
+     * - Opus NB16k mode for lower payload/airtime pressure.
+     * - Stronger CDG repair parity.
+     * - Faster adaptive anchor cadence.
+     */
+    g_tx_state.transport_v4_enabled = 1;
+    g_tx_state.v4_audio_profile_id = DASHCDG_V4_AUDIO_PROFILE_QUALITY;
+    g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_OPUS;
+    g_tx_state.v4_opus_nb16k = 1U;
+    dashcdg_tx_set_cdg_fec_level(4U);
+    g_tx_state.v4_anchor_interval_auto = 1U;
+    if (g_tx_state.v4_anchor_interval_base_ms == 0U || g_tx_state.v4_anchor_interval_base_ms > 220U) {
+        g_tx_state.v4_anchor_interval_base_ms = 220U;
+    }
+}
+
 static void dashcdg_tx_update_adaptive_cdg_fec_locked(uint64_t now_ms);
 
 struct dashcdg_tx_audio_frame;
@@ -416,6 +437,7 @@ static int dashcdg_tx_send_v4_video_delta_locked(
 static void dashcdg_tx_send_audio_group_fec_locked(uint64_t now_ms, uint32_t group_id);
 static void dashcdg_tx_send_cdg_group_fec_locked(uint64_t now_ms, uint32_t group_id);
 static const struct dashcdg_tx_track *dashcdg_tx_current_track(void);
+static int dashcdg_tx_load_track_resilient_locked(size_t index, int apply_warmup, int record_history);
 static int dashcdg_tx_prepare_v4_video_anchor(uint64_t now_ms);
 static struct dashcdg_tx_rx_reporter *dashcdg_tx_find_or_alloc_rx_reporter_locked(
         uint32_t receiver_instance_id,
@@ -641,6 +663,8 @@ struct dashcdg_tx_state {
     size_t playlist_scan_total_tracks;
     size_t playlist_scan_seed_start_index;
     size_t playlist_scan_seed_count;
+    uint64_t playlist_empty_rescan_last_ms;
+    uint64_t playlist_empty_log_last_ms;
     uint64_t audio_pipeline_generation;
     uint64_t audio_queue_overflows;
     uint64_t audio_source_open_failures;
@@ -1532,12 +1556,14 @@ static void dashcdg_tx_render_pause_state_locked(uint64_t now_ms) {
     static const char *title = "PAUSED";
     uint64_t elapsed_ms;
     int phase;
+    int scroll_phase;
     int title_x;
     int title_y;
 
     dashcdg_cdg_state_init(&g_tx_state.pause_state);
     elapsed_ms = now_ms > g_tx_state.playback_anchor_local_ms ? now_ms - g_tx_state.playback_anchor_local_ms : 0U;
     phase = (int) ((elapsed_ms / 250U) % 8U);
+    scroll_phase = (int) ((elapsed_ms / 120U) % DASHCDG_VISIBLE_WIDTH);
 
     g_tx_state.pause_state.color_table[0] = 0x000000;
     g_tx_state.pause_state.color_table[1] = 0x201040;
@@ -1562,21 +1588,39 @@ static void dashcdg_tx_render_pause_state_locked(uint64_t now_ms) {
 
     for (int stripe = 0; stripe < 6; ++stripe) {
         uint8_t color = (uint8_t) ((stripe + phase) % 3 == 0 ? 3 : ((stripe + phase) % 3 == 1 ? 4 : 6));
+        int y_top = DASHCDG_VISIBLE_Y + (stripe * 12);
+        int y_bottom = DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12);
         dashcdg_tx_pause_fill_rect(
                 &g_tx_state.pause_state,
                 DASHCDG_VISIBLE_X,
-                DASHCDG_VISIBLE_Y + (stripe * 12),
+                y_top,
                 DASHCDG_VISIBLE_WIDTH,
                 6,
                 color
         );
         dashcdg_tx_pause_fill_rect(
                 &g_tx_state.pause_state,
+                DASHCDG_VISIBLE_X + ((scroll_phase + stripe * 23) % DASHCDG_VISIBLE_WIDTH),
+                y_top,
+                46,
+                6,
+                (uint8_t) ((color == 3U) ? 5U : 7U)
+        );
+        dashcdg_tx_pause_fill_rect(
+                &g_tx_state.pause_state,
                 DASHCDG_VISIBLE_X,
-                DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12),
+                y_bottom,
                 DASHCDG_VISIBLE_WIDTH,
                 6,
                 color
+        );
+        dashcdg_tx_pause_fill_rect(
+                &g_tx_state.pause_state,
+                DASHCDG_VISIBLE_X + ((DASHCDG_VISIBLE_WIDTH - scroll_phase + stripe * 17) % DASHCDG_VISIBLE_WIDTH),
+                y_bottom,
+                54,
+                6,
+                (uint8_t) ((color == 4U) ? 5U : 7U)
         );
     }
 
@@ -1609,6 +1653,22 @@ static void dashcdg_tx_render_pause_state_locked(uint64_t now_ms) {
             18,
             16,
             5
+    );
+    dashcdg_tx_pause_fill_rect(
+            &g_tx_state.pause_state,
+            DASHCDG_VISIBLE_X + ((scroll_phase * 2) % DASHCDG_VISIBLE_WIDTH),
+            DASHCDG_VISIBLE_Y + 176,
+            80,
+            4,
+            6
+    );
+    dashcdg_tx_pause_fill_rect(
+            &g_tx_state.pause_state,
+            DASHCDG_VISIBLE_X + ((DASHCDG_VISIBLE_WIDTH - ((scroll_phase * 3) % DASHCDG_VISIBLE_WIDTH))),
+            DASHCDG_VISIBLE_Y + 182,
+            92,
+            4,
+            3
     );
     g_tx_state.last_pause_state_update_ms = now_ms;
 }
@@ -2191,6 +2251,65 @@ static int dashcdg_tx_history_push_locked(size_t track_index) {
     return 1;
 }
 
+static void dashcdg_tx_history_remove_track_index_locked(size_t removed_index) {
+    size_t write_index = 0U;
+
+    if (g_tx_state.track_history == NULL || g_tx_state.track_history_count == 0U) {
+        return;
+    }
+    for (size_t i = 0U; i < g_tx_state.track_history_count; ++i) {
+        size_t idx = g_tx_state.track_history[i];
+        if (idx == removed_index) {
+            continue;
+        }
+        if (idx > removed_index) {
+            idx--;
+        }
+        g_tx_state.track_history[write_index++] = idx;
+    }
+    g_tx_state.track_history_count = write_index;
+    if (g_tx_state.track_history_count == 0U) {
+        g_tx_state.track_history_position = 0U;
+    } else if (g_tx_state.track_history_position >= g_tx_state.track_history_count) {
+        g_tx_state.track_history_position = g_tx_state.track_history_count - 1U;
+    }
+}
+
+static int dashcdg_tx_playlist_remove_track_locked(size_t index, const char *reason) {
+    struct dashcdg_tx_track removed;
+
+    if (index >= g_tx_state.playlist.count) {
+        return 0;
+    }
+    removed = g_tx_state.playlist.tracks[index];
+    if (index + 1U < g_tx_state.playlist.count) {
+        memmove(
+                &g_tx_state.playlist.tracks[index],
+                &g_tx_state.playlist.tracks[index + 1U],
+                (g_tx_state.playlist.count - index - 1U) * sizeof(g_tx_state.playlist.tracks[0])
+        );
+    }
+    g_tx_state.playlist.count--;
+    if (g_tx_state.playlist.count == 0U) {
+        free(g_tx_state.playlist.tracks);
+        g_tx_state.playlist.tracks = NULL;
+        g_tx_state.playlist.current_index = 0U;
+    } else if (g_tx_state.playlist.current_index >= g_tx_state.playlist.count) {
+        g_tx_state.playlist.current_index = g_tx_state.playlist.count - 1U;
+    } else if (index <= g_tx_state.playlist.current_index && g_tx_state.playlist.current_index > 0U) {
+        g_tx_state.playlist.current_index--;
+    }
+    dashcdg_tx_history_remove_track_index_locked(index);
+    TX_ERR(
+            "[tx] removed unavailable track%s: %s (playlist now %zu)\n",
+            reason != NULL ? reason : "",
+            removed.title != NULL ? removed.title : "(untitled)",
+            g_tx_state.playlist.count
+    );
+    dashcdg_tx_free_track(&removed);
+    return 1;
+}
+
 static int dashcdg_tx_playlist_seed_from_directory(
         struct dashcdg_tx_playlist *playlist,
         const char *directory,
@@ -2441,6 +2560,54 @@ static void *dashcdg_tx_playlist_scan_thread_main(void *unused) {
 
     free(directory);
     return NULL;
+}
+
+static int dashcdg_tx_try_reseed_empty_playlist_locked(uint64_t now_ms) {
+    size_t total_tracks;
+    size_t start_index;
+    size_t seed_count;
+
+    if (g_tx_state.playlist.count > 0U || g_tx_state.playlist_scan_directory == NULL) {
+        return 0;
+    }
+    if (g_tx_state.playlist_empty_rescan_last_ms != 0U &&
+            now_ms > g_tx_state.playlist_empty_rescan_last_ms &&
+            (now_ms - g_tx_state.playlist_empty_rescan_last_ms) < DASHCDG_TX_PLAYLIST_EMPTY_RESCAN_MS) {
+        return 0;
+    }
+    g_tx_state.playlist_empty_rescan_last_ms = now_ms;
+    total_tracks = dashcdg_tx_count_directory_tracks(g_tx_state.playlist_scan_directory);
+    g_tx_state.playlist_scan_total_tracks = total_tracks;
+    if (total_tracks == 0U) {
+        if (g_tx_state.playlist_empty_log_last_ms == 0U ||
+                now_ms - g_tx_state.playlist_empty_log_last_ms >= DASHCDG_TX_PLAYLIST_EMPTY_LOG_MS) {
+            TX_OUT("[tx] playlist empty: waiting for tracks in %s\n", g_tx_state.playlist_scan_directory);
+            g_tx_state.playlist_empty_log_last_ms = now_ms;
+        }
+        return 0;
+    }
+    seed_count = total_tracks < DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT ?
+            total_tracks : DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT;
+    start_index = total_tracks <= seed_count ? 0U : (size_t) (rand() % (int) total_tracks);
+    if (!dashcdg_tx_playlist_seed_from_directory(
+                &g_tx_state.playlist,
+                g_tx_state.playlist_scan_directory,
+                total_tracks,
+                start_index,
+                DASHCDG_TX_STARTUP_SEED_TRACK_LIMIT
+        )) {
+        return 0;
+    }
+    dashcdg_tx_playlist_shuffle(&g_tx_state.playlist);
+    g_tx_state.playlist_scan_seed_start_index = start_index;
+    g_tx_state.playlist_scan_seed_count = seed_count;
+    TX_OUT(
+            "[tx] playlist reseeded: %zu/%zu tracks loaded from %s\n",
+            g_tx_state.playlist.count,
+            total_tracks,
+            g_tx_state.playlist_scan_directory
+    );
+    return dashcdg_tx_load_track_resilient_locked(0U, 1, 1);
 }
 
 static uint64_t dashcdg_tx_get_audio_duration_ms(struct dashcdg_tx_track *track) {
@@ -2951,6 +3118,9 @@ static void dashcdg_tx_cli_print_help(const char *argv0) {
     TX_OUT(
             "Repair split/FEC: --tx-repair-port <port> (default 24686) sends CDG repair on a separate port; "
             "--tx-cdg-fec-level <1..8> controls repair symbol density.\n"
+    );
+    TX_OUT(
+            "Badge robust preset: --v4-badge-robust enables v4 + Opus NB16k + stronger CDG FEC + anchor auto tuning.\n"
     );
     TX_OUT(
             "v4 CDG RLE anchors: --v4-video-anchor-ms <50..3000> sets periodic snapshot cadence; "
@@ -4552,17 +4722,22 @@ static void dashcdg_tx_handle_v4_repair_nack_locked(
     full_group_mask = (group_size >= 16U) ? 0xFFFFU : (uint16_t)((1U << group_size) - 1U);
     full_group_missing = ((nack->missing_member_mask & full_group_mask) == full_group_mask) ? 1 : 0;
 
-    for (uint8_t i = 0U; i < DASHCDG_CDG_GROUP_SIZE; ++i) {
-        size_t batch_index;
-        if ((nack->missing_member_mask & (uint16_t) (1U << i)) == 0U) {
-            continue;
-        }
-        batch_index = (size_t) nack->group_id * (size_t) DASHCDG_CDG_GROUP_SIZE + (size_t) i;
-        if (batch_index >= g_tx_state.cdg_batch_count) {
-            continue;
-        }
-        if (dashcdg_tx_send_v4_video_delta_locked(now_ms, &g_tx_state.cdg_batches[batch_index], packet, sizeof(packet))) {
-            resend_count++;
+    if (!full_group_missing) {
+        for (uint8_t i = 0U; i < DASHCDG_CDG_GROUP_SIZE; ++i) {
+            size_t batch_index;
+            if ((nack->missing_member_mask & (uint16_t) (1U << i)) == 0U) {
+                continue;
+            }
+            batch_index = (size_t) nack->group_id * (size_t) DASHCDG_CDG_GROUP_SIZE + (size_t) i;
+            if (batch_index >= g_tx_state.cdg_batch_count) {
+                continue;
+            }
+            if (dashcdg_tx_send_v4_video_delta_locked(now_ms, &g_tx_state.cdg_batches[batch_index], packet, sizeof(packet))) {
+                resend_count++;
+            }
+            if (resend_count >= DASHCDG_TX_V4_NACK_MAX_REPAIRS_PER_EVENT) {
+                break;
+            }
         }
     }
     if (resend_count > 0U) {
@@ -5854,16 +6029,41 @@ static int dashcdg_tx_load_track_locked(size_t index, int apply_warmup) {
     return 1;
 }
 
-static int dashcdg_tx_load_track_with_history_locked(size_t index, int apply_warmup, int record_history) {
-    if (!dashcdg_tx_load_track_locked(index, apply_warmup)) {
+static int dashcdg_tx_load_track_resilient_locked(size_t index, int apply_warmup, int record_history) {
+    size_t attempts;
+    size_t next_index;
+
+    if (g_tx_state.playlist.count == 0U) {
         return 0;
     }
-
-    if (record_history && !dashcdg_tx_history_push_locked(index)) {
-        TX_ERR( "failed to record TX track history\n");
+    if (index >= g_tx_state.playlist.count) {
+        index %= g_tx_state.playlist.count;
     }
+    attempts = g_tx_state.playlist.count;
+    next_index = index;
+    while (attempts-- > 0U && g_tx_state.playlist.count > 0U) {
+        if (next_index >= g_tx_state.playlist.count) {
+            next_index %= g_tx_state.playlist.count;
+        }
+        if (dashcdg_tx_load_track_locked(next_index, apply_warmup)) {
+            if (record_history && !dashcdg_tx_history_push_locked(next_index)) {
+                TX_ERR("failed to record TX track history\n");
+            }
+            return 1;
+        }
+        (void) dashcdg_tx_playlist_remove_track_locked(next_index, " (load failed)");
+        if (g_tx_state.playlist.count == 0U) {
+            return 0;
+        }
+        if (next_index >= g_tx_state.playlist.count) {
+            next_index = 0U;
+        }
+    }
+    return 0;
+}
 
-    return 1;
+static int dashcdg_tx_load_track_with_history_locked(size_t index, int apply_warmup, int record_history) {
+    return dashcdg_tx_load_track_resilient_locked(index, apply_warmup, record_history);
 }
 
 static int dashcdg_tx_load_relative_track_locked(int delta) {
@@ -5934,7 +6134,7 @@ static DASHCDG_TX_MAYBE_UNUSED int dashcdg_tx_load_history_delta_locked(int delt
         return 0;
     }
 
-    if (!dashcdg_tx_load_track_locked(g_tx_state.track_history[target_position], 1)) {
+    if (!dashcdg_tx_load_track_resilient_locked(g_tx_state.track_history[target_position], 1, 0)) {
         return 0;
     }
     g_tx_state.track_history_position = target_position;
@@ -9200,6 +9400,11 @@ static void *dashcdg_tx_thread_main(void *unused) {
             break;
         }
 
+        if (g_tx_state.playlist.count == 0U) {
+            (void) dashcdg_tx_try_reseed_empty_playlist_locked(now_ms);
+            now_ms = dashcdg_clock_now_ms();
+        }
+
         if (!g_tx_state.paused && g_tx_state.playlist.count > 0U &&
                 dashcdg_tx_current_playback_ms_locked(now_ms) >= g_tx_state.duration_ms) {
             if (g_tx_state.playlist.count > 1U) {
@@ -10270,6 +10475,10 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
             g_tx_state.v4_audio_codec_id = DASHCDG_V4_AUDIO_CODEC_QCELP8K;
             continue;
         }
+        if (strcmp(argv[i], "--v4-badge-robust") == 0 || strcmp(argv[i], "--badge-robust-v4") == 0) {
+            dashcdg_tx_apply_badge_robust_v4_profile();
+            continue;
+        }
         if (strcmp(argv[i], "--tx-preview-delay-ms") == 0) {
             if (i + 1 >= argc) {
                 TX_ERR( "%s: --tx-preview-delay-ms requires auto|<milliseconds>\n", argv[0]);
@@ -10535,6 +10744,11 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
     if (rx_stats_port <= 0) {
         rx_stats_port = DASHCDG_DEFAULT_NETWORK_STATS_PORT;
     }
+    if (g_tx_state.v4_anchor_interval_auto != 0U) {
+        pthread_mutex_lock(&g_tx_state.mutex);
+        dashcdg_tx_recompute_v4_anchor_interval_locked(dashcdg_clock_now_ms());
+        pthread_mutex_unlock(&g_tx_state.mutex);
+    }
     if (!dashcdg_tx_metrics_jsonl_open(metrics_jsonl_path)) {
         dashcdg_tx_cleanup();
         return 1;
@@ -10577,6 +10791,8 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
         g_tx_state.playlist_scan_total_tracks = startup_track_total;
         g_tx_state.playlist_scan_seed_start_index = startup_seed_start;
         g_tx_state.playlist_scan_seed_count = startup_seed_count;
+        g_tx_state.playlist_empty_rescan_last_ms = 0U;
+        g_tx_state.playlist_empty_log_last_ms = 0U;
         g_tx_state.playlist_scan_running =
                 g_tx_state.playlist_scan_directory != NULL && g_tx_state.playlist.count < g_tx_state.playlist_scan_total_tracks;
     } else if (!dashcdg_tx_playlist_add_auto_paired_track(&g_tx_state.playlist, source_path)) {
@@ -10780,9 +10996,12 @@ int dashcdg_desktop_tx_main(int argc, char **argv) {
      */
     pthread_mutex_lock(&g_tx_state.mutex);
     if (!dashcdg_tx_load_track_with_history_locked(initial_track_index, 1, 1)) {
-        pthread_mutex_unlock(&g_tx_state.mutex);
-        dashcdg_tx_cleanup();
-        return 1;
+        if (g_tx_state.playlist_scan_directory == NULL) {
+            pthread_mutex_unlock(&g_tx_state.mutex);
+            dashcdg_tx_cleanup();
+            return 1;
+        }
+        TX_OUT("[tx] startup track load failed; entering empty-playlist watch mode for %s\n", g_tx_state.playlist_scan_directory);
     }
     pthread_mutex_unlock(&g_tx_state.mutex);
 
