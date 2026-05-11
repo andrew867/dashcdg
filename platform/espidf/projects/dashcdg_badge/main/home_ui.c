@@ -19,6 +19,7 @@
 #include "nav.h"
 #include "platform_hw.h"
 #include "vbat_sense.h"
+#include "wifi_touch_ui.h"
 
 /* TODO(remove): on-screen XPT2046 read snapshot (LVGL-mapped x/y + z + PENIRQ). Set 0 before ship. */
 #define DASHCDG_HOME_TOUCH_DEBUG_OVERLAY 0
@@ -896,6 +897,7 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
     s_status_timer = lv_timer_create(home_status_timer_cb, 3000, NULL);
     lvgl_port_unlock();
 
+    dashcdg_wifi_debug_maybe_autolaunch_karaoke(disp);
     dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_HOME);
     return ESP_OK;
 }

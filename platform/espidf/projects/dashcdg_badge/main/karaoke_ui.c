@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_wifi.h"
@@ -812,6 +813,11 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
 
     lv_refr_now(disp);
     lvgl_port_unlock();
+    ESP_LOGD(
+            TAG,
+            "heap after screen clear (before RX): internal_free=%u internal_largest=%u",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     /*
      * Multicast + IGMP must run with the STA out of modem PS (home uses WIFI_PS_MAX_MODEM). Screen
      * used to switch to KARAOKE only after the LVGL tree was built, so the first join/bind raced PS —

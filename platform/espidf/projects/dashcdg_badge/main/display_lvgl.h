@@ -26,7 +26,11 @@ esp_lcd_panel_handle_t dashcdg_display_lcd_panel(void);
  */
 esp_err_t dashcdg_display_blit_rgb565_lv_area(int x0, int y0, int w, int h, uint16_t *pixels);
 
-/** Remove all children from the display top layer (orphans here receive pointer hits before the active screen). */
+/**
+ * Remove all children from LVGL **top** and **system** layers on this display.
+ * Widgets left only on those layers survive `lv_obj_clean(active_screen)` — e.g. stray overlays — and
+ * keep lv_malloc heap tied up when switching home → karaoke. Safe when replacing the whole UI tree.
+ */
 void dashcdg_display_clear_top_layer(lv_disp_t *disp);
 
 /** Linear ADC bounds for X/Y (same as TFT_eSPI calData[0..3]); runtime, loaded from NVS when present. */

@@ -1,6 +1,7 @@
 /*
- * Audio lab: square-wave demo tune ("Mary Had a Little Lamb") plus soft bass + echo.
- * Samples go to `dashcdg_platform_hw_lab_pcm_push_u8` (ESP32: DAC DMA; else LEDC PWM PCM).
+ * Audio lab: sine-wave demo tune ("Mary Had a Little Lamb") plus soft bass + echo.
+ * ESP32: mono s16 → `dashcdg_platform_hw_karaoke_dac_push_mono_s16` (same `dac_continuous` path as CDG RX).
+ * Other targets: PWM duty via `dashcdg_platform_hw_lab_pcm_push_u8`.
  */
 #include "badge_lab_ym.h"
 
@@ -93,6 +94,33 @@ static const uint8_t k_drum[PATTERN_LEN] = {
 static uint8_t s_kick_env;
 static uint8_t s_snare_env;
 
+/** Full-period sin LUT: round(sin(2π·i/256)·32767). */
+static const int16_t k_sin_q15[256] = {
+    0, 804, 1608, 2410, 3212, 4011, 4808, 5602, 6393, 7179, 7962, 8739, 9512, 10278, 11039, 11793,
+    12539, 13279, 14010, 14732, 15446, 16151, 16846, 17530, 18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594,
+    23170, 23731, 24279, 24811, 25329, 25832, 26319, 26790, 27245, 27683, 28105, 28510, 28898, 29268, 29621, 29956,
+    30273, 30571, 30852, 31113, 31356, 31580, 31785, 31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757,
+    32767, 32757, 32728, 32678, 32609, 32521, 32412, 32285, 32137, 31971, 31785, 31580, 31356, 31113, 30852, 30571,
+    30273, 29956, 29621, 29268, 28898, 28510, 28105, 27683, 27245, 26790, 26319, 25832, 25329, 24811, 24279, 23731,
+    23170, 22594, 22005, 21403, 20787, 20159, 19519, 18868, 18204, 17530, 16846, 16151, 15446, 14732, 14010, 13279,
+    12539, 11793, 11039, 10278, 9512, 8739, 7962, 7179, 6393, 5602, 4808, 4011, 3212, 2410, 1608, 804,
+    0, -804, -1608, -2410, -3212, -4011, -4808, -5602, -6393, -7179, -7962, -8739, -9512, -10278, -11039, -11793,
+    -12539, -13279, -14010, -14732, -15446, -16151, -16846, -17530, -18204, -18868, -19519, -20159, -20787, -21403, -22005, -22594,
+    -23170, -23731, -24279, -24811, -25329, -25832, -26319, -26790, -27245, -27683, -28105, -28510, -28898, -29268, -29621, -29956,
+    -30273, -30571, -30852, -31113, -31356, -31580, -31785, -31971, -32137, -32285, -32412, -32521, -32609, -32678, -32728, -32757,
+    -32767, -32757, -32728, -32678, -32609, -32521, -32412, -32285, -32137, -31971, -31785, -31580, -31356, -31113, -30852, -30571,
+    -30273, -29956, -29621, -29268, -28898, -28510, -28105, -27683, -27245, -26790, -26319, -25832, -25329, -24811, -24279, -23731,
+    -23170, -22594, -22005, -21403, -20787, -20159, -19519, -18868, -18204, -17530, -16846, -16151, -15446, -14732, -14010, -13279,
+    -12539, -11793, -11039, -10278, -9512, -8739, -7962, -7179, -6393, -5602, -4808, -4011, -3212, -2410, -1608, -804,
+};
+
+static int32_t ym_sin_from_phase(uint32_t phase)
+{
+    unsigned i = (unsigned)(phase >> 24);
+    int32_t s = (int32_t)k_sin_q15[i];
+    return (s * 2730) >> 15;
+}
+
 static uint32_t hz_to_inc(uint16_t hz)
 {
     if (hz == 0U) {
@@ -147,11 +175,11 @@ static int32_t ym_tick(void)
             continue;
         }
         s_phase[i] += s_inc[i];
-        int32_t sq = (s_phase[i] & 0x80000000U) ? 2730 : -2730;
+        int32_t sv = ym_sin_from_phase(s_phase[i]);
         if (i == 2) {
-            sq = (sq * 13) / 32; /* echo channel quieter */
+            sv = (sv * 13) / 32; /* echo channel quieter */
         }
-        acc += sq;
+        acc += sv;
     }
     acc /= 3;
 
@@ -205,6 +233,46 @@ static uint8_t lab_sample_to_duty(int32_t sample)
     }
     return (uint8_t)d;
 }
+
+#if CONFIG_IDF_TARGET_ESP32
+/** Maps mixer sample to s16 for `karaoke_dac_push` (~matches legacy duty swing vs `KARAOKE_DAC_PCM_GAIN_NUM`). */
+static int16_t lab_acc_to_pcm16(int32_t sample)
+{
+    uint8_t pct = dashcdg_platform_hw_get_beep_volume_pct();
+    float p = (float)pct;
+    if (p < 5.f) {
+        p = 5.f;
+    }
+    if (p > 100.f) {
+        p = 100.f;
+    }
+    float t = (p - 5.f) / 95.f;
+    float g = powf(t, 3.4f);
+    uint32_t peak = (uint32_t)(g * 255.f + 0.5f);
+    if (peak < 1U && pct >= 6U) {
+        peak = 1U;
+    }
+    if (peak > 255U) {
+        peak = 255U;
+    }
+
+    int32_t x = (sample * (int32_t)peak) / 4096;
+    if (x > LAB_SAMPLE_PEAK_CLAMP) {
+        x = LAB_SAMPLE_PEAK_CLAMP;
+    }
+    if (x < -LAB_SAMPLE_PEAK_CLAMP) {
+        x = -LAB_SAMPLE_PEAK_CLAMP;
+    }
+    int32_t s = (x * 18842) / (int32_t)LAB_SAMPLE_PEAK_CLAMP;
+    if (s > 32767) {
+        s = 32767;
+    }
+    if (s < -32768) {
+        s = -32768;
+    }
+    return (int16_t)s;
+}
+#endif
 
 static void lab_task(void *arg)
 {
@@ -280,8 +348,13 @@ static void lab_task(void *arg)
             pending -= chunk;
             while (chunk-- > 0U) {
                 int32_t s = ym_tick();
+#if CONFIG_IDF_TARGET_ESP32
+                int16_t pcm = lab_acc_to_pcm16(s);
+                dashcdg_platform_hw_karaoke_dac_push_mono_s16(&pcm, 1U);
+#else
                 uint8_t d = lab_sample_to_duty(s);
                 dashcdg_platform_hw_lab_pcm_push_u8(d);
+#endif
             }
             if (pending > 0U) {
                 taskYIELD();

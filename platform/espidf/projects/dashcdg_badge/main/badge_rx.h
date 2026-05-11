@@ -26,7 +26,7 @@ typedef struct {
     uint32_t v4_audio_chunk_rx;
     uint32_t v4_audio_frames_out;
     uint32_t v4_audio_decode_fail;
-    /** Calls to degraded filler (LFSR): decode fail, PLC fail, or scratch/init failures — sounds like fuzz. */
+    /** Calls to degraded filler (hold-last + optional noise): decode/PLC/scratch failures — not “always on”. */
     uint32_t v4_audio_degraded_push;
     /** Audio jitter drain entered SKIP (holes → PLC/degraded); not the same as `v4_audio_decode_fail`. */
     uint32_t v4_audio_jitter_skip_events;
@@ -80,6 +80,10 @@ typedef struct {
     uint16_t cdg_blit_max_y;
     /** Last insert after evict still failed (should be rare). */
     uint32_t cdg_delta_insert_fail;
+    /** Insert dropped duplicate batch (same packet_start_index). */
+    uint32_t cdg_delta_insert_dup;
+    /** Insert dropped stale batch entirely before apply cursor (normal under repair/STA dup reorder). */
+    uint32_t cdg_delta_insert_stale;
     /** v4 repair-window packets observed for CDG stream (metrics-only ingest, no apply yet). */
     uint32_t v4_video_repair_rx_packets;
     uint32_t v4_video_repair_rx_forward;
@@ -118,6 +122,17 @@ typedef struct {
     uint8_t v4_control_uplink_ok;
     /** Unicast-duplicate RX: bit0=media bit1=stats bit2=repair (STA bind ok). */
     uint8_t ucast_rx_mask;
+    /** Media datagrams seen on multicast and optional STA unicast-dup media sockets. */
+    uint32_t mcast_media_datagrams;
+    uint32_t ucast_media_datagrams;
+    /** Exact duplicate wire-sequence observations on the media path (likely mcast+ucast double-delivery). */
+    uint32_t media_sequence_duplicate_hits;
+    /** v4_rx_stats sends skipped by startup/recovery/pressure throttling policy. */
+    uint32_t v4_rx_stats_suppressed;
+    /** Audio chunks arrived while no DAC push succeeded for >500 ms (warning event count). */
+    uint32_t audio_rx_no_dac_warn;
+    /** Media path policy: 0=both, 1=mcast_prefer, 2=ucast_prefer, 3=auto. */
+    uint8_t media_path_policy;
 } dashcdg_badge_rx_stats_t;
 
 #define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U
@@ -126,6 +141,8 @@ typedef struct {
 
 void dashcdg_badge_rx_start(void);
 void dashcdg_badge_rx_stop(void);
+/** True while the multicast/UDP RX task is running (karaoke / lab RX). Used to suppress auto panel sleep. */
+bool dashcdg_badge_rx_is_running(void);
 /**
  * After DHCP (IP_EVENT_STA_GOT_IP): re-open STA unicast UDP dup binds + re-join IGMP on mcast fds.
  * If karaoke RX is not running yet, sets an internal flag so the next dashcdg_badge_rx_start() does

@@ -2,6 +2,10 @@
 # https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/
 cmake_minimum_required(VERSION 3.16)
 
+# Firmware does not use HTTP(S), OTA-over-HTTPS, or FAT/VFS-on-SD; drop those IDF components to save flash.
+# If you add esp_https_ota, esp_http_client, or FAT mounts, remove the matching entries here.
+set(EXCLUDE_COMPONENTS fatfs esp_http_client esp_http_server esp_https_ota)
+
 # PROJECT_VER → esp_app_desc.version (home UI sysinfo "fw_ver"). Field is 32 bytes incl. NUL.
 set(_dashcdg_badge_fw "unknown")
 execute_process(

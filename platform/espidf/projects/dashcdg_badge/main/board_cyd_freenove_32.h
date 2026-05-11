@@ -83,6 +83,7 @@
 /*
  * LVGL partial-draw RAM (internal DMA): total ~ CYD_LCD_H_RES * CYD_LVGL_BUF_LINES * 2 bytes x (1 or 2 buffers).
  * Default is lean for ESP32 internal DRAM (CDG state ~65 KiB on heap). Raise lines / double-buffer for smoother UI.
+ * Each line fewer saves ~640 B internal DMA (320 px × 2); trim only if tearing stays acceptable.
  */
 #ifndef CYD_LVGL_BUF_LINES
 #define CYD_LVGL_BUF_LINES 16

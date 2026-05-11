@@ -26,6 +26,8 @@ static const char *KEY_KRN_OK = "krn_ok";
 static const char *KEY_KRN_ON = "krn_on";
 static const char *KEY_KST_OK = "kst_ok";
 static const char *KEY_KST_ON = "kst_on";
+static const char *KEY_KMP_OK = "kmp_ok";
+static const char *KEY_KMP_MD = "kmp_md";
 
 esp_err_t dashcdg_badge_prefs_load_brightness(uint8_t *out_pct_5_100)
 {
@@ -446,6 +448,59 @@ esp_err_t dashcdg_badge_prefs_save_karaoke_v4_stats_tx(uint8_t on)
     err = nvs_set_u8(h, KEY_KST_ON, (on != 0) ? 1U : 0U);
     if (err == ESP_OK) {
         err = nvs_set_u8(h, KEY_KST_OK, 1);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t dashcdg_badge_prefs_load_karaoke_media_path_policy(uint8_t *out_mode)
+{
+    ESP_RETURN_ON_FALSE(out_mode != NULL, ESP_ERR_INVALID_ARG, TAG, "out");
+    *out_mode = 3U;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return ESP_OK;
+    }
+    {
+        uint8_t ok = 0U;
+        err = nvs_get_u8(h, KEY_KMP_OK, &ok);
+        if (err != ESP_OK || ok != 1U) {
+            nvs_close(h);
+            return ESP_OK;
+        }
+    }
+    {
+        uint8_t v = 3U;
+        (void)nvs_get_u8(h, KEY_KMP_MD, &v);
+        nvs_close(h);
+        if (v > 3U) {
+            v = 3U;
+        }
+        *out_mode = v;
+    }
+    return ESP_OK;
+}
+
+esp_err_t dashcdg_badge_prefs_save_karaoke_media_path_policy(uint8_t mode)
+{
+    nvs_handle_t h;
+    esp_err_t err;
+
+    if (mode > 3U) {
+        mode = 3U;
+    }
+    err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open RW kmp: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_u8(h, KEY_KMP_MD, mode);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, KEY_KMP_OK, 1U);
     }
     if (err == ESP_OK) {
         err = nvs_commit(h);

@@ -41,6 +41,25 @@ static lv_obj_t *s_ta_pass;
 static lv_obj_t *s_kb;
 static lv_obj_t *s_entry_row;
 
+#if CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP
+static bool s_dbg_auto_karaoke_done_this_boot;
+static bool s_dbg_auto_karaoke_dhcp_seen;
+static bool s_dbg_auto_karaoke_launch_posted;
+
+static void dbg_auto_karaoke_launch_async(void *disp_ptr)
+{
+    lv_disp_t *disp = (lv_disp_t *)disp_ptr;
+    if (!disp || s_dbg_auto_karaoke_done_this_boot || !s_dbg_auto_karaoke_dhcp_seen) {
+        s_dbg_auto_karaoke_launch_posted = false;
+        return;
+    }
+    ESP_LOGI(TAG, "debug auto-karaoke: launching after DHCP");
+    dashcdg_nav_karaoke(disp);
+    s_dbg_auto_karaoke_done_this_boot = true;
+    s_dbg_auto_karaoke_launch_posted = false;
+}
+#endif
+
 static bool wifi_touch_ui_is_active(void)
 {
     /* s_lbl_status is cleared in dashcdg_wifi_drop_lvgl_refs when leaving this screen. */
@@ -195,6 +214,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {
             nvs_save_creds((const char *)wc.sta.ssid, (const char *)wc.sta.password);
         }
+        dashcdg_wifi_debug_maybe_autolaunch_karaoke(lv_display_get_default());
     }
 }
 
@@ -550,6 +570,12 @@ esp_err_t dashcdg_wifi_ensure_init(void)
         return ESP_OK;
     }
 
+#if CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP
+    s_dbg_auto_karaoke_done_this_boot = false;
+    s_dbg_auto_karaoke_dhcp_seen = false;
+    s_dbg_auto_karaoke_launch_posted = false;
+#endif
+
     s_wifi_sta_netif = esp_netif_create_default_wifi_sta();
     if (s_wifi_sta_netif == NULL) {
         ESP_LOGE(TAG, "esp_netif_create_default_wifi_sta failed");
@@ -601,4 +627,21 @@ esp_err_t dashcdg_wifi_touch_ui_present(lv_disp_t *disp)
 esp_err_t dashcdg_wifi_touch_ui_start(lv_disp_t *disp)
 {
     return dashcdg_wifi_touch_ui_present(disp);
+}
+
+void dashcdg_wifi_debug_maybe_autolaunch_karaoke(lv_disp_t *disp)
+{
+#if CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP
+    if (!disp || s_dbg_auto_karaoke_done_this_boot) {
+        return;
+    }
+    s_dbg_auto_karaoke_dhcp_seen = true;
+    if (s_dbg_auto_karaoke_launch_posted) {
+        return;
+    }
+    s_dbg_auto_karaoke_launch_posted = true;
+    lv_async_call(dbg_auto_karaoke_launch_async, disp);
+#else
+    (void)disp;
+#endif
 }

@@ -11,6 +11,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota_4mb.csv"
 
+# Main task stack (do not trim aggressively — app_main + launcher depth).
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 
 # UART console (115200 is ESP-IDF default)
@@ -23,14 +24,21 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=1536
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=2048
 # Lab PCM uses esp_timer ISR dispatch when available (accurate sample clock vs ESP_TIMER_TASK).
 CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=1792
+# sys_evt runs Wi‑Fi + esp_netif handlers; 1536 overflowed (IDF 5.5). DRAM headroom comes from
+# CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP, not from shrinking this stack.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2048
 
 # XPT2046: keep raw ADC; map with Freenove cal bounds in display_lvgl.c (see board_cyd_freenove_32.h)
 CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n
 # PENIRQ low-power path (GPIO36 + ~10k pull-up on CYD); display_lvgl.c forces LV_INDEV_MODE_TIMER after add_touch.
 CONFIG_XPT2046_INTERRUPT_MODE=y
 
-# --- Internal DRAM headroom (CDG+jitter default .bss; optional CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP frees after rx_stop) ---
+# --- Internal DRAM headroom ---
+# CDG + batch jitter on heap while RX runs (dashcdg_badge_rx_stop frees): shrinks .dram0.bss so the
+# link fits dram0_0_seg on ESP32-WROOM (no PSRAM). Static .bss mode was ~272 B over limit with lean stacks.
+CONFIG_DASHCDG_BADGE_RX_CDG_ON_HEAP=y
+# Opus: mono decoder only (~smaller heap blob than stereo); TX should send mono for badge.
+CONFIG_DASHCDG_BADGE_OPUS_MONO_ONLY=y
 # Strip v4 repair NACK uplink (saves code/RAM; enable in menuconfig if needed).
 CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK=n
 # IPv4-only badge path (multicast / STA); frees lwIP IPv6 pools.
@@ -40,8 +48,9 @@ CONFIG_LWIP_IPV6=n
 # With AMPDU enabled, Espressif recommends keeping static RX buffers at least 6 (below 6 only if
 # AMPDU is off). See ESP-IDF Wi-Fi buffer / QoS docs.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# Slightly leaner than 16/16 to claw internal DRAM for lwIP IGMP + socket layer under Opus/jitter/CYD UI load.
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12
 # AMPDU (802.11n block ack): better airtime efficiency on many APs; uses a bit more Wi-Fi driver RAM for
 # reorder/BA state. Disabled previously for internal-RAM headroom; re-enabled to help RX bursty UDP
 # (multicast karaoke). If Opus init fails more often, try n/n again or lower DYNAMIC_*_BUFFER_NUM slightly.
@@ -58,3 +67,24 @@ CONFIG_LWIP_MAX_ACTIVE_TCP=4
 CONFIG_LWIP_MAX_LISTENING_TCP=4
 CONFIG_LWIP_MAX_UDP_PCBS=12
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
+
+# LVGL (esp_lvgl_port): do not compile bundled examples/ demos — badge ships its own UI only; faster full builds.
+# CONFIG_LV_BUILD_EXAMPLES is not set
+# CONFIG_LV_BUILD_DEMOS is not set
+
+# Unity: badge firmware does not use on-device IDF test runner — slightly smaller/faster builds.
+# CONFIG_UNITY_ENABLE_IDF_TEST_RUNNER is not set
+
+# No Ethernet PHY on badge — Wi‑Fi STA only.
+# CONFIG_ETH_ENABLED is not set
+
+# OpenOCD GDB stub not needed in normal badge builds (re-enable for chip debug).
+# CONFIG_ESP_GDBSTUB_ENABLED is not set
+
+# STA-only Wi‑Fi (no SoftAP / WPA‑Enterprise).
+# CONFIG_ESP_WIFI_SOFTAP_SUPPORT is not set
+# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
+
+# No HTTPS/TLS to arbitrary hosts — badge uses UDP/multicast + custom protocol only.
+# Re-enable bundle (or embed a custom CA) before adding esp_http_client / esp_https_ota / MQTT TLS.
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set

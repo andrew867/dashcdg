@@ -88,7 +88,7 @@ void dashcdg_platform_hw_set_beep_volume_pct(uint8_t pct_5_100);
 
 /**
  * Lab stream on IO26 (exclusive with UI beep sequences).
- * On ESP32: native DAC continuous + I2S0 DMA (`dac_continuous_*`, 8-bit samples; driver expands to 16-bit DMA).
+ * On ESP32: same `dac_continuous` handle + amp path as karaoke (`DASHCDG_LAB_PCM_FS_HZ` nominal); Mary pushes s16.
  * Otherwise: LEDC fixed-carrier PWM duty stream.
  */
 bool dashcdg_platform_hw_lab_pcm_stream_begin(void);
@@ -100,7 +100,7 @@ uint8_t dashcdg_platform_hw_get_beep_volume_pct(void);
 
 /**
  * Karaoke v4 decoded PCM -> ESP32 native DAC (mono, IO26). Call only from `badge_rx` task.
- * Mutual exclude with audio lab DAC (`dashcdg_platform_hw_lab_pcm_*`).
+ * Do not call `begin` while the audio-lab Mary stream is active; the lab `stream_begin` path reuses this DAC and replaces RX.
  *
  * `nominal_hz` is the PCM sample rate from decode (e.g. 8000 AMR-NB, 16000 AMR-WB, 48000 Opus).
  * DAC continuous `freq_hz` is nominal adjusted by trim PPM (integer Hz; sub‑ppm drift needs drop/dup or SRC).

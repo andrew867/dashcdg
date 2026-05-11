@@ -28,3 +28,6 @@ esp_err_t dashcdg_wifi_touch_ui_present(lv_disp_t *disp);
 
 /** One-shot helper: ensure_init + present (e.g. tools that skip the launcher). */
 esp_err_t dashcdg_wifi_touch_ui_start(lv_disp_t *disp);
+
+/** Debug helper: if enabled and armed, auto-launch Karaoke after DHCP. */
+void dashcdg_wifi_debug_maybe_autolaunch_karaoke(lv_disp_t *disp);

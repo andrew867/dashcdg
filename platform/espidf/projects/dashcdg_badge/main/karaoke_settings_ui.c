@@ -88,6 +88,34 @@ static void on_v4_stats_tx_sw(lv_event_t *e)
     dashcdg_badge_rx_apply_rx_tuning_prefs();
 }
 
+static void on_media_path_dd(lv_event_t *e)
+{
+    lv_obj_t *dd = lv_event_get_target(e);
+    uint16_t sel = lv_dropdown_get_selected(dd);
+    uint8_t mode = 3U;
+
+    dashcdg_platform_hw_notify_activity();
+    switch (sel) {
+    case 0:
+        mode = 3U; /* auto */
+        break;
+    case 1:
+        mode = 0U; /* both */
+        break;
+    case 2:
+        mode = 1U; /* mcast prefer */
+        break;
+    case 3:
+        mode = 2U; /* ucast prefer */
+        break;
+    default:
+        mode = 3U;
+        break;
+    }
+    (void)dashcdg_badge_prefs_save_karaoke_media_path_policy(mode);
+    dashcdg_badge_rx_apply_rx_tuning_prefs();
+}
+
 esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
 {
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_ERR_INVALID_ARG, TAG, "disp");
@@ -174,6 +202,7 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
     uint8_t pref_video = 1U;
     uint8_t pref_audio = 1U;
     uint8_t pref_stx = 1U;
+    uint8_t pref_mpath = 3U;
 #if defined(CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK) && CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK
     uint8_t pref_nack = 1U;
 #endif
@@ -183,6 +212,7 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
     (void)dashcdg_badge_prefs_load_karaoke_repair_nack(&pref_nack);
 #endif
     (void)dashcdg_badge_prefs_load_karaoke_v4_stats_tx(&pref_stx);
+    (void)dashcdg_badge_prefs_load_karaoke_media_path_policy(&pref_mpath);
 
     lv_obj_t *video_row = lv_obj_create(box);
     lv_obj_set_width(video_row, lv_pct(100));
@@ -286,6 +316,34 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
         lv_obj_remove_state(stx_sw, LV_STATE_CHECKED);
     }
     lv_obj_add_event_cb(stx_sw, on_v4_stats_tx_sw, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *mp_row = lv_obj_create(tune_box);
+    lv_obj_set_width(mp_row, lv_pct(100));
+    lv_obj_set_height(mp_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(mp_row, 0, 0);
+    lv_obj_set_style_border_width(mp_row, 0, 0);
+    lv_obj_set_style_bg_opa(mp_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(mp_row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(mp_row, 6, 0);
+    ui_no_scroll(mp_row);
+
+    lv_obj_t *mp_lbl = lv_label_create(mp_row);
+    lv_label_set_text(mp_lbl, "OpenWrt media path");
+    lv_obj_set_style_text_color(mp_lbl, lv_color_hex(0xaabbcc), 0);
+
+    lv_obj_t *mp_dd = lv_dropdown_create(mp_row);
+    lv_obj_set_width(mp_dd, lv_pct(100));
+    lv_dropdown_set_options(mp_dd, "auto\nboth\nmcast prefer\nucast prefer");
+    if (pref_mpath == 0U) {
+        lv_dropdown_set_selected(mp_dd, 1);
+    } else if (pref_mpath == 1U) {
+        lv_dropdown_set_selected(mp_dd, 2);
+    } else if (pref_mpath == 2U) {
+        lv_dropdown_set_selected(mp_dd, 3);
+    } else {
+        lv_dropdown_set_selected(mp_dd, 0);
+    }
+    lv_obj_add_event_cb(mp_dd, on_media_path_dd, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_update_layout(outer);
     lv_obj_invalidate(scr);

@@ -36,3 +36,6 @@ esp_err_t dashcdg_badge_prefs_save_karaoke_repair_nack(uint8_t on);
 /** v4_rx_stats uplink to TX (default on; off saves airtime for soak tests). */
 esp_err_t dashcdg_badge_prefs_load_karaoke_v4_stats_tx(uint8_t *out_on);
 esp_err_t dashcdg_badge_prefs_save_karaoke_v4_stats_tx(uint8_t on);
+/** Media path policy: 0=both, 1=mcast_prefer, 2=ucast_prefer, 3=auto (default auto). */
+esp_err_t dashcdg_badge_prefs_load_karaoke_media_path_policy(uint8_t *out_mode);
+esp_err_t dashcdg_badge_prefs_save_karaoke_media_path_policy(uint8_t mode);

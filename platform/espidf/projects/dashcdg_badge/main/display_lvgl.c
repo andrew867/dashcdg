@@ -252,12 +252,21 @@ esp_err_t dashcdg_touch_apply_store_or_defaults(void)
 
 void dashcdg_display_clear_top_layer(lv_disp_t *disp)
 {
+    lv_obj_t *sys;
+
     if (!disp) {
         return;
     }
-    lv_obj_t *top = lv_display_get_layer_top(disp);
-    if (top) {
-        lv_obj_clean(top);
+    {
+        lv_obj_t *top = lv_display_get_layer_top(disp);
+
+        if (top) {
+            lv_obj_clean(top);
+        }
+    }
+    sys = lv_display_get_layer_sys(disp);
+    if (sys) {
+        lv_obj_clean(sys);
     }
 }
 

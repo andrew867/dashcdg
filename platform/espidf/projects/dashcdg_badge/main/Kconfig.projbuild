@@ -1,5 +1,13 @@
 menu "DashCDG badge"
 
+    config DASHCDG_BADGE_OPUS_MONO_ONLY
+        bool "Opus RX: mono decoder only (saves internal RAM)"
+        default y
+        help
+            Restrict the badge Opus path to a mono decoder: smaller opus_decoder_get_size() blob and
+            no stereo PCM scratch in the decoder. Stereo Opus streams will fail decode (use mono from TX).
+            Turn off if you must play stereo Opus on the badge.
+
     config DASHCDG_BADGE_RX_CDG_ON_HEAP
         bool "CDG + jitter on heap (free when RX stops)"
         default n
@@ -8,6 +16,15 @@ menu "DashCDG badge"
             dashcdg_badge_rx_stop() frees them (plus blit scratch and v4 anchor assembly) so RAM is
             reclaimed when leaving karaoke. Static .bss mode avoids that free and keeps buffers warm
             for quick re-entry; heap mode trades a bit of fragmentation risk for smaller idle firmware RAM.
+
+    config DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP
+        bool "DEBUG: auto-launch Karaoke once after first DHCP"
+        default n
+        help
+            Debug automation helper. When enabled, after the first STA DHCP lease on each boot,
+            the app auto-navigates to Karaoke once per boot. Karaoke decode toggles remain whatever
+            is saved in NVS / set in karaoke settings UI (never forced).
+            Intended for soak/debug loops; keep off for normal interactive use.
 
     config DASHCDG_BADGE_CDG_JB_HEADROOM_EXTRA
         int "Extra CDG jitter headroom slots (0-12)"
