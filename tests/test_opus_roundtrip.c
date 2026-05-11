@@ -27,7 +27,7 @@ int main(void) {
     }
 
     assert(dashcdg_opus_encoder_init(&encoder, 48000, 1, 20, 64000));
-    assert(dashcdg_opus_decoder_init(&decoder, 48000, 1, 20));
+	assert(dashcdg_opus_decoder_init(&decoder, 48000, 1, 20, NULL));
 
     enc_bytes = dashcdg_opus_encode_frame(&encoder, pcm, packet, sizeof(packet));
     assert(enc_bytes > 0);

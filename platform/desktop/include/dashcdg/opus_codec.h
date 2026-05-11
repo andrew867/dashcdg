@@ -54,12 +54,19 @@ int dashcdg_opus_encode_frame(
         size_t output_size
 );
 
+/**
+ * Creates an Opus decoder. `opus_err_out` is optional: on failure of `opus_decoder_create`,
+ * it receives the libopus error code (for example `OPUS_ALLOC_FAIL`); left unchanged on invalid args.
+ */
 int dashcdg_opus_decoder_init(
         struct dashcdg_opus_decoder *decoder,
         int sample_rate,
         int channels,
-        int frame_ms
+        int frame_ms,
+        int *opus_err_out
 );
+/** ESP32: reserve `opus_decoder` backing store early (before sockets) to avoid OPUS_ALLOC_FAIL (-7). Returns 1 on success. */
+int dashcdg_opus_preallocate_decoder_blob(void);
 void dashcdg_opus_decoder_free(struct dashcdg_opus_decoder *decoder);
 int dashcdg_opus_decode_frame(
         struct dashcdg_opus_decoder *decoder,

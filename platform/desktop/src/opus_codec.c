@@ -2,6 +2,78 @@
 
 #include <string.h>
 
+#if defined(ESP_PLATFORM)
+#include <stddef.h>
+
+#include "esp_heap_caps.h"
+#include "sdkconfig.h"
+
+/*
+ * esp-opus allocates inside opus_decoder_create(); fragmentation yields OPUS_ALLOC_FAIL (-7).
+ * Keep one aligned heap blob for `opus_decoder_init` (reused across init/free).
+ * CONFIG_DASHCDG_BADGE_OPUS_MONO_ONLY sizes the blob for mono only (~KiB smaller vs stereo).
+ */
+static uint8_t *s_opus_dec_blob;
+static size_t s_opus_dec_blob_cap;
+
+static uint8_t *dashcdg_opus_ensure_dec_blob(int channels)
+{
+    int sz1 = opus_decoder_get_size(1);
+#if !CONFIG_DASHCDG_BADGE_OPUS_MONO_ONLY
+    int sz2 = opus_decoder_get_size(2);
+#endif
+    int need = opus_decoder_get_size(channels);
+    int cap;
+
+#if CONFIG_DASHCDG_BADGE_OPUS_MONO_ONLY
+    cap = sz1;
+    if (need > cap || cap <= 0) {
+        return NULL;
+    }
+#else
+    cap = sz1 > sz2 ? sz1 : sz2;
+
+    if (need > cap) {
+        cap = need;
+    }
+    if (cap <= 0) {
+        return NULL;
+    }
+#endif
+    if (s_opus_dec_blob != NULL && (size_t)cap <= s_opus_dec_blob_cap) {
+        return s_opus_dec_blob;
+    }
+    if (s_opus_dec_blob != NULL) {
+        heap_caps_free(s_opus_dec_blob);
+        s_opus_dec_blob = NULL;
+        s_opus_dec_blob_cap = 0;
+    }
+    {
+        void *p = heap_caps_aligned_alloc(16, (size_t)cap, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+        if (p == NULL) {
+            return NULL;
+        }
+        s_opus_dec_blob = (uint8_t *)p;
+        s_opus_dec_blob_cap = (size_t)cap;
+    }
+    return s_opus_dec_blob;
+}
+
+int dashcdg_opus_preallocate_decoder_blob(void)
+{
+    /*
+     * Grab one contiguous internal-RAM block for `opus_decoder_init` before sockets / Wi-Fi
+     * buffers fragment the heap (avoids OPUS_ALLOC_FAIL / harsh degraded-audio path on ESP32).
+     */
+    int ch = 1;
+#if !CONFIG_DASHCDG_BADGE_OPUS_MONO_ONLY
+    ch = 2;
+#endif
+    return dashcdg_opus_ensure_dec_blob(ch) != NULL ? 1 : 0;
+}
+#endif
+
 #if defined(DASHCDG_DESKTOP_NO_OPUS)
 
 int dashcdg_opus_encoder_init(
@@ -50,11 +122,13 @@ int dashcdg_opus_decoder_init(
         struct dashcdg_opus_decoder *decoder,
         int sample_rate,
         int channels,
-        int frame_ms
+        int frame_ms,
+        int *opus_err_out
 ) {
     if (decoder == NULL || sample_rate <= 0 || channels <= 0 || frame_ms <= 0) {
         return 0;
     }
+    (void)opus_err_out;
     memset(decoder, 0, sizeof(*decoder));
     decoder->frame_size = (sample_rate * frame_ms) / 1000;
     decoder->sample_rate = sample_rate;
@@ -117,6 +191,11 @@ int dashcdg_opus_probe_packet_samples_per_channel(
     (void) packet_length;
     (void) sample_rate_hz;
     return -1;
+}
+
+int dashcdg_opus_preallocate_decoder_blob(void)
+{
+    return 1;
 }
 
 #else /* !DASHCDG_DESKTOP_NO_OPUS */
@@ -215,7 +294,8 @@ int dashcdg_opus_decoder_init(
         struct dashcdg_opus_decoder *decoder,
         int sample_rate,
         int channels,
-        int frame_ms
+        int frame_ms,
+        int *opus_err_out
 ) {
     int err;
 
@@ -227,13 +307,49 @@ int dashcdg_opus_decoder_init(
     decoder->frame_size = (sample_rate * frame_ms) / 1000;
     decoder->sample_rate = sample_rate;
     decoder->channels = channels;
+
+#if defined(ESP_PLATFORM)
+    {
+        uint8_t *blob = dashcdg_opus_ensure_dec_blob(channels);
+
+        if (blob == NULL) {
+            decoder->decoder = NULL;
+            if (opus_err_out != NULL) {
+                *opus_err_out = OPUS_ALLOC_FAIL;
+            }
+            return 0;
+        }
+        decoder->decoder = (OpusDecoder *)blob;
+        err = opus_decoder_init(decoder->decoder, sample_rate, channels);
+        if (err != OPUS_OK) {
+            decoder->decoder = NULL;
+            if (opus_err_out != NULL) {
+                *opus_err_out = err;
+            }
+            return 0;
+        }
+        /* Lower transient stack/scratch pressure during realtime decode on constrained ESP32. */
+        (void)opus_decoder_ctl(decoder->decoder, OPUS_SET_COMPLEXITY(0));
+        if (opus_err_out != NULL) {
+            *opus_err_out = OPUS_OK;
+        }
+        return 1;
+    }
+#else
     decoder->decoder = opus_decoder_create(sample_rate, channels, &err);
     if (decoder->decoder == NULL || err != OPUS_OK) {
         decoder->decoder = NULL;
+        if (opus_err_out != NULL) {
+            *opus_err_out = err;
+        }
         return 0;
     }
 
+    if (opus_err_out != NULL) {
+        *opus_err_out = OPUS_OK;
+    }
     return 1;
+#endif
 }
 
 void dashcdg_opus_decoder_free(struct dashcdg_opus_decoder *decoder) {
@@ -241,8 +357,12 @@ void dashcdg_opus_decoder_free(struct dashcdg_opus_decoder *decoder) {
         return;
     }
 
+#if defined(ESP_PLATFORM)
+    decoder->decoder = NULL;
+#else
     opus_decoder_destroy(decoder->decoder);
     decoder->decoder = NULL;
+#endif
 }
 
 int dashcdg_opus_decode_frame(
@@ -320,5 +440,12 @@ int dashcdg_opus_probe_packet_samples_per_channel(
     n = opus_packet_get_nb_samples(packet, (opus_int32)packet_length, sample_rate_hz);
     return (int)n;
 }
+
+#if !defined(ESP_PLATFORM)
+int dashcdg_opus_preallocate_decoder_blob(void)
+{
+    return 1;
+}
+#endif
 
 #endif /* DASHCDG_DESKTOP_NO_OPUS */
