@@ -77,6 +77,23 @@ int dashcdg_cdg_batch_jitter_resize(struct dashcdg_cdg_batch_jitter_buffer *jb, 
 void dashcdg_cdg_batch_jitter_release(struct dashcdg_cdg_batch_jitter_buffer *jb);
 size_t dashcdg_cdg_batch_jitter_capacity(const struct dashcdg_cdg_batch_jitter_buffer *jb);
 
+/** Return code for `dashcdg_cdg_batch_jitter_try_insert` (diagnostics + RX policy). */
+typedef enum {
+    DASHCDG_CDG_JB_INSERT_BAD_ARGS = 0,
+    DASHCDG_CDG_JB_INSERT_OK = 1,
+    DASHCDG_CDG_JB_INSERT_STALE = 2,
+    DASHCDG_CDG_JB_INSERT_DUP = 3,
+    DASHCDG_CDG_JB_INSERT_RING_FULL = 4,
+} dashcdg_cdg_jb_insert_rc;
+
+dashcdg_cdg_jb_insert_rc dashcdg_cdg_batch_jitter_try_insert(
+        struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_start_index,
+        uint8_t packet_count,
+        const uint8_t *payload,
+        int count_stats
+);
+
 int dashcdg_cdg_batch_jitter_insert(
         struct dashcdg_cdg_batch_jitter_buffer *jb,
         uint64_t packet_start_index,

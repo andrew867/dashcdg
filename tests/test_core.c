@@ -1143,8 +1143,37 @@ static void test_cdg_batch_jitter_duplicate_drop(void) {
     assert(dashcdg_cdg_batch_jitter_insert(&jb, 200U, 1U, one_pkt, 1) == 1);
     assert(dashcdg_cdg_batch_jitter_occupied_count(&jb) == 1U);
     drops_before = jb.pending_drops;
+    assert(dashcdg_cdg_batch_jitter_try_insert(&jb, 200U, 1U, one_pkt, 1) == DASHCDG_CDG_JB_INSERT_DUP);
     assert(dashcdg_cdg_batch_jitter_insert(&jb, 200U, 1U, one_pkt, 1) == 0);
     assert(jb.pending_drops > drops_before);
+}
+
+static void test_cdg_batch_jitter_try_insert_ring_full(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+    size_t cap;
+    size_t i;
+
+    memset(one_pkt, 0x77, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    cap = dashcdg_cdg_batch_jitter_capacity(&jb);
+    assert(cap > 0U);
+    for (i = 0U; i < cap; ++i) {
+        assert(dashcdg_cdg_batch_jitter_try_insert(&jb, (uint64_t)i * 10U, 1U, one_pkt, 0) == DASHCDG_CDG_JB_INSERT_OK);
+    }
+    assert(dashcdg_cdg_batch_jitter_try_insert(&jb, 999999U, 1U, one_pkt, 0) == DASHCDG_CDG_JB_INSERT_RING_FULL);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 999999U, 1U, one_pkt, 0) == 0);
+}
+
+static void test_cdg_batch_jitter_try_insert_stale(void) {
+    struct dashcdg_cdg_batch_jitter_buffer jb;
+    uint8_t one_pkt[DASHCDG_SUBCHANNEL_PACKET_BYTES];
+
+    memset(one_pkt, 0x88, sizeof(one_pkt));
+    dashcdg_cdg_batch_jitter_init(&jb);
+    dashcdg_cdg_batch_jitter_apply_snapshot_seek(&jb, 600U);
+    assert(dashcdg_cdg_batch_jitter_try_insert(&jb, 598U, 1U, one_pkt, 0) == DASHCDG_CDG_JB_INSERT_STALE);
+    assert(dashcdg_cdg_batch_jitter_insert(&jb, 598U, 1U, one_pkt, 0) == 0);
 }
 
 static void test_cdg_batch_jitter_apply_note_and_drain_skip(void) {
@@ -1716,6 +1745,8 @@ int main(void) {
     test_cdg_raster_rgba_matches_memory_preset();
     test_cdg_raster_alpha_from_transparency();
     test_cdg_batch_jitter_duplicate_drop();
+    test_cdg_batch_jitter_try_insert_ring_full();
+    test_cdg_batch_jitter_try_insert_stale();
     test_cdg_batch_jitter_does_not_apply_ahead_of_receiver();
     test_cdg_batch_jitter_apply_note_and_drain_skip();
     test_cdg_batch_jitter_sender_playback_respects_announced_preroll();

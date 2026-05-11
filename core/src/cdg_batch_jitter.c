@@ -376,7 +376,7 @@ size_t dashcdg_cdg_batch_jitter_occupied_count(const struct dashcdg_cdg_batch_ji
     return n;
 }
 
-int dashcdg_cdg_batch_jitter_insert(
+dashcdg_cdg_jb_insert_rc dashcdg_cdg_batch_jitter_try_insert(
         struct dashcdg_cdg_batch_jitter_buffer *jb,
         uint64_t packet_start_index,
         uint8_t packet_count,
@@ -388,7 +388,7 @@ int dashcdg_cdg_batch_jitter_insert(
     size_t cap = cdg_jb_capacity(jb);
 
     if (jb == NULL || payload == NULL || packet_count == 0 || packet_count > DASHCDG_MAX_CDG_BATCH_PACKETS || cap == 0U) {
-        return 0;
+        return DASHCDG_CDG_JB_INSERT_BAD_ARGS;
     }
     packet_bytes = (size_t) packet_count * DASHCDG_SUBCHANNEL_PACKET_BYTES;
 
@@ -401,7 +401,7 @@ int dashcdg_cdg_batch_jitter_insert(
         if (count_stats) {
             jb->pending_drops++;
         }
-        return 0;
+        return DASHCDG_CDG_JB_INSERT_STALE;
     } else if (count_stats && packet_start_index < jb->highest_packet_index_seen) {
         jb->reordered_batches++;
     }
@@ -410,7 +410,7 @@ int dashcdg_cdg_batch_jitter_insert(
         if (count_stats) {
             jb->pending_drops++;
         }
-        return 0;
+        return DASHCDG_CDG_JB_INSERT_DUP;
     }
 
     for (size_t i = 0; i < cap; ++i) {
@@ -423,7 +423,7 @@ int dashcdg_cdg_batch_jitter_insert(
         if (count_stats) {
             jb->pending_drops++;
         }
-        return 0;
+        return DASHCDG_CDG_JB_INSERT_RING_FULL;
     }
 
     cdg_jb_zero_slot(slot);
@@ -434,7 +434,20 @@ int dashcdg_cdg_batch_jitter_insert(
     if (packet_start_index > jb->highest_packet_index_seen) {
         jb->highest_packet_index_seen = packet_start_index;
     }
-    return 1;
+    return DASHCDG_CDG_JB_INSERT_OK;
+}
+
+int dashcdg_cdg_batch_jitter_insert(
+        struct dashcdg_cdg_batch_jitter_buffer *jb,
+        uint64_t packet_start_index,
+        uint8_t packet_count,
+        const uint8_t *payload,
+        int count_stats
+) {
+    return dashcdg_cdg_batch_jitter_try_insert(jb, packet_start_index, packet_count, payload, count_stats) ==
+                   DASHCDG_CDG_JB_INSERT_OK
+           ? 1
+           : 0;
 }
 
 /*
