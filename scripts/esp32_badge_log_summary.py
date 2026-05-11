@@ -38,6 +38,8 @@ PATTERNS = {
     "audio_only_uart_stats": re.compile(r"badge_rx:\s+audio_only\s+a_rx=", re.IGNORECASE),
     # Per-interval delta diagnostics (d_skip, d_udp, jb_pk, …) — compare logs before/after fixes
     "audio_chop_uart_stats": re.compile(r"badge_rx:\s+audio_chop\s+", re.IGNORECASE),
+    # Audio-only cumulative line (mtx_idle_miss / lvgl_coop / rx_mtx_to)
+    "audio_only_uart_mtx": re.compile(r"badge_rx:\s+audio_only\s+.*mtx_idle_miss=", re.IGNORECASE),
 }
 
 
@@ -79,6 +81,7 @@ def print_table(rows: list[dict[str, int | str]]) -> None:
         "sta_got_ip",
         "audio_only_uart_stats",
         "audio_chop_uart_stats",
+        "audio_only_uart_mtx",
     ]
     widths = {c: len(c) for c in cols}
     for row in rows:

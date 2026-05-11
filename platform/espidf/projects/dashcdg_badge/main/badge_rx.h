@@ -151,6 +151,12 @@ typedef struct {
     uint32_t perf_mtx_overlay_rgb_max_us;
     /** Max SPI band (blit + settle) on deferred worker (us). */
     uint32_t perf_sp_blit_band_max_us;
+    /** RX idle-select path: failed to take `s_mtx` in time — audio drain skipped (chop risk). */
+    uint32_t rx_mtx_idle_drain_miss;
+    /** After UDP recv burst: failed to take `s_mtx` for post-burst drain — chop risk. */
+    uint32_t rx_mtx_postburst_drain_miss;
+    /** LVGL tick cooperative audio-only drains that ran (bounded budget). */
+    uint32_t lvgl_coop_audio_drains;
 } dashcdg_badge_rx_stats_t;
 
 #define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U

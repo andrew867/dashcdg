@@ -137,6 +137,11 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY                  6U
 /** UART ESP_LOGI cadence for audio-only tuning (matches stats summary grep). */
 #define BADGE_RX_UART_AUDIO_STATS_MS                          1000U
+/**
+ * LVGL timer (karaoke_ui ~33 Hz): extra jitter→DAC drain while video decode is off so playout keeps up
+ * when the RX task spends long stretches in `recvfrom`/UDP bursts without hitting the select-timeout path.
+ */
+#define BADGE_RX_LVGL_COOP_AUDIO_DRAIN_STEPS                  32U
 #if defined(DASHCDG_AUDIO_JITTER_HEAP_BACKED) && DASHCDG_AUDIO_JITTER_HEAP_BACKED
 /*
  * `dashcdg_audio_jitter_init` allocates the slot+payload pool with calloc(30, …). Under A/V on,
@@ -463,6 +468,9 @@ static struct {
     uint32_t recovery_und;
     uint32_t recovery_zero;
     uint32_t recovery_stall;
+    uint32_t idle_miss;
+    uint32_t post_miss;
+    uint32_t coop;
 } s_uart_audio_chop_prev;
 static uint32_t s_v4_stats_suppressed;
 static uint64_t s_last_select_enomem_local_ms;
@@ -1405,12 +1413,15 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
     if (badge_rx_is_audio_only_decode()) {
         ESP_LOGI(TAG,
                  "audio_only a_rx=%lu a_out=%lu jb=%lu/%lu skip=%lu deg=%lu dec_fail=%lu dac_begin_fail=%lu "
-                 "profile=%u clock=%d primed=%d ms_since_pcm=%llu",
+                 "profile=%u clock=%d primed=%d ms_since_pcm=%llu mtx_idle_miss=%lu mtx_post_miss=%lu lvgl_coop=%lu "
+                 "rx_mtx_to=%lu",
                  (unsigned long)snap.v4_audio_chunk_rx, (unsigned long)snap.v4_audio_frames_out, (unsigned long)occ,
                  (unsigned long)cap, (unsigned long)snap.v4_audio_jitter_skip_events,
                  (unsigned long)snap.v4_audio_degraded_push, (unsigned long)snap.v4_audio_decode_fail,
                  (unsigned long)snap.v4_audio_dac_begin_fail, (unsigned)s_memory_profile, (int)snap.have_clock,
-                 s_audio_decode_primed, (unsigned long long)ms_since_pcm);
+                 s_audio_decode_primed, (unsigned long long)ms_since_pcm,
+                 (unsigned long)snap.rx_mtx_idle_drain_miss, (unsigned long)snap.rx_mtx_postburst_drain_miss,
+                 (unsigned long)snap.lvgl_coop_audio_drains, (unsigned long)snap.rx_mtx_pump_timeouts);
     }
 
     {
@@ -1443,6 +1454,9 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             s_uart_audio_chop_prev.recovery_stall = s_recovery_silent_stall_count;
             s_uart_audio_chop_prev.jb_reorder = jb_reorder;
             s_uart_audio_chop_prev.jb_drop = jb_drop;
+            s_uart_audio_chop_prev.idle_miss = snap.rx_mtx_idle_drain_miss;
+            s_uart_audio_chop_prev.post_miss = snap.rx_mtx_postburst_drain_miss;
+            s_uart_audio_chop_prev.coop = snap.lvgl_coop_audio_drains;
             s_uart_audio_chop_warmed = 1U;
         } else {
             uint32_t d_skip = snap.v4_audio_jitter_skip_events - s_uart_audio_chop_prev.skips;
@@ -1461,12 +1475,16 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             uint32_t d_rs = s_recovery_silent_stall_count - s_uart_audio_chop_prev.recovery_stall;
             uint64_t d_jbr = jb_reorder - s_uart_audio_chop_prev.jb_reorder;
             uint64_t d_jbd = jb_drop - s_uart_audio_chop_prev.jb_drop;
+            uint32_t d_imiss = snap.rx_mtx_idle_drain_miss - s_uart_audio_chop_prev.idle_miss;
+            uint32_t d_pmiss = snap.rx_mtx_postburst_drain_miss - s_uart_audio_chop_prev.post_miss;
+            uint32_t d_coop = snap.lvgl_coop_audio_drains - s_uart_audio_chop_prev.coop;
 
             ESP_LOGI(
                     TAG,
                     "audio_chop iv_ms=%llu jb_pk=%u jb=%u/%u d_skip=%u d_dec=%u d_deg=%u d_dac=%u d_out=%u d_rx=%u "
                     "d_udp=%llu d_wm=%llu d_wr=%u d_amiss=%u d_jbe=%u d_jbr=%llu d_jbd=%llu d_ru=%u d_rz=%u d_rs=%u "
-                    "codec_ann=%u codec_wire=%u eff=%u ms_sf=%llu heap_i=%u rssi=%d mcast=%u ucast=%u dup=%u a_only=%d",
+                    "d_imiss=%u d_pmiss=%u d_coop=%u codec_ann=%u codec_wire=%u eff=%u ms_sf=%llu heap_i=%u rssi=%d "
+                    "mcast=%u ucast=%u dup=%u a_only=%d",
                     (unsigned long long)iv_ms,
                     (unsigned)jb_pk,
                     (unsigned)occ,
@@ -1487,6 +1505,9 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
                     (unsigned)d_ru,
                     (unsigned)d_rz,
                     (unsigned)d_rs,
+                    (unsigned)d_imiss,
+                    (unsigned)d_pmiss,
+                    (unsigned)d_coop,
                     (unsigned)(unsigned int)announced_codec,
                     (unsigned)(unsigned int)last_codec,
                     (unsigned)(unsigned int)eff_codec,
@@ -1514,6 +1535,9 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             s_uart_audio_chop_prev.recovery_stall = s_recovery_silent_stall_count;
             s_uart_audio_chop_prev.jb_reorder = jb_reorder;
             s_uart_audio_chop_prev.jb_drop = jb_drop;
+            s_uart_audio_chop_prev.idle_miss = snap.rx_mtx_idle_drain_miss;
+            s_uart_audio_chop_prev.post_miss = snap.rx_mtx_postburst_drain_miss;
+            s_uart_audio_chop_prev.coop = snap.lvgl_coop_audio_drains;
         }
         s_uart_audio_chop_jb_peak = 0U;
     }
@@ -4625,7 +4649,8 @@ static void badge_rx_task(void *arg)
             TickType_t idle_mtx_ticks = pdMS_TO_TICKS(12);
 
             if (s_audio_decode_enabled != 0U) {
-                idle_mtx_ticks = badge_rx_is_audio_only_decode() ? pdMS_TO_TICKS(72) : pdMS_TO_TICKS(56);
+                /* Audio-only: wait longer for `s_mtx` — missing idle drain was baseline chop (RX vs LVGL). */
+                idle_mtx_ticks = badge_rx_is_audio_only_decode() ? pdMS_TO_TICKS(200) : pdMS_TO_TICKS(56);
             }
 
             badge_rx_try_open_ucast_sockets();
@@ -4649,6 +4674,8 @@ static void badge_rx_task(void *arg)
                 }
                 xSemaphoreGive(s_mtx);
                 badge_rx_adapt_jitter_capacity_unblocked(idle_now_ms);
+            } else if (badge_rx_is_audio_only_decode()) {
+                s_stats.rx_mtx_idle_drain_miss++;
             }
             dashcdg_platform_hw_karaoke_dac_pad_partial_chunk();
             badge_rx_maybe_send_v4_stats(idle_now_ms);
@@ -4766,7 +4793,7 @@ static void badge_rx_task(void *arg)
             const TickType_t post_ticks = !s_audio_decode_enabled
                                                   ? pdMS_TO_TICKS(12)
                                           : badge_rx_is_audio_only_decode()
-                                                  ? pdMS_TO_TICKS(72)
+                                                  ? pdMS_TO_TICKS(150)
                                                   : pdMS_TO_TICKS(40);
 
             if (xSemaphoreTake(s_mtx, post_ticks) == pdTRUE) {
@@ -4777,6 +4804,8 @@ static void badge_rx_task(void *arg)
                 }
                 xSemaphoreGive(s_mtx);
                 badge_rx_adapt_jitter_capacity_unblocked(post_burst_ms);
+            } else if (badge_rx_is_audio_only_decode()) {
+                s_stats.rx_mtx_postburst_drain_miss++;
             }
         }
         {
@@ -5493,6 +5522,25 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
     badge_rx_stats_finalize_public_view(out, snap_vdec, snap_adec);
 }
 
+static void badge_rx_lvgl_cooperative_audio_only_drain(uint64_t local_now_ms)
+{
+    if (!badge_rx_is_audio_only_decode() || s_audio_decode_enabled == 0U) {
+        return;
+    }
+    if (s_audio_jb == NULL || !s_audio_jb->initialized) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return;
+    }
+    badge_rx_drain_v4_audio_budget(
+            local_now_ms,
+            BADGE_RX_LVGL_COOP_AUDIO_DRAIN_STEPS,
+            BADGE_RX_AUDIO_PLC_FRAMES_AUDIO_ONLY);
+    s_stats.lvgl_coop_audio_drains++;
+    xSemaphoreGive(s_mtx);
+}
+
 void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, dashcdg_badge_rx_stats_t *out)
 {
     uint8_t snap_vdec = 0U;
@@ -5544,6 +5592,11 @@ void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, das
      * Re-enter via `dashcdg_badge_rx_cdg_overlay_tick` (short mutex scope around raster + queue only).
      */
     dashcdg_badge_rx_cdg_overlay_tick(cdg_lv_slot);
+    /*
+     * Audio-only: feed jitter→DAC from the LVGL task as well. The RX loop often stays in UDP recv/drain
+     * paths; without this, chop came from starving idle/postburst drains under mutex load.
+     */
+    badge_rx_lvgl_cooperative_audio_only_drain(dashcdg_clock_now_ms());
 }
 
 void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
