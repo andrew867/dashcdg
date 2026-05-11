@@ -97,10 +97,14 @@ If ESP-IDF activation reports `MSys/Mingw is not supported`, the session inherit
 
 After flashing, run the automated UART cycle and summary:
 
-- `python scripts/esp32_badge_debug_cycle.py --skip-build-flash --iterations 1 --log-seconds 120 --port COM6`
-- `python scripts/esp32_badge_log_summary.py <log-file>`
+- Full loop (default build uses PowerShell `Initialize-Idf.ps1` + stripped MSYS env so Cursor/Git Bash works): `python scripts/esp32_badge_debug_cycle.py --iterations 1 --log-seconds 120 --port COM6`
+- Capture only: `python scripts/esp32_badge_debug_cycle.py --skip-build-flash --iterations 1 --log-seconds 120 --port COM6`
+- Optional guard when you expect a busy UART: `--min-lines 400` exits **2** if capture is nearly empty (wrong COM / asleep cable).
+- `python scripts/esp32_badge_log_summary.py <log-file>` (counts `rx_listening`, `cdg_jitter_ring_full`, DHCP, etc.)
 
 During automated validation, wait for DHCP (`sta ip:` marker), then launch the CDG app on-device before evaluating playout stability counters.
+
+**Two-phase HW check:** (1) Karaoke Settings — video **on**, audio **on** — confirm HUD/stream OK and low `cdg_jitter_ring_full` in the summary. (2) Same screen — video **off**, audio **on** (saved to NVS) — HUD must **not** treat missing CDG heap as failure (audio-only uses chunk/frame counters).
 
 ### ESP32 badge LVGL (`platform/espidf/projects/dashcdg_badge/main/`)
 

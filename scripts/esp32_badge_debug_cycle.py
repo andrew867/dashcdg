@@ -34,6 +34,9 @@ def windows_shell_env() -> dict[str, str]:
             env.pop(k, None)
     for k in ("SHELL", "TERM", "CHERE_INVOKING", "PWD", "OLDPWD"):
         env.pop(k, None)
+    # Match scripts/idf_build_flash_badge.ps1 — IDF python guard rejects MSYSTEM-style shells.
+    for k in ("MSYSTEM", "MSYS2_ROOT", "MINGW_PREFIX", "MINGW_CHOST", "MINGW_PACKAGE_PREFIX"):
+        env.pop(k, None)
     return env
 
 
@@ -62,8 +65,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--init-shell",
         choices=("cmd", "powershell"),
-        default="cmd",
-        help="Environment bootstrap method.",
+        default="powershell",
+        help=(
+            "ESP-IDF bootstrap: powershell (default) runs Initialize-Idf.ps1 then idf.py "
+            "(Espressif desktop shortcut flow). "
+            'cmd uses ""..\\idf_cmd_init.bat"" quoting (fragile if project path has spaces).'
+        ),
     )
     p.add_argument("--skip-build-flash", action="store_true", help="Capture UART only; skip idf.py build flash.")
     p.add_argument(
@@ -72,34 +79,46 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WAIT_DHCP_SECONDS,
         help="How long to watch for STA DHCP log before reminder to launch CDG app.",
     )
+    p.add_argument(
+        "--min-lines",
+        type=int,
+        default=0,
+        help="If >0, exit with code 2 when UART capture has fewer total lines (hint: idle UART or wrong COM port).",
+    )
     return p.parse_args()
 
 
 def run_build_flash(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
+    project_q = str(project_dir)
     if args.init_shell == "cmd":
-        cmd = [
-            "C:\\Windows\\System32\\cmd.exe",
-            "/c",
-            f'"C:\\Espressif\\idf_cmd_init.bat" {args.idf_id} && cd /d "{project_dir}" && idf.py -p {args.port} build flash',
-        ]
-        print(f"[debug-cycle] build/flash command:\n{' '.join(cmd)}\n")
+        # Match Espressif shortcuts: cmd /k ""C:\Espressif\idf_cmd_init.bat" <IdfId>"
+        # (Leading "" is cmd's escape so the batch path can be quoted.)
+        cmd_line = (
+            f'""C:\\Espressif\\idf_cmd_init.bat" {args.idf_id} '
+            f'&& cd /d "{project_q}" '
+            f'&& idf.py -p {args.port} build flash'
+        )
+        cmd = ["C:\\Windows\\System32\\cmd.exe", "/c", cmd_line]
+        print(f"[debug-cycle] build/flash (cmd):\n{cmd_line}\n")
         result = subprocess.run(cmd, env=windows_shell_env())
     else:
-        ps = (
-            f"& 'C:\\Espressif\\Initialize-Idf.ps1' -IdfId '{args.idf_id}'; "
-            f"Set-Location '{project_dir}'; "
+        ps_exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        init_ps1 = r"C:\Espressif\Initialize-Idf.ps1"
+        ps_cmd = (
+            f"& '{init_ps1}' -IdfId '{args.idf_id}'; "
+            f"Set-Location -LiteralPath '{project_q.replace(chr(39), chr(39) + chr(39))}'; "
             f"idf.py -p {args.port} build flash"
         )
         cmd = [
-            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            ps_exe,
             "-ExecutionPolicy",
             "Bypass",
             "-NoProfile",
             "-Command",
-            ps,
+            ps_cmd,
         ]
-        print(f"[debug-cycle] build/flash command:\n{' '.join(cmd)}\n")
+        print(f"[debug-cycle] build/flash (powershell):\n{ps_cmd}\n")
         result = subprocess.run(cmd, env=windows_shell_env())
 
     if result.returncode != 0:
@@ -149,6 +168,13 @@ def capture_uart(args: argparse.Namespace, log_file: Path) -> None:
                 print(f"[debug-cycle] ... {total_lines} lines")
 
     print(f"[debug-cycle] UART capture complete ({total_lines} lines)")
+    if args.min_lines > 0 and total_lines < args.min_lines:
+        print(
+            f"[debug-cycle] WARNING: only {total_lines} lines captured (expected >= {args.min_lines}). "
+            "Check USB cable, COM port, monitor baud, or that the badge is not stuck/deep sleep.",
+            file=sys.stderr,
+        )
+        raise RuntimeError(f"UART capture too short: {total_lines} < {args.min_lines}")
 
 
 def main() -> int:
@@ -180,4 +206,6 @@ if __name__ == "__main__":
         raise SystemExit(130)
     except Exception as exc:
         print(f"\n[debug-cycle] ERROR: {exc}", file=sys.stderr)
+        if "UART capture too short" in str(exc):
+            raise SystemExit(2)
         raise SystemExit(1)

@@ -27,6 +27,13 @@ PATTERNS = {
     "rx_listening": re.compile(r"badge_rx:\s+listening UDP", re.IGNORECASE),
     "karaoke_ui_up": re.compile(r"karaoke UI up", re.IGNORECASE),
     "rx_stats_sent_log": re.compile(r"v4 rx-stats sendto", re.IGNORECASE),
+    # Video / CDG path (ESP_LOGW ring_full from badge_rx when jitter cannot accept a delta)
+    "cdg_jitter_ring_full": re.compile(r"CDG jitter ring_full", re.IGNORECASE),
+    "v4_anchor_applied_log": re.compile(r"v4 anchor applied", re.IGNORECASE),
+    "rx_task_exit": re.compile(r"badge_rx:\s+rx task exit|rx task exit", re.IGNORECASE),
+    "rx_stopped_log": re.compile(r"badge_rx:\s+rx stopped", re.IGNORECASE),
+    "igmp_bootstrap_pass": re.compile(r"IGMP bootstrap:", re.IGNORECASE),
+    "sta_got_ip": re.compile(r"got ip:|STA_GOT_IP|esp_netif_handlers:\s+Got IP", re.IGNORECASE),
 }
 
 
@@ -62,6 +69,10 @@ def print_table(rows: list[dict[str, int | str]]) -> None:
         "wifi_ps1",
         "rx_listening",
         "karaoke_ui_up",
+        "cdg_jitter_ring_full",
+        "v4_anchor_applied_log",
+        "rx_task_exit",
+        "sta_got_ip",
     ]
     widths = {c: len(c) for c in cols}
     for row in rows:
