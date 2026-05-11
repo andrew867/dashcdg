@@ -816,7 +816,7 @@ static int dashcdg_rx_init_audio_decoder_for_codec(
 ) {
     if (codec_id == DASHCDG_V4_AUDIO_CODEC_OPUS) {
 #if !defined(DASHCDG_DESKTOP_NO_OPUS)
-        dashcdg_opus_decoder_init(&g_opus_decoder, sample_rate, channels, frame_ms);
+        dashcdg_opus_decoder_init(&g_opus_decoder, sample_rate, channels, frame_ms, NULL);
         return 1;
 #else
         (void) sample_rate;
@@ -1628,6 +1628,7 @@ static void dashcdg_rx_render_connecting_state(
     const char *title = reconnecting ? "RECONNECTING" : "CONNECTING";
     int pulse = (int) ((now_ms / 250U) % 4U);
     int stripe_phase = (int) ((now_ms / 400U) % 6U);
+    int scroll_phase = (int) ((now_ms / 120U) % DASHCDG_VISIBLE_WIDTH);
     int title_width = (int) strlen(title) * 24;
     int title_x = DASHCDG_VISIBLE_X + ((DASHCDG_VISIBLE_WIDTH - title_width) / 2);
     int title_y = DASHCDG_VISIBLE_Y + 54;
@@ -1658,22 +1659,40 @@ static void dashcdg_rx_render_connecting_state(
 
     for (int stripe = 0; stripe < 6; ++stripe) {
         uint8_t color = (uint8_t) (((stripe + stripe_phase) % 3) == 0 ? 2 : (((stripe + stripe_phase) % 3) == 1 ? 3 : 4));
+        int y_top = DASHCDG_VISIBLE_Y + (stripe * 12);
+        int y_bottom = DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12);
 
         dashcdg_rx_fill_rect(
                 state,
                 DASHCDG_VISIBLE_X,
-                DASHCDG_VISIBLE_Y + (stripe * 12),
+                y_top,
                 DASHCDG_VISIBLE_WIDTH,
                 5,
                 color
         );
         dashcdg_rx_fill_rect(
                 state,
+                DASHCDG_VISIBLE_X + ((scroll_phase + stripe * 19) % DASHCDG_VISIBLE_WIDTH),
+                y_top,
+                42,
+                5,
+                (uint8_t) (reconnecting ? 6 : 5)
+        );
+        dashcdg_rx_fill_rect(
+                state,
                 DASHCDG_VISIBLE_X,
-                DASHCDG_VISIBLE_BOTTOM - ((stripe + 1) * 12),
+                y_bottom,
                 DASHCDG_VISIBLE_WIDTH,
                 5,
                 color
+        );
+        dashcdg_rx_fill_rect(
+                state,
+                DASHCDG_VISIBLE_X + ((DASHCDG_VISIBLE_WIDTH - scroll_phase + stripe * 23) % DASHCDG_VISIBLE_WIDTH),
+                y_bottom,
+                50,
+                5,
+                (uint8_t) (reconnecting ? 5 : 6)
         );
     }
 
@@ -1710,6 +1729,14 @@ static void dashcdg_rx_render_connecting_state(
             22,
             20,
             7
+    );
+    dashcdg_rx_fill_rect(
+            state,
+            DASHCDG_VISIBLE_X + ((scroll_phase * 2) % DASHCDG_VISIBLE_WIDTH),
+            DASHCDG_VISIBLE_Y + 176,
+            88,
+            4,
+            reconnecting ? 6 : 4
     );
 }
 
@@ -6480,7 +6507,8 @@ static void handle_announce(struct receiver_state *state, const struct dashcdg_p
                         &g_opus_decoder,
                         view->announce.audio_sample_rate,
                         view->announce.audio_channels,
-                        view->announce.audio_frame_ms
+                        view->announce.audio_frame_ms,
+                        NULL
                 );
 #endif
                 dashcdg_desktop_audio_set_muted(g_audio, g_audio_muted);
