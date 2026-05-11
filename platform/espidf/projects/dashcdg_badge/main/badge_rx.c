@@ -3640,14 +3640,10 @@ static void handle_video_delta(const struct dashcdg_packet_view *view, uint64_t 
     cap = dashcdg_cdg_batch_jitter_capacity(s_jb);
 
     /*
-     * Apply ready CDG batches before evict_pressure: eviction drops furthest-ahead work; draining frees
-     * slots from the playback cursor forward and avoids unnecessary graphic loss when the ring is deep
-     * but catch-up-able.
+     * Do not call drain_cdg_to_idle() here: this handler runs with `s_mtx` held (media pump). A full
+     * CDG+audio drain in the locked packet path can stall recv/select long enough to starve the stream
+     * and wedge diagnostics. Evict furthest-ahead batches first; successful insert still drains below.
      */
-    if (cap > 0U && occ + s_cdg_jb_headroom_slots > cap) {
-        drain_cdg_to_idle(local_now_ms);
-        occ = dashcdg_cdg_batch_jitter_occupied_count(s_jb);
-    }
     if (cap > 0U && occ + s_cdg_jb_headroom_slots > cap) {
         dashcdg_cdg_batch_jitter_evict_pressure(s_jb, s_cdg_jb_headroom_slots);
         s_stats.jb_evict_rounds++;
@@ -3674,7 +3670,6 @@ static void handle_video_delta(const struct dashcdg_packet_view *view, uint64_t 
         return;
     }
 
-    drain_cdg_to_idle(local_now_ms);
     evict_goal = s_cdg_jb_headroom_slots + 2U;
     if (evict_goal < 4U) {
         evict_goal = 4U;
@@ -3707,7 +3702,7 @@ static void handle_video_delta(const struct dashcdg_packet_view *view, uint64_t 
     if (ins_rc != DASHCDG_CDG_JB_INSERT_BAD_ARGS) {
         s_stats.cdg_delta_insert_fail++;
         if ((s_stats.cdg_delta_insert_fail & 31U) == 1U) {
-            ESP_LOGW(TAG, "CDG jitter ring_full after drain+evict (cap=%u occ=%u ps=%llu)", (unsigned)cap,
+            ESP_LOGW(TAG, "CDG jitter ring_full after evict (cap=%u occ=%u ps=%llu)", (unsigned)cap,
                      (unsigned)dashcdg_cdg_batch_jitter_occupied_count(s_jb),
                      (unsigned long long)view->v4_video_delta.packet_start_index);
         }
@@ -4308,8 +4303,13 @@ static void badge_rx_task(void *arg)
         }
         {
             const uint64_t post_burst_ms = dashcdg_clock_now_ms();
+            /* Audio-only: give the RX task more time to take the mutex after a burst; 12ms often lost
+             * contending with the media pump, starving drain and causing decode/SKIP -> fuzz -> silence. */
+            const TickType_t post_ticks = (s_audio_decode_enabled != 0U && s_video_decode_enabled == 0U)
+                                                  ? pdMS_TO_TICKS(48)
+                                                  : pdMS_TO_TICKS(12);
 
-            if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(12)) == pdTRUE) {
+            if (xSemaphoreTake(s_mtx, post_ticks) == pdTRUE) {
                 badge_rx_drain_v4_audio(post_burst_ms);
                 badge_rx_adapt_jitter_capacity_locked(post_burst_ms);
                 xSemaphoreGive(s_mtx);
@@ -4553,6 +4553,12 @@ void dashcdg_badge_rx_start(void)
         (void)dashcdg_badge_prefs_load_karaoke_audio_decode(&a);
         s_video_decode_enabled = (v != 0U) ? 1U : 0U;
         s_audio_decode_enabled = (a != 0U) ? 1U : 0U;
+    }
+    {
+        uint8_t kov = 85U;
+
+        (void)dashcdg_badge_prefs_load_karaoke_output_volume(&kov);
+        dashcdg_platform_hw_set_karaoke_output_volume_pct(kov);
     }
     memset(s_stats.last_error, 0, sizeof(s_stats.last_error));
     s_cdg_jb_headroom_slots = BADGE_RX_JB_HEADROOM_EFFECTIVE;
@@ -4992,6 +4998,8 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
     out->audio_rx_no_dac_warn = s_audio_rx_no_dac_warn_count;
     out->v4_rx_stats_suppressed = s_v4_stats_suppressed;
     out->media_path_policy = s_media_path_policy;
+    out->video_decode_enabled = (s_video_decode_enabled != 0U) ? 1U : 0U;
+    out->audio_decode_enabled = (s_audio_decode_enabled != 0U) ? 1U : 0U;
     snprintf(out->tx_stats_dest, sizeof(out->tx_stats_dest), "--");
     if (s_v4_tx_src_ipv4 != 0U) {
         uint32_t h = ntohl(s_v4_tx_src_ipv4);

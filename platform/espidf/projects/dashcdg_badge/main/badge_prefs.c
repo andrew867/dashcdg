@@ -1,5 +1,7 @@
 #include "badge_prefs.h"
 
+#include <stdint.h>
+
 #include "esp_check.h"
 #include "esp_log.h"
 #include "nvs.h"
@@ -28,6 +30,11 @@ static const char *KEY_KST_OK = "kst_ok";
 static const char *KEY_KST_ON = "kst_on";
 static const char *KEY_KMP_OK = "kmp_ok";
 static const char *KEY_KMP_MD = "kmp_md";
+static const char *KEY_KOVOL_OK = "kov_ok";
+static const char *KEY_KOVOL_PCT = "kov_pct";
+
+static uint64_t s_kovol_save_deadline_ms;
+static uint8_t s_kovol_pending_pct;
 
 esp_err_t dashcdg_badge_prefs_load_brightness(uint8_t *out_pct_5_100)
 {
@@ -507,4 +514,77 @@ esp_err_t dashcdg_badge_prefs_save_karaoke_media_path_policy(uint8_t mode)
     }
     nvs_close(h);
     return err;
+}
+
+esp_err_t dashcdg_badge_prefs_load_karaoke_output_volume(uint8_t *out_pct_0_100)
+{
+    ESP_RETURN_ON_FALSE(out_pct_0_100 != NULL, ESP_ERR_INVALID_ARG, TAG, "out");
+
+    *out_pct_0_100 = 85U;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return ESP_OK;
+    }
+    uint8_t ok = 0;
+    err = nvs_get_u8(h, KEY_KOVOL_OK, &ok);
+    if (err != ESP_OK || ok != 1) {
+        nvs_close(h);
+        return ESP_OK;
+    }
+    uint8_t v = 85U;
+    (void)nvs_get_u8(h, KEY_KOVOL_PCT, &v);
+    nvs_close(h);
+    if (v > 100U) {
+        v = 100U;
+    }
+    *out_pct_0_100 = v;
+    return ESP_OK;
+}
+
+esp_err_t dashcdg_badge_prefs_save_karaoke_output_volume(uint8_t pct_0_100)
+{
+    if (pct_0_100 > 100U) {
+        pct_0_100 = 100U;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open RW kovol: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_u8(h, KEY_KOVOL_PCT, pct_0_100);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, KEY_KOVOL_OK, 1);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "karaoke output volume save: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+void dashcdg_badge_prefs_schedule_karaoke_output_volume_save(uint8_t pct_0_100, uint64_t now_ms)
+{
+    if (pct_0_100 > 100U) {
+        pct_0_100 = 100U;
+    }
+    s_kovol_pending_pct = pct_0_100;
+    s_kovol_save_deadline_ms = now_ms + 5000ULL;
+}
+
+void dashcdg_badge_prefs_poll_karaoke_output_volume_save(uint64_t now_ms)
+{
+    if (s_kovol_save_deadline_ms == 0ULL) {
+        return;
+    }
+    if (now_ms < s_kovol_save_deadline_ms) {
+        return;
+    }
+    uint8_t v = s_kovol_pending_pct;
+    s_kovol_save_deadline_ms = 0ULL;
+    (void)dashcdg_badge_prefs_save_karaoke_output_volume(v);
 }

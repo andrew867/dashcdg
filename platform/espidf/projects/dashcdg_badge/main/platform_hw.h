@@ -122,6 +122,10 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
  */
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void);
 
+/** Karaoke RX line-out volume 0–100 (linear; 0 ⇒ mute path / amp off request). */
+uint8_t dashcdg_platform_hw_get_karaoke_output_volume_pct(void);
+void dashcdg_platform_hw_set_karaoke_output_volume_pct(uint8_t pct_0_100);
+
 /**
  * LVGL thread: non-zero panel command pending (1 = ST7789 sleep off, 2 = wake on).
  * Call `dashcdg_platform_hw_ack_display_power_cmd()` after a successful `esp_lcd_panel_disp_on_off`.

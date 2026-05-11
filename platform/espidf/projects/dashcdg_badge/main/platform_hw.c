@@ -227,6 +227,8 @@ static uint32_t s_karaoke_dac_upsample_accum;
  * failed allocs/sec, no headroom recovery, and amp/DAC "pop" as enable is retried forever.
  */
 static TickType_t s_karaoke_dac_begin_cool_until_tick;
+/** 0–100 linear gain before `KARAOKE_DAC_PCM_GAIN_NUM`; 0 ⇒ no samples fed (see `dashcdg_platform_hw_set_karaoke_output_volume_pct`). */
+static volatile uint8_t s_karaoke_out_vol_pct = 85U;
 
 static uint32_t karaoke_dac_effective_hz(uint32_t nominal_hz, int32_t ppm)
 {
@@ -1171,8 +1173,12 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
     size_t chunk = s_karaoke_dac_chunk_samples;
     uint32_t nom_hz = s_karaoke_dac_open_nominal_hz;
     uint32_t eff_hz = s_karaoke_dac_open_effective_hz;
+    const uint32_t vol_pct = (uint32_t)s_karaoke_out_vol_pct;
 
     if (pcm == NULL || samples == 0U || s_karaoke_dac_handle == NULL) {
+        return;
+    }
+    if (vol_pct == 0U) {
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
@@ -1180,7 +1186,7 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
     }
     amp_set_run(true);
     for (size_t i = 0U; i < samples; ++i) {
-        int32_t s = (int32_t)pcm[i];
+        int32_t s = ((int32_t)pcm[i] * (int32_t)vol_pct) / 100;
         int32_t u = (s * (int32_t)KARAOKE_DAC_PCM_GAIN_NUM) / 32768 + 128;
         uint32_t emit = 1U;
 
@@ -1205,6 +1211,23 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
                 s_karaoke_dac_fill = 0U;
             }
         }
+    }
+}
+
+uint8_t dashcdg_platform_hw_get_karaoke_output_volume_pct(void)
+{
+    return s_karaoke_out_vol_pct;
+}
+
+void dashcdg_platform_hw_set_karaoke_output_volume_pct(uint8_t pct_0_100)
+{
+    if (pct_0_100 > 100U) {
+        pct_0_100 = 100U;
+    }
+    s_karaoke_out_vol_pct = pct_0_100;
+    if (pct_0_100 == 0U && s_mtx != NULL && xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) == pdTRUE) {
+        amp_set_run(false);
+        xSemaphoreGive(s_mtx);
     }
 }
 
@@ -1271,6 +1294,16 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16_48k(const int16_t *pcm, size_
 }
 
 void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void) {}
+
+uint8_t dashcdg_platform_hw_get_karaoke_output_volume_pct(void)
+{
+    return 85U;
+}
+
+void dashcdg_platform_hw_set_karaoke_output_volume_pct(uint8_t pct_0_100)
+{
+    (void)pct_0_100;
+}
 #endif
 
 static esp_err_t gpio_misc_init(void)

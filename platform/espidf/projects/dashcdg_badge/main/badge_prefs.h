@@ -39,3 +39,13 @@ esp_err_t dashcdg_badge_prefs_save_karaoke_v4_stats_tx(uint8_t on);
 /** Media path policy: 0=both, 1=mcast_prefer, 2=ucast_prefer, 3=auto (default auto). */
 esp_err_t dashcdg_badge_prefs_load_karaoke_media_path_policy(uint8_t *out_mode);
 esp_err_t dashcdg_badge_prefs_save_karaoke_media_path_policy(uint8_t mode);
+
+/** Karaoke speaker output: 0–100 (0 = muted / amp off in UI). Default 85. */
+esp_err_t dashcdg_badge_prefs_load_karaoke_output_volume(uint8_t *out_pct_0_100);
+esp_err_t dashcdg_badge_prefs_save_karaoke_output_volume(uint8_t pct_0_100);
+/**
+ * Debounced NVS commit: call after each user change with monotonic `now_ms`; trailing-edge ~5 s.
+ * Pair with `dashcdg_badge_prefs_poll_karaoke_output_volume_save` from an LVGL timer tick.
+ */
+void dashcdg_badge_prefs_schedule_karaoke_output_volume_save(uint8_t pct_0_100, uint64_t now_ms);
+void dashcdg_badge_prefs_poll_karaoke_output_volume_save(uint64_t now_ms);

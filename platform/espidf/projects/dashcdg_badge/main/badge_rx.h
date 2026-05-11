@@ -133,6 +133,9 @@ typedef struct {
     uint32_t audio_rx_no_dac_warn;
     /** Media path policy: 0=both, 1=mcast_prefer, 2=ucast_prefer, 3=auto. */
     uint8_t media_path_policy;
+    /** Karaoke settings snapshot: affects HUD (audio-only must not require CDG heap). */
+    uint8_t video_decode_enabled;
+    uint8_t audio_decode_enabled;
 } dashcdg_badge_rx_stats_t;
 
 #define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U
