@@ -21,7 +21,6 @@ list(REMOVE_ITEM QCELP_CODE_SRCS
     "${QCELP_ROOT}/code/rate_dos.c"
     "${QCELP_ROOT}/code/ratedec_dos.c"
 )
-file(GLOB QCELP_TTY_SRCS "${QCELP_ROOT}/tty/*.c")
 file(GLOB QCELP_DSP_SRCS "${QCELP_ROOT}/dsp_fx/*.c")
 list(REMOVE_ITEM QCELP_DSP_SRCS "${QCELP_ROOT}/dsp_fx/basic_op.c")
 
@@ -35,7 +34,6 @@ set(RX_AUDIO_SRCS
     ${AMR_WB_DEC_SRCS}
     ${AMR_NB_RX_SRCS}
     ${QCELP_CODE_SRCS}
-    ${QCELP_TTY_SRCS}
     ${QCELP_DSP_SRCS}
 )
 
@@ -61,6 +59,7 @@ set(_rx_audio_warn
     -Wno-unused-variable
     -Wno-sign-compare
     -Wno-maybe-uninitialized
+    -Wno-error=misleading-indentation
     -Wno-unknown-pragmas
     -Wno-switch
     -fno-strict-aliasing

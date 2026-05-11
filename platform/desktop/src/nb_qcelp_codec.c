@@ -12,6 +12,20 @@
 #include "dashcdg/pcm_rate_convert.h"
 
 char *trans_fname = NULL;
+#if defined(ESP_PLATFORM)
+/* RX badge builds decode QCELP with TTY explicitly disabled; provide tiny TTY shims. */
+Word16 tty_option = 0;
+Word16 tty_enc_flag = 0;
+Word16 tty_enc_header = 0;
+Word16 tty_enc_char = 0;
+Word16 tty_enc_baud_rate = 0;
+Word16 tty_dec_flag = 0;
+Word16 tty_dec_header = 0;
+Word16 tty_dec_char = 0;
+Word16 tty_dec_baud_rate = 0;
+Word16 data_flag = 0;
+Word16 speech_data_flag = 0;
+#endif
 
 struct dashcdg_qcelp13k_codec {
     struct ENCODER_MEM enc_mem;
@@ -313,3 +327,55 @@ Word16 round_l(Word32 L_var1) {
 
     return extract_h(L_Prod);
 }
+
+#if defined(ESP_PLATFORM)
+void init_tty_enc(Word16 *tty_char, Word16 *counter, Word16 *tty_baud_rate) {
+    if (tty_char != NULL) {
+        *tty_char = 0;
+    }
+    if (counter != NULL) {
+        *counter = 0;
+    }
+    if (tty_baud_rate != NULL) {
+        *tty_baud_rate = 0;
+    }
+}
+
+Word16 tty_enc(Word16 *tty_char, Word16 *counter, Word16 *tty_baud_rate, float pcm_buf[], Word16 len) {
+    (void) tty_char;
+    (void) counter;
+    (void) tty_baud_rate;
+    (void) pcm_buf;
+    (void) len;
+    return 0;
+}
+
+void init_tty_dec(void) {}
+
+Word16 tty_dec(
+        Word16 buf[],
+        Word16 acb_gain,
+        Word16 counter,
+        Word16 tty_char,
+        Word16 tty_baud_rate,
+        Word16 fer_flag,
+        Word16 subframe,
+        Word16 num_subfr,
+        Word16 length
+) {
+    (void) acb_gain;
+    (void) counter;
+    (void) tty_char;
+    (void) tty_baud_rate;
+    (void) fer_flag;
+    (void) subframe;
+    (void) num_subfr;
+    if (buf != NULL && length > 0) {
+        size_t i;
+        for (i = 0U; i < (size_t) length; ++i) {
+            buf[i] = 0;
+        }
+    }
+    return 0;
+}
+#endif
