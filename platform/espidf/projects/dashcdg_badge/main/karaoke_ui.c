@@ -13,6 +13,7 @@
 #include "lvgl.h"
 
 #include "battery_label.h"
+#include "badge_prefs.h"
 #include "badge_rx.h"
 #include "dashcdg/media_clock.h"
 #include "display_lvgl.h"
@@ -38,6 +39,17 @@ static lv_obj_t *s_mcast_card_song;
 static lv_obj_t *s_mcast_modal_root;
 /** Layout anchor + border; pixels drawn via esp_lcd_panel_draw_bitmap (see badge_rx_ui_tick). */
 static lv_obj_t *s_cdg_slot;
+static lv_obj_t *s_cdg_frame;
+static lv_obj_t *s_stage_fill;
+static lv_obj_t *s_audio_only_panel;
+static lv_obj_t *s_audio_track_lbl;
+static lv_obj_t *s_audio_vol_slider;
+static lv_obj_t *s_audio_vol_pct_lbl;
+static lv_obj_t *s_audio_mute_btn;
+static lv_obj_t *s_audio_mute_lbl;
+static bool s_audio_vol_slider_guard;
+static uint8_t s_audio_vol_before_mute = 85U;
+static bool s_was_audio_only_mode;
 
 static lv_obj_t *s_bar_wifi;
 static lv_obj_t *s_bar_bat;
@@ -288,12 +300,18 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         miss_per_10k = (uint32_t)derived;
     }
 
-    if (st->jb_pending_slots > 0U) {
+    if (st->jb_pending_slots > 0U || st->audio_jb_pending_slots > 0U) {
         s_last_buf_nonzero_ms = now_ms;
     }
     buf_recent = (s_last_buf_nonzero_ms != 0U) && ((now_ms - s_last_buf_nonzero_ms) <= 1800U);
-    const bool buf_ok = ((st->jb_pending_slots > 0U) || buf_recent) && (st->v4_video_delta_count > 0U);
-    const bool stream_ok = clock && buf_ok && (st->cdg_heap_ok != 0);
+    const bool buf_ok =
+            (st->video_decode_enabled != 0U)
+                    ? (((st->jb_pending_slots > 0U) || buf_recent) && (st->v4_video_delta_count > 0U))
+                    : ((st->audio_decode_enabled != 0U) &&
+                       ((st->audio_jb_pending_slots > 0U) || buf_recent || st->v4_audio_frames_out > 0U ||
+                        st->v4_audio_chunk_rx > 0U));
+    const bool stream_ok =
+            clock && buf_ok && ((st->video_decode_enabled == 0U) || (st->cdg_heap_ok != 0));
 
     lv_color_t mc = idlec;
     if (!rx_on) {
@@ -334,7 +352,7 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         dc = badc;
     } else if (stream_ok) {
         dc = okc;
-    } else if (st->cdg_heap_ok == 0) {
+    } else if ((st->video_decode_enabled != 0U) && st->cdg_heap_ok == 0) {
         dc = badc;
     } else {
         dc = waitc;
@@ -353,7 +371,7 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
     } else if (!clock) {
         sym = LV_SYMBOL_REFRESH;
         lcol = waitc;
-    } else if (st->cdg_heap_ok == 0) {
+    } else if ((st->video_decode_enabled != 0U) && st->cdg_heap_ok == 0) {
         sym = LV_SYMBOL_CLOSE;
         lcol = badc;
     } else if (miss_per_10k > 300U) {
@@ -504,6 +522,15 @@ void dashcdg_karaoke_ui_teardown(void)
     }
     s_tick_ctx.disp = NULL;
     s_cdg_slot = NULL;
+    s_cdg_frame = NULL;
+    s_stage_fill = NULL;
+    s_audio_only_panel = NULL;
+    s_audio_track_lbl = NULL;
+    s_audio_vol_slider = NULL;
+    s_audio_vol_pct_lbl = NULL;
+    s_audio_mute_btn = NULL;
+    s_audio_mute_lbl = NULL;
+    s_was_audio_only_mode = false;
     s_bar_wifi = NULL;
     s_bar_bat = NULL;
     s_bar_m = NULL;
@@ -737,6 +764,75 @@ static void on_info_btn(lv_event_t *e)
     lv_obj_move_foreground(root);
 }
 
+static void karaoke_audio_refresh_vol_widgets(void)
+{
+    uint8_t pct = dashcdg_platform_hw_get_karaoke_output_volume_pct();
+
+    if (s_audio_vol_slider != NULL && lv_obj_is_valid(s_audio_vol_slider)) {
+        s_audio_vol_slider_guard = true;
+        lv_slider_set_value(s_audio_vol_slider, (int32_t)pct, LV_ANIM_OFF);
+        s_audio_vol_slider_guard = false;
+    }
+    if (s_audio_vol_pct_lbl != NULL && lv_obj_is_valid(s_audio_vol_pct_lbl)) {
+        char b[12];
+
+        snprintf(b, sizeof(b), "%u%%", (unsigned)pct);
+        lv_label_set_text(s_audio_vol_pct_lbl, b);
+    }
+    if (s_audio_mute_lbl != NULL && lv_obj_is_valid(s_audio_mute_lbl)) {
+        if (pct == 0U) {
+            lv_label_set_text(s_audio_mute_lbl, LV_SYMBOL_VOLUME_MAX "  Unmute");
+        } else {
+            lv_label_set_text(s_audio_mute_lbl, LV_SYMBOL_MUTE "  Mute");
+        }
+    }
+}
+
+static void on_audio_vol_slider(lv_event_t *e)
+{
+    if (s_audio_vol_slider_guard) {
+        return;
+    }
+    lv_obj_t *sl = lv_event_get_target(e);
+    int32_t v = lv_slider_get_value(sl);
+
+    if (v < 0) {
+        v = 0;
+    }
+    if (v > 100) {
+        v = 100;
+    }
+    {
+        uint8_t pct = (uint8_t)v;
+
+        dashcdg_platform_hw_set_karaoke_output_volume_pct(pct);
+        dashcdg_badge_prefs_schedule_karaoke_output_volume_save(pct, dashcdg_clock_now_ms());
+    }
+    karaoke_audio_refresh_vol_widgets();
+}
+
+static void on_audio_mute_btn(lv_event_t *e)
+{
+    (void)e;
+    uint8_t cur = dashcdg_platform_hw_get_karaoke_output_volume_pct();
+    uint64_t now = dashcdg_clock_now_ms();
+
+    if (cur > 0U) {
+        s_audio_vol_before_mute = cur;
+        dashcdg_platform_hw_set_karaoke_output_volume_pct(0);
+        dashcdg_badge_prefs_schedule_karaoke_output_volume_save(0, now);
+    } else {
+        uint8_t r = s_audio_vol_before_mute;
+
+        if (r == 0U) {
+            r = 85U;
+        }
+        dashcdg_platform_hw_set_karaoke_output_volume_pct(r);
+        dashcdg_badge_prefs_schedule_karaoke_output_volume_save(r, now);
+    }
+    karaoke_audio_refresh_vol_widgets();
+}
+
 static void on_tick(lv_timer_t *t)
 {
     tick_ctx_t *c = (tick_ctx_t *)lv_timer_get_user_data(t);
@@ -756,23 +852,76 @@ static void on_tick(lv_timer_t *t)
         /* PM: CDG blit cadence proves the UI is alive even if jitter pending hits 0 between frames. */
         dashcdg_platform_hw_note_karaoke_cdg_overlay_tick(dashcdg_clock_now_ms());
         {
+            const uint64_t now = dashcdg_clock_now_ms();
             dashcdg_badge_rx_stats_t st;
+
+            dashcdg_badge_prefs_poll_karaoke_output_volume_save(now);
             dashcdg_badge_rx_get_stats(&st);
             /*
-             * "Stream OK" for RGB + idle policy: do not require jb_pending and video deltas together;
-             * jitter can read empty for a tick while video is still playing, which used to clear ok and
-             * arm backlight sleep.
+             * Stream OK for PM / backlight: video needs CDG jitter progress; audio-only needs chunks/frames.
              */
-            bool ok = (st.have_clock != 0) && (st.jb_pending_slots > 0U || st.v4_video_delta_count > 0U);
-            dashcdg_platform_hw_set_cdg_stream_ok(ok);
-            {
-                uint64_t now = dashcdg_clock_now_ms();
-                if (s_status_slow_deadline_ms == 0U || now >= s_status_slow_deadline_ms) {
-                    karaoke_status_bar_update_slow();
-                    s_status_slow_deadline_ms = now + (uint64_t)KARAOKE_STATUS_SLOW_PERIOD_MS;
+            bool ok = false;
+            if (st.have_clock != 0) {
+                if (st.video_decode_enabled != 0U) {
+                    ok = (st.jb_pending_slots > 0U || st.v4_video_delta_count > 0U);
+                } else if (st.audio_decode_enabled != 0U) {
+                    ok = (st.v4_audio_chunk_rx > 0U || st.v4_audio_frames_out > 0U || st.audio_jb_pending_slots > 0U);
                 }
             }
+            dashcdg_platform_hw_set_cdg_stream_ok(ok);
+            if (s_status_slow_deadline_ms == 0U || now >= s_status_slow_deadline_ms) {
+                karaoke_status_bar_update_slow();
+                s_status_slow_deadline_ms = now + (uint64_t)KARAOKE_STATUS_SLOW_PERIOD_MS;
+            }
             karaoke_status_bar_update_fast(&st);
+
+            {
+                bool audio_only = (st.video_decode_enabled == 0U && st.audio_decode_enabled != 0U);
+
+                if (audio_only != s_was_audio_only_mode) {
+                    s_was_audio_only_mode = audio_only;
+                    if (audio_only) {
+                        karaoke_audio_refresh_vol_widgets();
+                    }
+                }
+                if (audio_only) {
+                    if (s_cdg_frame && lv_obj_is_valid(s_cdg_frame)) {
+                        lv_obj_add_flag(s_cdg_frame, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    if (s_audio_only_panel && lv_obj_is_valid(s_audio_only_panel)) {
+                        lv_obj_remove_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    if (s_stage_fill && lv_obj_is_valid(s_stage_fill)) {
+                        lv_obj_add_flag(s_stage_fill, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    if (s_audio_track_lbl && lv_obj_is_valid(s_audio_track_lbl)) {
+                        static char prev_track[88];
+
+                        if (strncmp(prev_track, st.song_id, sizeof(prev_track)) != 0) {
+                            strncpy(prev_track, st.song_id, sizeof(prev_track) - 1U);
+                            prev_track[sizeof(prev_track) - 1U] = '\0';
+                            if (st.song_id[0] == '\0') {
+                                lv_label_set_text(s_audio_track_lbl, "Track: (waiting)");
+                            } else {
+                                char buf[128];
+
+                                snprintf(buf, sizeof(buf), "Track:\n%s", st.song_id);
+                                lv_label_set_text(s_audio_track_lbl, buf);
+                            }
+                        }
+                    }
+                } else {
+                    if (s_cdg_frame && lv_obj_is_valid(s_cdg_frame)) {
+                        lv_obj_remove_flag(s_cdg_frame, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    if (s_audio_only_panel && lv_obj_is_valid(s_audio_only_panel)) {
+                        lv_obj_add_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    if (s_stage_fill && lv_obj_is_valid(s_stage_fill)) {
+                        lv_obj_remove_flag(s_stage_fill, LV_OBJ_FLAG_HIDDEN);
+                    }
+                }
+            }
         }
         if (karaoke_mcast_modal_is_open()) {
             if (++s_mcast_modal_body_ticks >= 20U) {
@@ -962,6 +1111,7 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
         lv_obj_set_style_shadow_width(cdg_frame, 0, 0);
         lv_obj_remove_flag(cdg_frame, LV_OBJ_FLAG_CLICKABLE);
         dashcdg_ui_no_scroll(cdg_frame);
+        s_cdg_frame = cdg_frame;
 
         s_cdg_slot = lv_obj_create(cdg_frame);
         lv_obj_set_size(s_cdg_slot, DASHCDG_BADGE_RX_VISIBLE_W, DASHCDG_BADGE_RX_VISIBLE_H);
@@ -972,7 +1122,73 @@ esp_err_t dashcdg_karaoke_ui_present(lv_disp_t *disp)
         dashcdg_ui_no_scroll(s_cdg_slot);
     }
 
+    s_audio_only_panel = lv_obj_create(stage);
+    lv_obj_set_width(s_audio_only_panel, lv_pct(100));
+    lv_obj_set_flex_grow(s_audio_only_panel, 1);
+    lv_obj_set_style_pad_all(s_audio_only_panel, 10, 0);
+    lv_obj_set_style_pad_row(s_audio_only_panel, 14, 0);
+    lv_obj_set_style_border_width(s_audio_only_panel, 2, 0);
+    lv_obj_set_style_border_color(s_audio_only_panel, lv_color_hex(0x226655), 0);
+    lv_obj_set_style_radius(s_audio_only_panel, 12, 0);
+    lv_obj_set_style_bg_color(s_audio_only_panel, lv_color_hex(0x060d0a), 0);
+    lv_obj_set_style_bg_opa(s_audio_only_panel, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(s_audio_only_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_audio_only_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(s_audio_only_panel, LV_OBJ_FLAG_HIDDEN);
+    dashcdg_ui_no_scroll(s_audio_only_panel);
+
+    s_audio_track_lbl = lv_label_create(s_audio_only_panel);
+    lv_label_set_long_mode(s_audio_track_lbl, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(s_audio_track_lbl, lv_pct(100));
+    lv_label_set_text(s_audio_track_lbl, "Track: (waiting)");
+    lv_obj_set_style_text_align(s_audio_track_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_audio_track_lbl, lv_color_hex(0xd0e8df), 0);
+
+    {
+        lv_obj_t *vol_row = lv_obj_create(s_audio_only_panel);
+        lv_obj_set_width(vol_row, lv_pct(100));
+        lv_obj_set_height(vol_row, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_all(vol_row, 0, 0);
+        lv_obj_set_style_border_width(vol_row, 0, 0);
+        lv_obj_set_style_bg_opa(vol_row, LV_OPA_TRANSP, 0);
+        lv_obj_set_flex_flow(vol_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(vol_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(vol_row, 8, 0);
+        dashcdg_ui_no_scroll(vol_row);
+
+        lv_obj_t *vol_cap = lv_label_create(vol_row);
+        lv_label_set_text(vol_cap, "Vol");
+        lv_obj_set_style_text_color(vol_cap, lv_color_hex(0x9aabaa), 0);
+
+        s_audio_vol_slider = lv_slider_create(vol_row);
+        lv_obj_set_flex_grow(s_audio_vol_slider, 1);
+        lv_slider_set_range(s_audio_vol_slider, 0, 100);
+        lv_slider_set_value(s_audio_vol_slider, (int32_t)dashcdg_platform_hw_get_karaoke_output_volume_pct(), LV_ANIM_OFF);
+        lv_obj_add_event_cb(s_audio_vol_slider, on_audio_vol_slider, LV_EVENT_VALUE_CHANGED, NULL);
+
+        s_audio_vol_pct_lbl = lv_label_create(vol_row);
+        lv_label_set_text(s_audio_vol_pct_lbl, "--%");
+        lv_obj_set_style_text_color(s_audio_vol_pct_lbl, lv_color_hex(0x88ddbb), 0);
+        lv_obj_set_style_min_width(s_audio_vol_pct_lbl, 44, 0);
+    }
+
+    s_audio_mute_btn = lv_button_create(s_audio_only_panel);
+    lv_obj_set_width(s_audio_mute_btn, lv_pct(92));
+    lv_obj_set_height(s_audio_mute_btn, 54);
+    lv_obj_set_style_radius(s_audio_mute_btn, 10, 0);
+    lv_obj_set_style_bg_color(s_audio_mute_btn, lv_color_hex(0x1a3328), 0);
+    lv_obj_set_style_pad_all(s_audio_mute_btn, 10, 0);
+    s_audio_mute_lbl = lv_label_create(s_audio_mute_btn);
+    lv_label_set_long_mode(s_audio_mute_lbl, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+    lv_obj_set_width(s_audio_mute_lbl, lv_pct(92));
+    lv_obj_set_style_text_align(s_audio_mute_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_audio_mute_lbl, LV_SYMBOL_MUTE "  Mute");
+    lv_obj_center(s_audio_mute_lbl);
+    lv_obj_add_event_cb(s_audio_mute_btn, on_audio_mute_btn, LV_EVENT_CLICKED, NULL);
+    karaoke_audio_refresh_vol_widgets();
+
     lv_obj_t *stage_fill = lv_obj_create(stage);
+    s_stage_fill = stage_fill;
     lv_obj_set_width(stage_fill, lv_pct(100));
     lv_obj_set_flex_grow(stage_fill, 1);
     lv_obj_set_style_min_height(stage_fill, 0, 0);

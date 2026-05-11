@@ -9,6 +9,7 @@
 
 #include "badge_prefs.h"
 #include "badge_rx.h"
+#include "dashcdg/media_clock.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
 #include "nav.h"
@@ -16,6 +17,9 @@
 #include "wifi_touch_ui.h"
 
 static const char *TAG = "karaoke_settings_ui";
+
+static lv_timer_t *s_kov_poll_timer;
+static lv_obj_t *s_kov_settings_pct_lbl;
 
 static void ui_no_scroll(lv_obj_t *obj)
 {
@@ -66,6 +70,38 @@ static void on_audio_decode_sw(lv_event_t *e)
     dashcdg_platform_hw_notify_activity();
     (void)dashcdg_badge_prefs_save_karaoke_audio_decode(on ? 1U : 0U);
     apply_decode_toggles();
+}
+
+static void kov_poll_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    dashcdg_badge_prefs_poll_karaoke_output_volume_save(dashcdg_clock_now_ms());
+}
+
+static void on_karaoke_output_vol_slider(lv_event_t *e)
+{
+    lv_obj_t *slider = lv_event_get_target(e);
+    int32_t v = lv_slider_get_value(slider);
+
+    if (v < 0) {
+        v = 0;
+    }
+    if (v > 100) {
+        v = 100;
+    }
+    {
+        uint8_t pct = (uint8_t)v;
+
+        dashcdg_platform_hw_notify_activity();
+        dashcdg_platform_hw_set_karaoke_output_volume_pct(pct);
+        dashcdg_badge_prefs_schedule_karaoke_output_volume_save(pct, dashcdg_clock_now_ms());
+        if (s_kov_settings_pct_lbl != NULL && lv_obj_is_valid(s_kov_settings_pct_lbl)) {
+            char b[12];
+
+            snprintf(b, sizeof(b), "%u%%", (unsigned)pct);
+            lv_label_set_text(s_kov_settings_pct_lbl, b);
+        }
+    }
 }
 
 #if defined(CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK) && CONFIG_DASHCDG_BADGE_ENABLE_REPAIR_NACK
@@ -258,6 +294,42 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
     }
     lv_obj_add_event_cb(audio_sw, on_audio_decode_sw, LV_EVENT_VALUE_CHANGED, NULL);
 
+    lv_obj_t *kov_row = lv_obj_create(box);
+    lv_obj_set_width(kov_row, lv_pct(100));
+    lv_obj_set_height(kov_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(kov_row, 0, 0);
+    lv_obj_set_style_border_width(kov_row, 0, 0);
+    lv_obj_set_style_bg_opa(kov_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(kov_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(kov_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(kov_row, 10, 0);
+    ui_no_scroll(kov_row);
+
+    lv_obj_t *kov_lbl = lv_label_create(kov_row);
+    lv_label_set_text(kov_lbl, "Output volume");
+    lv_obj_set_style_text_color(kov_lbl, lv_color_hex(0xaabbcc), 0);
+
+    lv_obj_t *kov_sl = lv_slider_create(kov_row);
+    lv_obj_set_flex_grow(kov_sl, 1);
+    lv_slider_set_range(kov_sl, 0, 100);
+    lv_slider_set_value(kov_sl, (int32_t)dashcdg_platform_hw_get_karaoke_output_volume_pct(), LV_ANIM_OFF);
+    lv_obj_add_event_cb(kov_sl, on_karaoke_output_vol_slider, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_kov_settings_pct_lbl = lv_label_create(kov_row);
+    {
+        char pctb[12];
+        snprintf(pctb, sizeof(pctb), "%u%%", (unsigned)dashcdg_platform_hw_get_karaoke_output_volume_pct());
+        lv_label_set_text(s_kov_settings_pct_lbl, pctb);
+    }
+    lv_obj_set_style_text_color(s_kov_settings_pct_lbl, lv_color_hex(0x88ddbb), 0);
+    lv_obj_set_style_min_width(s_kov_settings_pct_lbl, 40, 0);
+
+    lv_obj_t *kov_hint = lv_label_create(box);
+    lv_label_set_text(kov_hint, "0% = amp off (quiet). Saved ~5s after you stop dragging.");
+    lv_obj_set_width(kov_hint, lv_pct(100));
+    lv_label_set_long_mode(kov_hint, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_color(kov_hint, lv_color_hex(0x5a6d68), 0);
+
     lv_obj_t *tune_title = lv_label_create(scroll);
     lv_label_set_text(tune_title, LV_SYMBOL_WIFI "  RX tuning (reliability)");
     lv_obj_set_style_text_color(tune_title, lv_color_hex(0xe8f0ec), 0);
@@ -347,6 +419,11 @@ esp_err_t dashcdg_karaoke_settings_ui_present(lv_disp_t *disp)
 
     lv_obj_update_layout(outer);
     lv_obj_invalidate(scr);
+
+    if (s_kov_poll_timer == NULL) {
+        s_kov_poll_timer = lv_timer_create(kov_poll_timer_cb, 300, NULL);
+    }
+
     lvgl_port_unlock();
 
     apply_decode_toggles();
