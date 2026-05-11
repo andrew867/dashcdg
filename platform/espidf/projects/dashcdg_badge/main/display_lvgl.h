@@ -20,9 +20,9 @@ void dashcdg_display_lvgl_poll_panel_power(void);
 esp_lcd_panel_handle_t dashcdg_display_lcd_panel(void);
 
 /**
- * Blit RGB565 pixels into LVGL logical coordinates (same space as lv_obj positions after port rotation).
- * Row-major, w * h pixels; typically used with a small band buffer for CDG.
- * Buffer is adjusted in-place for ST7789 BGR + SPI byte order (see CYD_LCD_* in board header), then drawn.
+ * Blit RGB565 pixels into LVGL logical coordinates. Packs buffer in-place then `esp_lcd_panel_draw_bitmap`.
+ * Call only from the LVGL task while `lvgl_port_lock` is held (e.g. `lv_timer` / same path as flush),
+ * or from another task after taking `lvgl_port_lock` yourself — see `display_lvgl.c` comments.
  */
 esp_err_t dashcdg_display_blit_rgb565_lv_area(int x0, int y0, int w, int h, uint16_t *pixels);
 

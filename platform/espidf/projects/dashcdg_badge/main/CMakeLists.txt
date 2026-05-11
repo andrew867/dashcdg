@@ -1,5 +1,4 @@
-idf_component_register(
-    SRCS
+set(DASHCDG_BADGE_MAIN_SRCS
         "main.c"
         "display_lvgl.c"
         "nav.c"
@@ -22,6 +21,13 @@ idf_component_register(
         "battery_label.c"
         "badge_prefs.c"
         "platform_hw.c"
+)
+if(CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT)
+    list(APPEND DASHCDG_BADGE_MAIN_SRCS "badge_sp_blit_worker.c")
+endif()
+
+idf_component_register(
+    SRCS ${DASHCDG_BADGE_MAIN_SRCS}
     INCLUDE_DIRS "."
     REQUIRES
         heap

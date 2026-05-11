@@ -17,6 +17,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
+#include "sdkconfig.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_st7789.h"
@@ -25,6 +26,9 @@
 
 #include "board_cyd_freenove_32.h"
 #include "badge_rx.h"
+#if defined(CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT) && CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT
+#include "badge_sp_blit_worker.h"
+#endif
 #include "display_lvgl.h"
 #include "nav.h"
 #include "platform_hw.h"
@@ -589,6 +593,9 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
     lvgl_port_unlock();
 
     *out_disp = disp;
+#if defined(CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT) && CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT
+    dashcdg_sp_blit_worker_init();
+#endif
     ESP_LOGI(TAG, "display + touch OK");
     return ESP_OK;
 }
