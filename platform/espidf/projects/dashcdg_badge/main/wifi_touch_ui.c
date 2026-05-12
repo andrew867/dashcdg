@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <inttypes.h>
+
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -13,8 +15,10 @@
 #include "esp_random.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "lwip/inet.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -79,6 +83,194 @@ static void boot_dhcp_timer_cancel(void)
         (void)esp_timer_stop(s_boot_dhcp_timer);
         s_boot_dhcp_armed = false;
     }
+}
+
+/* Forward declarations for helpers defined further below that wifi_owner needs to call. */
+static void rebuild_dropdown_from_scan(void);
+static void ui_statusf(const char *fmt, ...);
+static esp_err_t nvs_save_creds(const char *ssid, const char *psk);
+
+/*
+ * --------------------------------------------------------------------------
+ *  wifi_owner: command queue + worker task for everything the ESP event task
+ *  used to do directly.
+ * --------------------------------------------------------------------------
+ *
+ * The ESP-IDF system event task runs all Wi-Fi/IP handlers we register with
+ * the default event loop. It has a small stack (typically 2 KiB) and is
+ * shared by every component, so it must not perform LVGL UI rebuilds, NVS
+ * writes, or other heavy work. Before T3 our handler was doing exactly that.
+ *
+ * After T3 the event handler only:
+ *   - publishes BOOT_* facts and SUB_WIFI_* health (cheap atomic / mutex
+ *     copy work via badge_exec);
+ *   - issues a couple of bounded IDF calls (esp_netif_dhcpc_*,
+ *     wifi_touch_clamp_ps_none_if_rx_active);
+ *   - posts a small command struct to wifi_owner's queue with
+ *     xQueueSend(... 0 ticks) so a backed-up queue cannot stall the system
+ *     event task.
+ *
+ * wifi_owner drains the queue, performs LVGL status updates,
+ * rebuilds the SSID dropdown, saves credentials to NVS on first GOT_IP,
+ * notifies badge_rx, and runs the optional Kconfig debug auto-launch.
+ *
+ * Queue depth is intentionally generous compared to expected event cadence
+ * (scan complete + connect/disconnect bursts), and overflows are counted via
+ * s_wifi_owner_q_drops + a single warning log per ticker boundary.
+ */
+
+#define WIFI_OWNER_TASK_STACK         4096U
+#define WIFI_OWNER_TASK_PRIO          3U
+#define WIFI_OWNER_QUEUE_DEPTH        16U
+#define WIFI_OWNER_QUEUE_RX_WAIT_MS   2000U
+#define WIFI_OWNER_QUEUE_TX_WAIT_TICKS 0  /* event handler: never block */
+
+typedef enum {
+    WIFI_OWNER_CMD_SCAN_DONE = 1,
+    WIFI_OWNER_CMD_STA_START,
+    WIFI_OWNER_CMD_STA_DISCONNECTED,
+    WIFI_OWNER_CMD_STA_GOT_IP,
+} wifi_owner_cmd_kind_t;
+
+typedef struct {
+    wifi_owner_cmd_kind_t kind;
+    /*
+     * Raw esp_ip4_addr_t::addr (lwIP network-byte-order layout), valid for STA_GOT_IP. The owner
+     * task feeds this straight into `struct in_addr` so inet_ntoa renders correctly on the badge.
+     */
+    uint32_t ipv4_be;
+    bool has_saved_creds;     /* valid for STA_DISCONNECTED */
+} wifi_owner_cmd_t;
+
+static QueueHandle_t s_wifi_owner_q;
+static TaskHandle_t s_wifi_owner_task;
+static volatile uint32_t s_wifi_owner_q_drops;
+static volatile uint32_t s_wifi_owner_q_high_water;
+
+/*
+ * Cached "do we have saved Wi-Fi credentials?" lookup so the ESP event task does not have to
+ * pop into NVS on every WIFI_EVENT_STA_DISCONNECTED. Updated from nvs_save_creds /
+ * try_auto_connect_saved / wifi_reconnect_apply_saved (all of which already read or wrote NVS) and
+ * read with a volatile load from the event handler.
+ */
+static volatile bool s_has_saved_creds_cached;
+
+static void wifi_owner_q_observe_high_water_locked(void)
+{
+    if (s_wifi_owner_q == NULL) {
+        return;
+    }
+    UBaseType_t waiting = uxQueueMessagesWaiting(s_wifi_owner_q);
+    if ((uint32_t)waiting > s_wifi_owner_q_high_water) {
+        s_wifi_owner_q_high_water = (uint32_t)waiting;
+    }
+}
+
+static void wifi_owner_post(const wifi_owner_cmd_t *cmd)
+{
+    if (s_wifi_owner_q == NULL || cmd == NULL) {
+        return;
+    }
+    if (xQueueSend(s_wifi_owner_q, cmd, (TickType_t)WIFI_OWNER_QUEUE_TX_WAIT_TICKS) != pdTRUE) {
+        s_wifi_owner_q_drops++;
+        ESP_LOGW(TAG, "wifi_owner queue drop kind=%u drops=%" PRIu32, (unsigned)cmd->kind,
+                 (uint32_t)s_wifi_owner_q_drops);
+    }
+    wifi_owner_q_observe_high_water_locked();
+}
+
+static void wifi_owner_handle_scan_done(void)
+{
+    rebuild_dropdown_from_scan();
+}
+
+static void wifi_owner_handle_sta_start(void)
+{
+    ui_statusf("Wi-Fi started");
+}
+
+static void wifi_owner_handle_sta_disconnected(bool has_saved_creds)
+{
+    if (has_saved_creds) {
+        ui_statusf("Disconnected\n(retry every 2-5 s in background)");
+    } else {
+        ui_statusf("Disconnected\n(tap Connect after Scan)");
+    }
+}
+
+static void wifi_owner_handle_sta_got_ip(uint32_t ipv4_be)
+{
+    struct in_addr ia = { .s_addr = ipv4_be };
+    ui_statusf("Online\nIP: %s", inet_ntoa(ia));
+
+    wifi_config_t wc = {0};
+    if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {
+        (void)nvs_save_creds((const char *)wc.sta.ssid, (const char *)wc.sta.password);
+    }
+
+    /*
+     * notify RX *after* NVS save so a slow flash write does not delay the
+     * IGMP-resync-on-DHCP path: NVS save runs here on wifi_owner, not in
+     * the event task, and badge_rx_notify is a cheap flag flip.
+     */
+    dashcdg_badge_rx_notify_sta_got_ip();
+    dashcdg_wifi_debug_on_sta_got_ip();
+    dashcdg_badge_exec_task_progress("wifi_owner");
+}
+
+static void wifi_owner_task_fn(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        wifi_owner_cmd_t cmd;
+        BaseType_t got = xQueueReceive(s_wifi_owner_q, &cmd, pdMS_TO_TICKS(WIFI_OWNER_QUEUE_RX_WAIT_MS));
+        dashcdg_badge_exec_task_heartbeat("wifi_owner");
+        if (got != pdTRUE) {
+            continue;
+        }
+        switch (cmd.kind) {
+        case WIFI_OWNER_CMD_SCAN_DONE:
+            wifi_owner_handle_scan_done();
+            break;
+        case WIFI_OWNER_CMD_STA_START:
+            wifi_owner_handle_sta_start();
+            break;
+        case WIFI_OWNER_CMD_STA_DISCONNECTED:
+            wifi_owner_handle_sta_disconnected(cmd.has_saved_creds);
+            break;
+        case WIFI_OWNER_CMD_STA_GOT_IP:
+            wifi_owner_handle_sta_got_ip(cmd.ipv4_be);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static void wifi_owner_start_once(void)
+{
+    if (s_wifi_owner_task != NULL) {
+        return;
+    }
+    if (s_wifi_owner_q == NULL) {
+        s_wifi_owner_q = xQueueCreate(WIFI_OWNER_QUEUE_DEPTH, sizeof(wifi_owner_cmd_t));
+        if (s_wifi_owner_q == NULL) {
+            ESP_LOGE(TAG, "wifi_owner queue alloc failed");
+            return;
+        }
+    }
+    BaseType_t ok = xTaskCreate(wifi_owner_task_fn, "wifi_owner", WIFI_OWNER_TASK_STACK, NULL,
+                                WIFI_OWNER_TASK_PRIO, &s_wifi_owner_task);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "wifi_owner task create failed");
+        s_wifi_owner_task = NULL;
+        return;
+    }
+    (void)dashcdg_badge_exec_register_task("wifi_owner", s_wifi_owner_task,
+                                           (uint8_t)WIFI_OWNER_TASK_PRIO, (int8_t)-1,
+                                           (uint16_t)WIFI_OWNER_TASK_STACK);
+    ESP_LOGI(TAG, "wifi_owner up depth=%u prio=%u", (unsigned)WIFI_OWNER_QUEUE_DEPTH,
+             (unsigned)WIFI_OWNER_TASK_PRIO);
 }
 
 static const char *TAG = "wifi_ui";
@@ -204,11 +396,18 @@ static esp_err_t nvs_load_creds(char *ssid, size_t ssid_sz, char *psk, size_t ps
     return err;
 }
 
+/*
+ * Returns true if NVS currently has saved STA credentials. Touches flash via nvs_load_creds. We
+ * keep the result in s_has_saved_creds_cached so the ESP event handler never has to call this
+ * directly - it consults the cache instead.
+ */
 static bool nvs_has_saved_creds(void)
 {
     char ssid[65] = {0};
     char psk[65] = {0};
-    return nvs_load_creds(ssid, sizeof(ssid), psk, sizeof(psk)) == ESP_OK;
+    bool ok = (nvs_load_creds(ssid, sizeof(ssid), psk, sizeof(psk)) == ESP_OK);
+    s_has_saved_creds_cached = ok;
+    return ok;
 }
 
 static esp_err_t nvs_save_creds(const char *ssid, const char *psk)
@@ -219,6 +418,9 @@ static esp_err_t nvs_save_creds(const char *ssid, const char *psk)
     ESP_RETURN_ON_ERROR(nvs_set_str(h, "psk", psk), TAG, "set psk");
     esp_err_t e = nvs_commit(h);
     nvs_close(h);
+    if (e == ESP_OK) {
+        s_has_saved_creds_cached = true;
+    }
     return e;
 }
 
@@ -233,6 +435,9 @@ static esp_err_t nvs_clear_creds(void)
     nvs_erase_key(h, "psk");
     err = nvs_commit(h);
     nvs_close(h);
+    if (err == ESP_OK) {
+        s_has_saved_creds_cached = false;
+    }
     return err;
 }
 
@@ -272,21 +477,32 @@ static void rebuild_dropdown_from_scan(void)
     ui_statusf("Scan: found networks - pick SSID");
 }
 
+/*
+ * ESP-IDF system event task callback. Per docs/specs/esp32-badge-freertos-executive-refactor-spec.md
+ * section 5.1, this handler does only:
+ *   - cheap badge_exec publish_boot_event / set_health calls,
+ *   - a couple of fast IDF radio calls (dhcpc_stop/start, set_ps),
+ *   - posts a wifi_owner_cmd_t with zero-tick send so a backed-up queue cannot stall the system
+ *     event task.
+ * LVGL UI rebuild, NVS save, and badge_rx mutation all happen on the wifi_owner task.
+ */
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)data;
 
     if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
-        rebuild_dropdown_from_scan();
+        wifi_owner_cmd_t cmd = { .kind = WIFI_OWNER_CMD_SCAN_DONE };
+        wifi_owner_post(&cmd);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        ui_statusf("Wi-Fi started");
+        wifi_owner_cmd_t cmd = { .kind = WIFI_OWNER_CMD_STA_START };
+        wifi_owner_post(&cmd);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (nvs_has_saved_creds()) {
-            ui_statusf("Disconnected\n(retry every 2–5 s in background)");
-        } else {
-            ui_statusf("Disconnected\n(tap Connect after Scan)");
-        }
+        wifi_owner_cmd_t cmd = {
+            .kind = WIFI_OWNER_CMD_STA_DISCONNECTED,
+            .has_saved_creds = s_has_saved_creds_cached,
+        };
+        wifi_owner_post(&cmd);
         (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
                                             DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
                                             "disconnected");
@@ -309,21 +525,17 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         boot_dhcp_timer_arm_once();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-        ui_statusf("Online\nIP: " IPSTR, IP2STR(&ev->ip_info.ip));
-        /* OpenWrt mcast-to-unicast: re-bind STA UDP + IGMP after DHCP (RX may have started with no IP). */
         wifi_touch_clamp_ps_none_if_rx_active();
         s_boot_wifi_got_ip = true;
         boot_dhcp_timer_cancel();
         (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_GOT_IP, "got_ip");
         (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
                                             DASHCDG_BADGE_EXEC_HEALTH_OK, "got_ip");
-        dashcdg_badge_rx_notify_sta_got_ip();
-
-        wifi_config_t wc = {0};
-        if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {
-            nvs_save_creds((const char *)wc.sta.ssid, (const char *)wc.sta.password);
-        }
-        dashcdg_wifi_debug_on_sta_got_ip();
+        wifi_owner_cmd_t cmd = {
+            .kind = WIFI_OWNER_CMD_STA_GOT_IP,
+            .ipv4_be = ev->ip_info.ip.addr,
+        };
+        wifi_owner_post(&cmd);
     }
 }
 
@@ -582,12 +794,14 @@ static esp_err_t try_auto_connect_saved(void)
     char ssid[65] = {0};
     char psk[65] = {0};
     if (nvs_load_creds(ssid, sizeof(ssid), psk, sizeof(psk)) != ESP_OK) {
+        s_has_saved_creds_cached = false;
         (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_NO_CREDS,
                                                     "no_saved_creds");
         (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
                                             DASHCDG_BADGE_EXEC_HEALTH_DEGRADED, "no_saved_creds");
         return ESP_ERR_NOT_FOUND;
     }
+    s_has_saved_creds_cached = true;
 
     wifi_config_t wc = {0};
     wifi_touch_copy_to_cfg_field(wc.sta.ssid, sizeof(wc.sta.ssid), ssid);
@@ -716,6 +930,7 @@ esp_err_t dashcdg_wifi_ensure_init(void)
     (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_DRV_OK, "wifi_start_ok");
     (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_DRV,
                                         DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+    wifi_owner_start_once();
     wifi_reconn_task_start_once();
     return ESP_OK;
 }
