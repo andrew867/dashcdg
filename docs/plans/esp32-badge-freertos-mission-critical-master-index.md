@@ -69,6 +69,10 @@ The refactor is complete only when all of the following are true:
 | T8 - LVGL timer cleanup | Done |
 | T9 - low-heap / degraded path hardening | Done for CDG heap + DAC; audio jitter / ucast dup deferred to T9b once counters exist |
 | T10 - closeout | In progress (status tables refreshed, summary parser fields added) |
+| T11 - audio_mgr owner task (DAC handle + amp /SHDN policy + PCM submit) | Planned (post-soak; recipe `single hot consumer + queue` for DAC handoff) |
+| T12 - stats / telemetry task (1 Hz UART emit off RX hot loop) | Planned (low-effort follow-on once T11 unblocks the audio path) |
+| T13 - hw_task split (input/output vs battery/RGB housekeeping) | Optional (defer unless soak shows button or amp /SHDN latency issues) |
+| T14 - heap watchdog single-owner sampler | Optional (defer unless low-heap symptoms recur after T11 frees DRAM) |
 
 ## Non-negotiable review rule
 

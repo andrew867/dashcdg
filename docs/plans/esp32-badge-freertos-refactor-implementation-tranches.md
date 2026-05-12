@@ -266,3 +266,183 @@ Prove the refactor works under nominal and ugly conditions.
 - 60 min A/V soak plus 30 min degraded soak.
 - No unreviewed forbidden-pattern hits.
 - Master index status updated.
+
+## T11 - Audio Manager owner task
+
+### Goal
+
+Pull DAC handle lifecycle, amp /SHDN policy, and PCM submit off the RX hot loop
+and onto a dedicated single-owner task. Implements the recipe-book "single hot
+consumer, many producers + queue/notify" pattern for the audio output device
+(currently the same shape as the T4 RX owner: many producers post via queue,
+one task owns the device).
+
+### Rationale (measured)
+
+- `badge_rx_drain_v4_audio_budget` currently runs `dac_continuous_write` inline
+  under the RX pump path. `dac_continuous_write` with default timeout blocks
+  until the DMA descriptor ring has space. With the budget=20 drain that runs
+  on every `recvfrom` deferred path, the RX hot loop can spend ~5-15 ms inside
+  the DAC writer for every burst of audio.
+- The amp /SHDN policy (idle-shutdown after `AMP_IDLE_SHUTDOWN_MS`, AMP_MIN_*
+  dwells, beep_seq_active gate) is currently spread across `hw_task`,
+  `amp_set_run`, the PCM push entrypoint, beep mute / abort, and the karaoke
+  arm_for_rx hook. Single owner makes the state machine inspectable in one
+  file.
+- DAC begin/stop and `dac_continuous_*` mutate the same handle as the audio
+  lab synth (route arbitration handles ownership but not concurrency on
+  begin/stop). One owner eliminates this race.
+
+### Work
+
+| File / path | Action |
+| --- | --- |
+| `main/audio_mgr.h` (new) | Public API: `dashcdg_audio_mgr_begin(hz)`, `_stop()`, `_session_break()`, `_set_trim_ppm(int)`, `_push_pcm(buf, samples, flags)`, `_amp_arm()`, `_get_stats(*out)`. |
+| `main/audio_mgr.c` (new) | `audio_mgr_task_fn` (prio 6, core 1, stack 4096), `s_audio_mgr_q` (queue depth = ceil(BADGE_RX_AUDIO_JB_SLOTS * 1.5)), command + PCM submit handlers, idle-shutdown logic ported from `hw_task`. |
+| `main/platform_hw.c` | Delegate `dashcdg_platform_hw_karaoke_dac_push_mono_s16`, `_begin_nominal_hz`, `_stop`, `_session_break`, `_set_trim_ppm`, amp idle policy to the audio_mgr. Keep the hardware primitives (`dac_continuous_*`, `amp_set_run`, `ledc_beep_audio_channel_attach_locked`) here so `audio_mgr` does not pull in `driver/dac_continuous.h`. |
+| `main/badge_rx.c` | Replace direct `dashcdg_platform_hw_karaoke_dac_push_mono_s16` calls with `dashcdg_audio_mgr_push_pcm`; the call becomes a queue post that returns quickly (drop-on-full counted in audio_mgr stats). |
+| `main/badge_exec.c` | Register `audio_mgr` in the task registry; publish `BOOT_AUDIO_MGR_OK`. |
+| `main/Kconfig.projbuild` | `DASHCDG_BADGE_AUDIO_MGR_QUEUE_DEPTH` (default 80), `DASHCDG_BADGE_AUDIO_MGR_PUSH_TIMEOUT_MS` (default 8 - lower than current `DASHCDG_DAC_IO_MTX_PUSH_MS` because the queue path is non-blocking). |
+
+### Exit
+
+- RX hot loop drain no longer measurably blocks on `dac_continuous_write` (RX
+  pump mtx hold p99 drops).
+- DAC ownership transitions (karaoke <-> lab) serialize via the audio_mgr's
+  own state machine instead of `s_karaoke_dac_io_mtx` + route arbitration.
+- amp_idle_shutdowns counter telemetry stays identical (semantic equivalence
+  to the current `hw_task` policy).
+- New tests: `AUDIO-MGR-Q-01` (queue drop-on-full), `AUDIO-MGR-AMP-01`
+  (idle-shutdown end-to-end), `AUDIO-MGR-OWNER-01` (lab vs karaoke handoff).
+
+## T12 - Stats / telemetry task
+
+### Goal
+
+Move 1 Hz UART log emission (`audio_only`, `AUDIO_UART_PROOF`, `audio_chop`,
+v4_rx_stats batched emit) off the `badge_rx` task. Stats lines today format
+~250 bytes each with multiple `%lu` / `%llu` -- the ESP_LOGI call serializes
+on the UART driver and blocks the RX loop while the bytes drain.
+
+### Rationale (measured)
+
+- `dashcdg_badge_rx_log_audio_only_uart_stats_if_due` runs inside the
+  `badge_rx_task` main loop. Each emission is two ESP_LOGI calls (audio_only
+  + AUDIO_UART_PROOF) plus an audio_chop line every interval -- at 115200
+  baud that is roughly 5-12 ms of serialized output per second.
+- Forbidden-pattern note from T0: "Heavy ESP_LOG* on the RX hot path under
+  a real-time deadline" applies here. The current pattern is borderline
+  (1 Hz cadence) but the stats task gets us closer to "RX moves packets
+  only".
+
+### Work
+
+| File / path | Action |
+| --- | --- |
+| `main/badge_stats.h` (new) | Public API: `dashcdg_badge_stats_kick_emit()` (called by `badge_rx_task` at the 1 Hz boundary -- becomes a queue post or task notify; the task itself reads via existing `dashcdg_badge_rx_get_stats` / `dashcdg_platform_hw_karaoke_dac_get_uart_health`). |
+| `main/badge_stats.c` (new) | `badge_stats_task_fn` (prio 3, stack 3072, core 1), waits on notify or 1 Hz timer, snapshots atomics, formats the three lines. |
+| `main/badge_rx.c` | Remove inline emit; keep the delta bookkeeping struct (`s_uart_audio_chop_prev`) but move the actual ESP_LOGI into `badge_stats`. |
+| `main/Kconfig.projbuild` | `DASHCDG_BADGE_STATS_CADENCE_MS` (default 1000), `DASHCDG_BADGE_STATS_ENABLE` (default y; disable for pure-soak builds). |
+
+### Exit
+
+- RX pump task average busy time per loop iteration drops (measured by
+  TODO heartbeat timestamp delta).
+- UART line cadence unchanged (still ~1 Hz audio_only + chop).
+- New test: `STATS-TASK-01` (no log line loss when RX is busy).
+
+## T13 - Power / battery / LED task
+
+### Goal
+
+Split `hw_task` so the input/output hot-path (button polling, beep tick,
+backlight ramp, amp policy) stops sharing its 40 ms tick with the slower
+battery ADC sampling and RGB animation.
+
+### Rationale
+
+`hw_task` currently:
+- Polls IO0 button (real-time, 40 ms is already loose)
+- Steps backlight fade
+- Runs beep sequencer (15 ms during a beep, 40 ms otherwise)
+- Samples battery ADC every 1000-4000 ms (slow)
+- Animates RGB LED (frame-based)
+- Now also runs amp idle-shutdown gate
+
+The mix means a sleepy battery sample on a slow path can starve a button
+edge or amp /SHDN transition by up to a tick. Splitting frees the input/output
+loop from the housekeeping load.
+
+### Work
+
+| File / path | Action |
+| --- | --- |
+| `main/platform_hw.c` | Rename current `hw_task` -> `hw_io_task` (keeps: button poll, beep tick, backlight ramp, amp idle-shutdown). |
+| `main/platform_hw.c` | Add `hw_housekeeping_task` (prio 2, stack 2560, runs at 250 ms cadence): battery ADC sample, vbat EMA, RGB animation, PM idle decisions. |
+| `main/platform_hw.c` | Battery cache + RGB state guarded by a small additional mutex (s_pwr_mtx) so the housekeeping task does not need s_mtx for its slow work. |
+
+### Exit
+
+- `hw_io_task` average iteration < 100 us (no ADC, no LED math).
+- `hw_housekeeping_task` heartbeat visible in liveness sweep.
+- New test: `HW-IO-LATENCY-01` (button-press to amp transition latency).
+
+## T14 - Heap watchdog task (opt-in)
+
+### Goal
+
+Centralize the scattered `heap_caps_get_free_size` / `_get_largest_free_block`
+calls that today fire from karaoke_ui, badge_rx logging, the DAC begin error
+path, and the v4 anchor allocator. A single sampler at fixed cadence with
+threshold-driven log emission removes the per-caller cost.
+
+### Rationale
+
+- Multiple call sites probe internal heap on every tick / every anchor / every
+  log -- each call walks the heap link list. Sampling at one place catches
+  the drop and publishes via the existing exec health table without forcing
+  every consumer to poll.
+
+### Work
+
+| File / path | Action |
+| --- | --- |
+| `main/badge_heap_watch.c` (new) | `heap_watch_task` (prio 2, 1 Hz), samples internal + DMA caps free / largest, publishes to exec health (`SUB_HEAP_INTERNAL` already in the table) and to a small atomic snapshot consumed by stats. |
+| Consumers | Replace direct `heap_caps_*` calls in karaoke_ui's tick, badge_rx's audio_chop line, DAC begin's error log, and the karaoke heap-OOM diagnostic with reads from the atomic snapshot. |
+| `main/Kconfig.projbuild` | `DASHCDG_BADGE_HEAP_WATCH_MS` (default 1000), thresholds (already present for low-heap degraded). |
+
+### Exit
+
+- `heap_caps_get_free_size` call count per second drops to 1 (single owner).
+- Threshold-based degraded transitions for low internal heap actually fire
+  (currently we observe and log but the executive does not always latch).
+- New test: `HEAP-WATCH-01` (cause heap pressure, see SUB_HEAP_INTERNAL =
+  DEGRADED; relieve, see OK with "recovered").
+
+## Recommendation priority
+
+The user asked "what should we accomplish next" -- in order of measurable
+win on the current "audio choppy / hot-path crowded" complaint:
+
+1. **T11 Audio Manager** is the largest single hot-path unblocking step.
+   Decouples `dac_continuous_write` (a deterministic ~7.5 ms DMA submit) from
+   the bursty `recvfrom` -> drain -> decode path. Expected effect on the
+   choppy-audio symptom: tighter jitter floor (the `d_wm` / `d_amiss` numbers
+   are an AP-side multicast scheduling problem that no badge-side refactor
+   can solve, but RX-side jitter contribution drops).
+2. **T12 Stats task** removes a known second-order blocker (the 1 Hz
+   `ESP_LOGI` 250-byte serialization). Low effort.
+3. **T13 hw_task split** is mostly hygiene -- the current `hw_task` is at
+   40 ms cadence and not contended in practice. Defer unless we find button
+   latency in soak data.
+4. **T14 Heap watchdog** is observability quality of life. Defer unless we
+   keep tripping the same low-heap symptoms.
+
+Out of scope for the current "audio chop" thread but worth recording:
+
+- **Wire-level multicast loss** (d_amiss 30-65/s) is environmental at this
+  point. APs that buffer multicast at DTIM cadence -- common on consumer
+  802.11n gear -- will deliver mcast as bursts and the ESP32 station only
+  sees what the AP chose to send. Possible mitigations live in the broadcast
+  rack spec (PTP-clocked unicast fallback, NDI/ST-2110 direction). The
+  badge-side audio_jb / PLC envelope cannot reconstruct what never arrived.
