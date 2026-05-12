@@ -43,22 +43,24 @@ PATTERNS = {
     # Hardware proof: DAC DMA chunks accepted vs ESP-IDF errors (grep AUDIO_UART_PROOF)
     "audio_uart_proof": re.compile(r"badge_rx:\s+AUDIO_UART_PROOF\s+", re.IGNORECASE),
     # ---- FreeRTOS executive refactor (T1..T9) ----
-    # T1/T2 boot orchestrator: structured trace line emitted on each bit/health update.
+    # Trace lines have the shape:  `... badge_exec: [exec-trace] kind=<kind> <key=val ...>`.
+    # (See dashcdg_badge_exec_trace in main/badge_exec.c. Documented in
+    # docs/ops/esp32-badge-freertos-telemetry-runbook.md.)
     "exec_trace_line": re.compile(r"\[exec-trace\]", re.IGNORECASE),
-    "exec_boot_publish": re.compile(r"\[exec-trace\]\s+boot_publish\s+", re.IGNORECASE),
-    "exec_boot_complete_nominal": re.compile(r"\[exec-trace\]\s+boot_complete\s+.*nominal", re.IGNORECASE),
-    "exec_boot_complete_degraded": re.compile(r"\[exec-trace\]\s+boot_complete\s+.*degraded", re.IGNORECASE),
-    "exec_health_degraded": re.compile(r"\[exec-trace\]\s+health\s+.*=degraded", re.IGNORECASE),
-    "exec_health_timeout": re.compile(r"\[exec-trace\]\s+health\s+.*=timeout", re.IGNORECASE),
+    "exec_boot_publish": re.compile(r"\[exec-trace\]\s+kind=boot_publish\b", re.IGNORECASE),
+    "exec_boot_complete_nominal": re.compile(r"\[exec-trace\]\s+kind=boot_complete\b.*nominal", re.IGNORECASE),
+    "exec_boot_complete_degraded": re.compile(r"\[exec-trace\]\s+kind=boot_complete\b.*degraded", re.IGNORECASE),
+    "exec_health_degraded": re.compile(r"\[exec-trace\]\s+kind=health\b.*to=degraded", re.IGNORECASE),
+    "exec_health_timeout": re.compile(r"\[exec-trace\]\s+kind=health\b.*to=timeout", re.IGNORECASE),
     # T2 boot DHCP timer expiry (Wi-Fi STA never got IP within boot window).
     "exec_wifi_dhcp_timeout": re.compile(r"BOOT_WIFI_DHCP_TIMEOUT|wifi_dhcp_timeout", re.IGNORECASE),
     # T7 liveness sweep: stall observation lines + enforce transitions.
-    "exec_liveness_stall": re.compile(r"\[exec-trace\]\s+liveness_stall\s+", re.IGNORECASE),
-    "exec_liveness_enforce": re.compile(r"\[exec-trace\]\s+liveness_enforce\s+", re.IGNORECASE),
+    "exec_liveness_stall": re.compile(r"\[exec-trace\]\s+kind=liveness_stall\b", re.IGNORECASE),
+    "exec_liveness_enforce": re.compile(r"\[exec-trace\]\s+kind=liveness_enforce\b", re.IGNORECASE),
     # T8 LVGL tick budget: throttled overrun line per tick name.
-    "exec_ui_tick_over": re.compile(r"\[exec-trace\]\s+ui_tick_over\s+|ui-tick over budget", re.IGNORECASE),
+    "exec_ui_tick_over": re.compile(r"\[exec-trace\]\s+kind=ui_tick_over\b|ui-tick over budget", re.IGNORECASE),
     # T9 DAC route arbitration degraded transitions.
-    "exec_dac_degraded": re.compile(r"\[exec-trace\]\s+dac_degraded\s+", re.IGNORECASE),
+    "exec_dac_degraded": re.compile(r"\[exec-trace\]\s+kind=dac_degraded\b", re.IGNORECASE),
     # T5/T6 hot-path bounded-wait drops: surfaced via badge_rx_get_stats but also appears as ESP_LOGW.
     "rx_mtx_timeout_pump": re.compile(r"rx_mtx_pump_timeouts|s_mtx pump timeout", re.IGNORECASE),
     "rx_mtx_timeout_repair": re.compile(r"rx_mtx_repair_timeouts|s_mtx repair timeout", re.IGNORECASE),

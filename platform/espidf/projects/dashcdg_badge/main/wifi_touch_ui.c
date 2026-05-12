@@ -861,6 +861,16 @@ static void wifi_reconn_task_fn(void *arg)
         uint32_t wait_ms = 2000U + (esp_random() % 3001U);
         vTaskDelay(pdMS_TO_TICKS(wait_ms));
 
+        /*
+         * Loop-boundary heartbeat: this task spends almost all of its time blocked in
+         * vTaskDelay() because we only attempt to reconnect when the link is actually down. The
+         * heartbeat tells the liveness sweep that the task is alive even when no progress is
+         * being made (steady-state when STA is connected). Real "no progress" stalls show up as a
+         * lack of _task_progress() calls below, which only fire when wifi_reconnect_apply_saved
+         * actually does work.
+         */
+        dashcdg_badge_exec_task_heartbeat("wifi_reconn");
+
         if (!s_wifi_driver_ready) {
             continue;
         }
@@ -878,6 +888,7 @@ static void wifi_reconn_task_fn(void *arg)
             }
         }
         (void)wifi_reconnect_apply_saved();
+        dashcdg_badge_exec_task_progress("wifi_reconn");
     }
 }
 

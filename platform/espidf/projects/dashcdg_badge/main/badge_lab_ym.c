@@ -281,6 +281,12 @@ static void lab_task(void *arg)
     bool carrier_on = false;
 
     for (;;) {
+        /*
+         * Loop-boundary heartbeat. Lab task spends most of its life parked on ulTaskNotifyTake
+         * because the audio lab UI is closed; without a heartbeat the liveness sweep would mark
+         * SUB_AUDIO_LAB stalled in enforce mode.
+         */
+        dashcdg_badge_exec_task_heartbeat("dashcdg_lab_ym");
         if (!s_want_play) {
             if (carrier_on) {
                 if (s_pcm_tmr) {
@@ -317,6 +323,9 @@ static void lab_task(void *arg)
 
         /* `ulTaskNotifyTake(pdTRUE, ...)` returns the pending count then clears it — process every tick. */
         uint32_t pending = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+        if (pending != 0U) {
+            dashcdg_badge_exec_task_progress("dashcdg_lab_ym");
+        }
         if (!s_want_play) {
             if (s_pcm_tmr) {
                 (void)esp_timer_stop(s_pcm_tmr);

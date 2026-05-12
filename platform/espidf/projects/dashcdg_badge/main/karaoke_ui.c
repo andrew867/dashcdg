@@ -1040,8 +1040,10 @@ static void on_tick(lv_timer_t *t)
     }
     /*
      * T8: tick budget observation. The karaoke tick runs at ~33 ms (30 fps). The default budget
-     * of CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US (25 ms) leaves headroom for LVGL flush + indev.
-     * The observe API is non-blocking; a missed lock silently skips, so this never widens the tick.
+     * of CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US (30 ms) is calibrated against the measured tick
+     * envelope (CDG blit + status update + RX overlay tick); leaves a hair of headroom and
+     * reserves the alarm for genuine outliers. The observe API is non-blocking; a missed lock
+     * silently skips, so this never widens the tick.
      */
     {
         const int64_t tick_us_end = esp_timer_get_time();

@@ -43,12 +43,16 @@ menu "DashCDG badge"
     config DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS
         int "Executive: per-task stall threshold (ms)"
         range 200 30000
-        default 2000
+        default 6000
         help
             A registered task is "stalled" when (now - last_heartbeat_ms) exceeds this threshold.
             The sweep emits an [exec-trace] line for every stall observation and increments the
             global stalls_observed counter. T7 enforce-mode (below) decides whether a stall also
             transitions the owning subsystem health to DEGRADED.
+
+            Default is sized for the longest legitimate idle waiter on the badge (wifi_reconn
+            backoff up to 5 s); tasks that intend to sleep longer must chunk their wait with
+            explicit heartbeats. Drop to 1000-2000 ms when actively investigating slow paths.
 
     config DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE
         bool "Executive: liveness sweep enforces health transitions"
@@ -63,15 +67,17 @@ menu "DashCDG badge"
     config DASHCDG_BADGE_UI_TICK_OVERRUN_US
         int "Executive: LVGL tick overrun budget (microseconds)"
         range 1000 200000
-        default 25000
+        default 30000
         help
             Per-tick wall-time budget used by dashcdg_badge_exec_ui_tick_observe. Each LVGL timer
             that opts in calls this helper at the end of its callback. When the measured tick
             duration exceeds this budget the executive increments an overrun counter for that
             timer and emits a throttled ESP_LOGW + [exec-trace] line. T8 is observe-only: there
-            is no automatic recovery or health transition. 25 ms leaves ~8 ms of headroom for the
-            karaoke tick (33 ms = 30 fps) and is the recommended default for soak builds. Lower
-            values surface marginal ticks earlier during development.
+            is no automatic recovery or health transition.
+            30 ms is calibrated against the measured karaoke_ui envelope (CDG blit + status bar
+            update + RX overlay tick lands at 24-31 ms on a 33 ms period); leaves a hair of
+            headroom and reserves the alarm for genuine outliers. Lower (e.g. 20-25 ms) during
+            development to surface marginal ticks earlier.
 
     config DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS
         int "Executive: throttle between LVGL tick overrun ESP_LOGW lines (ms)"

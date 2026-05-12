@@ -1840,11 +1840,19 @@ static void hw_task(void *arg)
     while (1) {
         uint32_t tick_ms = beep_seq_active() ? BEEP_TICK_FAST_MS : HW_TICK_MS;
         vTaskDelay(pdMS_TO_TICKS(tick_ms));
+        /*
+         * Loop-boundary heartbeat. The HW housekeeping task ticks every HW_TICK_MS (50 ms when
+         * idle, faster while a beep is sequencing). Telling the executive we're alive here keeps
+         * the liveness sweep from flagging false stalls during periods where no UI / button /
+         * battery work fires.
+         */
+        dashcdg_badge_exec_task_heartbeat("dashcdg_hw");
         uint64_t now = dashcdg_clock_now_ms();
 
         if (now - last_bat_ms >= battery_sample_period_ms()) {
             last_bat_ms = now;
             sample_battery_update_cache();
+            dashcdg_badge_exec_task_progress("dashcdg_hw");
         }
         if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(40)) == pdTRUE) {
             /* PENIRQ active low on touch (same pin as XPT2046 interrupt). */

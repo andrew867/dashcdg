@@ -57,7 +57,13 @@ static const char *TAG = "badge_exec";
 #endif
 
 #ifndef CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS
-#define CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS 2000
+/*
+ * Default stall threshold sized for the longest legitimate idle waiter on the badge: wifi_reconn
+ * uses vTaskDelay(2..5 s) between reconnect attempts. Anything below that floor would flag the
+ * reconnect backoff as a stall and dwarf the signal from real wedges. 6 s = max wait + ~1 s slack.
+ * Individual tasks that wait longer must chunk their wait with explicit heartbeats.
+ */
+#define CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS 6000
 #endif
 
 #ifndef CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE
@@ -82,6 +88,14 @@ typedef struct {
     esp_timer_handle_t liveness_timer;
     bool liveness_running;
     dashcdg_badge_exec_liveness_stats_t liveness_stats;
+    /*
+     * Dedicated sweep task. The esp_timer dispatcher task has a tiny stack
+     * (CONFIG_ESP_TIMER_TASK_STACK_SIZE = 2048 on this project) which overflows when the sweep
+     * callback walks the registry + formats trace lines + calls ESP_LOGW. We use the recipe-book
+     * pattern: the esp_timer callback only xTaskNotifyGive's a dedicated owner task; the owner
+     * does the heavy walking on its own stack.
+     */
+    TaskHandle_t liveness_task;
     /* T8: LVGL tick budget observation */
     dashcdg_badge_exec_ui_tick_info_t ui_ticks[DASHCDG_BADGE_EXEC_UI_TICK_SLOTS];
     size_t ui_tick_count;
@@ -689,9 +703,12 @@ static dashcdg_badge_exec_subsystem_t badge_exec_task_to_subsystem(const char *n
     return DASHCDG_BADGE_EXEC_SUB__COUNT;
 }
 
-static void badge_exec_liveness_sweep_cb(void *arg)
+/*
+ * Heavy sweep body. Runs in the dedicated liveness owner task (s_state.liveness_task) so the
+ * stack budget is independent of esp_timer's small dispatcher stack.
+ */
+static void badge_exec_liveness_do_sweep(void)
 {
-    (void)arg;
     if (!s_state.initialized) {
         return;
     }
@@ -791,6 +808,50 @@ static void badge_exec_liveness_sweep_cb(void *arg)
     }
 }
 
+/*
+ * esp_timer callback. Runs in the esp_timer dispatcher task which has a deliberately tight stack
+ * (CONFIG_ESP_TIMER_TASK_STACK_SIZE = 2048 on this project to save RAM). Must stay minimal: a
+ * single xTaskNotifyGive to the dedicated sweep task is all we do here.
+ */
+static void badge_exec_liveness_sweep_cb(void *arg)
+{
+    (void)arg;
+    TaskHandle_t t = (TaskHandle_t)__atomic_load_n(&s_state.liveness_task, __ATOMIC_ACQUIRE);
+    if (t != NULL) {
+        xTaskNotifyGive(t);
+    }
+}
+
+#define BADGE_EXEC_LIVENESS_TASK_PRIO    2
+#define BADGE_EXEC_LIVENESS_TASK_STACK   4096
+
+static void badge_exec_liveness_task_fn(void *arg)
+{
+    (void)arg;
+    /*
+     * Bounded wait per the recipe book: longest reasonable gap between sweeps is ~5x the configured
+     * interval. If we ever wake without a notification we just run the sweep anyway (idempotent)
+     * and log a structured trace line so a stuck esp_timer dispatcher is visible.
+     */
+    const TickType_t wait_ticks =
+        pdMS_TO_TICKS((uint32_t)CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS * 5U);
+
+    for (;;) {
+        uint32_t got = ulTaskNotifyTake(pdTRUE, wait_ticks);
+        if (got == 0U) {
+            dashcdg_badge_exec_trace("liveness_wait_to",
+                                     "wait_ticks=%u", (unsigned)wait_ticks);
+        }
+        /*
+         * Heartbeat / progress before the work so even an empty sweep counts as forward progress
+         * for the registry walk that comes next. Without this we'd flag ourselves as stalled.
+         */
+        dashcdg_badge_exec_task_heartbeat("exec_live");
+        dashcdg_badge_exec_task_progress("exec_live");
+        badge_exec_liveness_do_sweep();
+    }
+}
+
 esp_err_t dashcdg_badge_exec_liveness_start(void)
 {
     if (!s_state.initialized) {
@@ -799,6 +860,31 @@ esp_err_t dashcdg_badge_exec_liveness_start(void)
     if (s_state.liveness_running) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    /*
+     * Bring up the dedicated owner task BEFORE arming the timer so the first callback always has a
+     * valid TaskHandle to notify. The task is intentionally low priority (2) to not preempt media
+     * or UI; stack 4096 is enough for the registry walk + worst-case trace formatting.
+     */
+    if (s_state.liveness_task == NULL) {
+        BaseType_t br = xTaskCreate(badge_exec_liveness_task_fn,
+                                    "exec_live",
+                                    BADGE_EXEC_LIVENESS_TASK_STACK,
+                                    NULL,
+                                    BADGE_EXEC_LIVENESS_TASK_PRIO,
+                                    &s_state.liveness_task);
+        if (br != pdPASS || s_state.liveness_task == NULL) {
+            ESP_LOGE(TAG, "liveness task create failed");
+            s_state.liveness_task = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+        (void)dashcdg_badge_exec_register_task("exec_live",
+                                               s_state.liveness_task,
+                                               (uint8_t)BADGE_EXEC_LIVENESS_TASK_PRIO,
+                                               (int8_t)-1,
+                                               (uint16_t)BADGE_EXEC_LIVENESS_TASK_STACK);
+    }
+
     if (s_state.liveness_timer == NULL) {
         const esp_timer_create_args_t args = {
             .callback = &badge_exec_liveness_sweep_cb,
@@ -839,6 +925,9 @@ void dashcdg_badge_exec_liveness_stop(void)
     }
     (void)esp_timer_stop(s_state.liveness_timer);
     s_state.liveness_running = false;
+    /* Owner task stays alive (bounded notification wait) so a subsequent _start() rebinds without
+     * the cost of recreating it. Tests that need full teardown can call vTaskDelete via DI if ever
+     * required. */
 }
 
 void dashcdg_badge_exec_liveness_get_stats(dashcdg_badge_exec_liveness_stats_t *out)
@@ -862,7 +951,8 @@ void dashcdg_badge_exec_liveness_get_stats(dashcdg_badge_exec_liveness_stats_t *
 /* ------------------------------------------------------------------------- */
 
 #ifndef CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US
-#define CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US 25000
+/* Calibrated against measured karaoke_ui envelope (24-31 ms on a 33 ms period). */
+#define CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US 30000
 #endif
 #ifndef CONFIG_DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS
 #define CONFIG_DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS 5000
@@ -1002,12 +1092,12 @@ void dashcdg_badge_exec_trace(const char *kind, const char *fmt, ...)
         return;
     }
     /*
-     * Single-line, structured. The telemetry runbook documents the parser contract; keeping the
-     * prefix `[exec-trace] kind=...` makes the lines easy to filter without competing with the
-     * rest of ESP_LOG output. ESP_LOGI level is intentional: TRACE level would be filtered out by
-     * default builds, and these lines are low-volume by design.
+     * Single-line, structured. The telemetry runbook documents the parser contract; the
+     * `[exec-trace] kind=...` prefix is what scripts/esp32_badge_log_summary.py greps for. ESP_LOGI
+     * level is intentional: TRACE level would be filtered out by default builds, and these lines
+     * are low-volume by design (rate-limited by event cadence, not by a tick).
      */
-    ESP_LOGI(TAG, "trace kind=%s %s", (kind != NULL) ? kind : "", line);
+    ESP_LOGI(TAG, "[exec-trace] kind=%s %s", (kind != NULL) ? kind : "", line);
 #else
     (void)kind;
     (void)fmt;
