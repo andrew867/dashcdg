@@ -1573,10 +1573,11 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
          */
         ESP_LOGI(TAG,
                  "AUDIO_UART_PROOF dac_dma_ok=%lu dac_dma_err=%lu hz_eff=%lu chunk_u8=%lu expect_dma_per_s=%lu "
-                 "vol_pct=%u",
+                 "vol_pct=%u amp_idle=%lu",
                  (unsigned long)dac_dma_ok, (unsigned long)dac_dma_err, (unsigned long)dac_hz_eff,
                  (unsigned long)dac_chunk_u8, (unsigned long)expect_dma_per_s,
-                 (unsigned)dashcdg_platform_hw_get_karaoke_output_volume_pct());
+                 (unsigned)dashcdg_platform_hw_get_karaoke_output_volume_pct(),
+                 (unsigned long)dashcdg_platform_hw_karaoke_amp_idle_shutdowns());
     }
 
     {

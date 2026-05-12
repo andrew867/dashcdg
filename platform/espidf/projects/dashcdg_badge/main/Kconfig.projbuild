@@ -111,6 +111,19 @@ menu "DashCDG badge"
             ("route_io_mtx_timeouts"). One-shot per boot; the push path itself remains a
             bounded wait + drop chunk (so audio glitches rather than the badge wedging).
 
+    config DASHCDG_BADGE_AMP_IDLE_SHUTDOWN_MS
+        int "Audio amp /SHDN: idle ms after last real PCM push before shutdown"
+        range 200 60000
+        default 3000
+        help
+            Drop the SC8002B / FM8002E /SHDN line HIGH (amp shutdown, ~4 uA quiescent) when no
+            non-mute PCM has reached the DAC for this many milliseconds. The amp wakes again
+            automatically on the next non-silence push (~1.1 ms wake-up time per datasheet, well
+            under the audio jitter window). This cuts ~3.7 mA between songs, on user-pause, and
+            after the jitter buffer starves PLC and silence stops flowing -- and silences the
+            ~3 mA quiescent hiss most users actually hear during "no audio". Lower for faster
+            power savings on quick pauses; raise if the wake-up transient is ever audible.
+
     config DASHCDG_BADGE_OPUS_MONO_ONLY
         bool "Opus RX: mono decoder only (saves internal RAM)"
         default y

@@ -146,6 +146,13 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void);
 
 /**
+ * Idle-shutdown telemetry for the SC8002B / FM8002E /SHDN line. Returns the running count of
+ * "amp dropped to shutdown because no non-mute PCM hit the DAC for CONFIG_DASHCDG_BADGE_AMP_IDLE_
+ * SHUTDOWN_MS" transitions since boot. Stable on non-ESP32 builds (returns 0).
+ */
+uint32_t dashcdg_platform_hw_karaoke_amp_idle_shutdowns(void);
+
+/**
  * DAC route arbitration (T6 - executive refactor). The same `dac_continuous` channel and amp path
  * are shared between karaoke RX (decoded multicast PCM) and the audio lab (YM/Mary synth). Before
  * T6 the two producers raced on `s_karaoke_dac_io_mtx` with portMAX_DELAY waits and there was no

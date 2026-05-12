@@ -62,6 +62,12 @@ static const char *TAG = "platform_hw";
 #define AMP_MIN_ON_DWELL_MS 180U
 #define AMP_MIN_OFF_DWELL_MS 40U
 
+#ifdef CONFIG_DASHCDG_BADGE_AMP_IDLE_SHUTDOWN_MS
+#define AMP_IDLE_SHUTDOWN_MS ((uint64_t)CONFIG_DASHCDG_BADGE_AMP_IDLE_SHUTDOWN_MS)
+#else
+#define AMP_IDLE_SHUTDOWN_MS ((uint64_t)3000U)
+#endif
+
 #define LEDC_MODE           LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_RGB_BL   LEDC_TIMER_0
 #define LEDC_TIMER_BEEP     LEDC_TIMER_1
@@ -156,6 +162,17 @@ static volatile uint8_t s_beep_vol_pct = 85;
 static bool s_touch_beep_on = true;
 static bool s_amp_run_state;
 static uint64_t s_amp_last_switch_ms;
+/**
+ * Last time `dashcdg_platform_hw_karaoke_dac_push_mono_s16` pushed a non-mute PCM chunk.
+ * `hw_task` uses this with `AMP_IDLE_SHUTDOWN_MS` to drop the SC8002B /SHDN line on prolonged
+ * silence (track gap, user pause, mute, PLC exhaustion). Datasheet wake-up < 2 ms so the next
+ * real push re-asserts amp ON cleanly via `amp_set_run(true)` -- well inside one jitter slot.
+ * Lock-free: written under `s_karaoke_dac_io_mtx` in the push path, read with atomic load in the
+ * idle check on `hw_task`'s `s_mtx`. uint64 read on ESP32 is non-atomic, so use __atomic_*.
+ */
+static volatile uint64_t s_amp_last_real_push_ms;
+/** Number of idle-shutdown transitions; exposed via dac/audio telemetry for soak observability. */
+static volatile uint32_t s_amp_idle_shutdowns;
 
 static const beep_note_t k_wake_seq[] = {
     {784, 125},  /* G5 */
@@ -878,10 +895,20 @@ static void amp_set_run(bool run)
             }
         }
     }
-    /* SC8002B: VDD on shutdown = shutdown. LOW = amp on. */
+    /* SC8002B / FM8002E: VDD on /SHDN = shutdown. LOW = amp on. Push-pull drive in `gpio_misc_init`. */
     gpio_set_level(DASHCDG_HW_GPIO_AMP_SHUTDOWN, run ? 0 : 1);
     s_amp_run_state = run;
     s_amp_last_switch_ms = now_ms;
+    if (run) {
+        /*
+         * Seed the idle-shutdown window so any path that turns the amp on (karaoke push,
+         * beep, lab synth, RX arm) starts the AMP_IDLE_SHUTDOWN_MS countdown. The PCM push
+         * path overwrites this on each non-mute sample chunk; for beep/lab/arm callers this is
+         * the only update -- without it `hw_task`'s shutdown gate would never fire because the
+         * timestamp would stay at zero (and the gate explicitly skips zero).
+         */
+        __atomic_store_n(&s_amp_last_real_push_ms, now_ms, __ATOMIC_RELEASE);
+    }
 }
 
 /** PWM to 0 only; does not touch amp shutdown (use between envelope samples while a jingle runs). */
@@ -1222,6 +1249,11 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
     xSemaphoreGive(s_karaoke_dac_io_mtx);
 }
 
+uint32_t dashcdg_platform_hw_karaoke_amp_idle_shutdowns(void)
+{
+    return __atomic_load_n(&s_amp_idle_shutdowns, __ATOMIC_RELAXED);
+}
+
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
 {
     if (!s_mtx) {
@@ -1492,6 +1524,14 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
      */
     if (!feed_silence) {
         amp_set_run(true);
+        /*
+         * Record real-audio activity so `hw_task` can drop /SHDN HIGH after
+         * `AMP_IDLE_SHUTDOWN_MS` of "no real PCM pushed" (track ended, paused, muted, PLC
+         * exhausted, jitter starved). Datasheet wake-up < 2 ms; the next non-silence push will
+         * re-assert amp via `amp_set_run(true)` and the audio jitter window absorbs the wake-up.
+         * Lock-free uint64 store: __ATOMIC_RELEASE pairs with __ATOMIC_ACQUIRE in `hw_task`.
+         */
+        __atomic_store_n(&s_amp_last_real_push_ms, dashcdg_clock_now_ms(), __ATOMIC_RELEASE);
     }
     for (size_t i = 0U; i < samples; ++i) {
         int32_t u;
@@ -1659,6 +1699,11 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
 
 #if !CONFIG_IDF_TARGET_ESP32
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void) {}
+
+uint32_t dashcdg_platform_hw_karaoke_amp_idle_shutdowns(void)
+{
+    return 0U;
+}
 
 bool dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(uint32_t nominal_hz)
 {
@@ -1939,6 +1984,37 @@ static void hw_task(void *arg)
             }
 
             beep_seq_tick_locked(now);
+            /*
+             * SC8002B / FM8002E idle-shutdown gate. Datasheet quiescent ~3.7 mA on / 4.2 uA off,
+             * and the part has internal "switching/transitioning noise suppression" so the
+             * /SHDN edge does not pop. Conditions for shutdown (under `s_mtx`):
+             *   - amp is currently ON
+             *   - no beep sequence is mid-flight (k_*_seq is letting beeps run with amp ON)
+             *   - the most recent dwell elapsed (amp_set_run will no-op otherwise; this check
+             *     short-circuits the GPIO write so we do not even attempt under the dwell)
+             *   - no non-mute PCM has reached the DAC for `AMP_IDLE_SHUTDOWN_MS`
+             * We deliberately do not look at `s_karaoke_pcm_streaming` / `s_lab_pcm_streaming`:
+             * those stay TRUE across UI-mute (vol_pct=0) where the DAC keeps DMAing midpoint
+             * silence -- amp can (and should) drop in that case.
+             */
+            if (s_amp_run_state && !beep_seq_active()) {
+                uint64_t last = __atomic_load_n(&s_amp_last_real_push_ms, __ATOMIC_ACQUIRE);
+                if (last != 0ULL && (now - last) >= AMP_IDLE_SHUTDOWN_MS) {
+                    if ((now - s_amp_last_switch_ms) >= (uint64_t)AMP_MIN_ON_DWELL_MS) {
+                        amp_set_run(false);
+                        /*
+                         * After successful shutdown, reset the activity sentinel to 0 so we cannot
+                         * tick the counter twice for the same idle window. The next real PCM push
+                         * (or any `amp_set_run(true)`) reseeds it -- guarantees the counter equals
+                         * the number of distinct audio-active->idle transitions.
+                         */
+                        if (!s_amp_run_state) {
+                            __atomic_store_n(&s_amp_last_real_push_ms, 0ULL, __ATOMIC_RELEASE);
+                            (void)__atomic_fetch_add(&s_amp_idle_shutdowns, 1U, __ATOMIC_RELAXED);
+                        }
+                    }
+                }
+            }
             xSemaphoreGive(s_mtx);
         }
     }
