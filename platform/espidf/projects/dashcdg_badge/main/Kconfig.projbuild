@@ -1,5 +1,25 @@
 menu "DashCDG badge"
 
+    config DASHCDG_BADGE_EXEC_TRACE
+        bool "Executive: structured UART trace lines"
+        default y
+        help
+            When enabled, badge_exec emits short structured `[exec-trace]` lines on every boot
+            event, health transition, task registration, and orchestrator decision. Lines are
+            single-line, ASCII only, and rate-limited by event cadence (not by a tick), so the
+            UART load is small. Disable to silence the lines without removing the executive.
+            See docs/ops/esp32-badge-freertos-telemetry-runbook.md for the parser contract.
+
+    config DASHCDG_BADGE_EXEC_LOCK_TIMEOUT_MS
+        int "Executive: health/task table mutex wait timeout (ms)"
+        range 5 200
+        default 20
+        help
+            Maximum time a publisher will wait to update the executive health/task table. The
+            mutex is only held for trivial copies, so timeouts here indicate a real RTOS problem.
+            On timeout the publisher returns ESP_ERR_TIMEOUT and the caller logs/drops; heartbeats
+            use a non-blocking attempt and silently skip on contention.
+
     config DASHCDG_BADGE_OPUS_MONO_ONLY
         bool "Opus RX: mono decoder only (saves internal RAM)"
         default y

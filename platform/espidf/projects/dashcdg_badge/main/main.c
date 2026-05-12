@@ -1,6 +1,8 @@
 /*
  * dashcdg_badge - CYD 3.2" LVGL + touch launcher (Wi-Fi, Karaoke stubs; CD-G multicast later).
  */
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "esp_err.h"
@@ -11,6 +13,7 @@
 #include "lvgl.h"
 #include "nvs_flash.h"
 
+#include "badge_exec.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
 #include "nav.h"
@@ -106,15 +109,44 @@ static void dashcdg_show_boot_error_screen(lv_disp_t *disp, const char *stage, e
 
 void app_main(void)
 {
+    bool nvs_recovered = false;
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
+        nvs_recovered = true;
     }
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     dashcdg_log_startup_runtime_cfg();
+
+    /*
+     * Bring the executive layer up as early as we have NVS + event loop + esp_timer. Subsequent
+     * subsystems publish boot facts and health transitions through this layer instead of relying
+     * on log-message archaeology.
+     */
+    {
+        esp_err_t ex = dashcdg_badge_exec_init();
+        if (ex != ESP_OK) {
+            ESP_LOGW(TAG, "badge_exec init: %s (continuing without exec layer)",
+                     esp_err_to_name(ex));
+        } else {
+            uint32_t bits = DASHCDG_BADGE_EXEC_BOOT_NETIF_OK |
+                            DASHCDG_BADGE_EXEC_BOOT_EVT_LOOP_OK |
+                            (nvs_recovered ? DASHCDG_BADGE_EXEC_BOOT_NVS_RECOVERED
+                                           : DASHCDG_BADGE_EXEC_BOOT_NVS_OK);
+            (void)dashcdg_badge_exec_publish_boot_event(bits,
+                    nvs_recovered ? "nvs_erase_reinit" : "nvs_first_boot_ok");
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_NVS,
+                                                DASHCDG_BADGE_EXEC_HEALTH_OK,
+                                                nvs_recovered ? "recovered" : "ok");
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_NETIF,
+                                                DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_EVENT_LOOP,
+                                                DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+        }
+    }
 
     {
         esp_err_t w = dashcdg_wifi_boot_auto_connect();

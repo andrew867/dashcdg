@@ -1,5 +1,6 @@
 set(DASHCDG_BADGE_MAIN_SRCS
         "main.c"
+        "badge_exec.c"
         "display_lvgl.c"
         "nav.c"
         "apps_ui.c"
