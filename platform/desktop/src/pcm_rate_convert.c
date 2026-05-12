@@ -1,4 +1,5 @@
 #include "dashcdg/pcm_rate_convert.h"
+#include "dashcdg/protocol.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -129,6 +130,53 @@ void dashcdg_pcm_interleaved_s16_gain_q15_inplace(
     }
 }
 
+void dashcdg_pcm_interleaved_s16_undo_encode_headroom_inplace(
+        int16_t *pcm,
+        size_t frame_count,
+        unsigned int channels,
+        int32_t encode_gain_q15
+) {
+    size_t i;
+    size_t n;
+    int64_t numer;
+
+    if (pcm == NULL || frame_count == 0U || channels == 0U || encode_gain_q15 <= 0) {
+        return;
+    }
+    numer = ((int64_t)32768 * (int64_t)32768) / (int64_t)encode_gain_q15;
+    if (numer > (int64_t)2147483647) {
+        numer = (int64_t)2147483647;
+    }
+    n = frame_count * (size_t)channels;
+    for (i = 0U; i < n; ++i) {
+        int64_t y = ((int64_t)pcm[i] * numer) >> 15;
+
+        if (y > 32767) {
+            y = 32767;
+        } else if (y < -32768) {
+            y = -32768;
+        }
+        pcm[i] = (int16_t)y;
+    }
+}
+
+int32_t dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15(uint8_t codec_id)
+{
+    if (!dashcdg_v4_audio_codec_is_narrowband(codec_id)) {
+        return 0;
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_QCELP8K || codec_id == DASHCDG_V4_AUDIO_CODEC_CELP13K) {
+        return (int32_t)DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15;
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) {
+        return (int32_t)DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15;
+    }
+    if (codec_id == DASHCDG_V4_AUDIO_CODEC_AMR_NB) {
+        return (int32_t)DASHCDG_AMR_NB_ENCODE_HEADROOM_GAIN_Q15;
+    }
+    return (int32_t)DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15;
+}
+
 void dashcdg_pcm_hp80_biquad_reset(struct dashcdg_pcm_hp80_biquad_state *st) {
     if (st != NULL) {
         st->x1 = 0.0f;
@@ -247,8 +295,61 @@ static void dashcdg_pcm_mono_decimate_fir_exact_ratio(
 }
 
 /*
+ * Catmull–Rom spline segment between c1 and c2 with neighbors c0, c3; u in [0,1].
+ * Used for exact-ratio narrowband upsample (8/16 kHz → 48 kHz) on embedded targets
+ * where Lanczos (960 × ~8 sinc taps × sinf) starves real-time audio.
+ */
+static float dashcdg_pcm_mono_catmull_rom_segment(float c0, float c1, float c2, float c3, float u) {
+    float u2 = u * u;
+    float u3 = u2 * u;
+
+    return 0.5f *
+            ((2.0f * c1) + (-c0 + c2) * u + (2.0f * c0 - 5.0f * c1 + 4.0f * c2 - c3) * u2 +
+                    (-c0 + 3.0f * c1 - 3.0f * c2 + c3) * u3);
+}
+
+static float dashcdg_pcm_mono_clamped_sample_f(const int16_t *in, size_t in_len, int idx) {
+    if (idx < 0) {
+        idx = 0;
+    } else if ((size_t) idx >= in_len) {
+        idx = (int) (in_len - 1U);
+    }
+    return (float) in[(size_t) idx];
+}
+
+/**
+ * Band-limited-ish upsample for exact integer ratios 8 kHz→48 kHz (×6) and 16 kHz→48 kHz (×3).
+ * Replaces per-output Lanczos sinc on paths where `out_len == in_len * out_rate / in_rate`.
+ */
+static void dashcdg_pcm_mono_upsample_catmull_rom_exact_ratio(
+        const int16_t *in,
+        size_t in_len,
+        int16_t *out,
+        size_t out_len,
+        uint32_t in_rate,
+        uint32_t out_rate
+) {
+    size_t j;
+    float scale = (float) in_rate / (float) out_rate;
+
+    for (j = 0U; j < out_len; ++j) {
+        float pos = (float) j * scale;
+        int i0 = (int) floorf(pos);
+        float u = pos - (float) i0;
+        float c0 = dashcdg_pcm_mono_clamped_sample_f(in, in_len, i0 - 1);
+        float c1 = dashcdg_pcm_mono_clamped_sample_f(in, in_len, i0);
+        float c2 = dashcdg_pcm_mono_clamped_sample_f(in, in_len, i0 + 1);
+        float c3 = dashcdg_pcm_mono_clamped_sample_f(in, in_len, i0 + 2);
+        float y = dashcdg_pcm_mono_catmull_rom_segment(c0, c1, c2, c3, u);
+
+        out[j] = dashcdg_pcm_float_soft_limit_to_i16(y);
+    }
+}
+
+#if !defined(DASHCDG_HAVE_LIBSOXR)
+/*
  * Lanczos kernel (order a): band-limited reconstruction for arbitrary resample ratios.
- * Used for desktop TX capture and non–integer-rate paths where cubic interpolation aliases.
+ * Used when libsoxr is unavailable (embedded); desktop builds with soxr never call this.
  */
 static float dashcdg_lanczos_kernel(float x, int a) {
     float ax = fabsf(x);
@@ -279,15 +380,15 @@ static void dashcdg_pcm_mono_resample_lanczos(
     size_t j;
 
     for (j = 0U; j < out_len; ++j) {
-        double t = ((double) j * (double) in_rate) / (double) out_rate;
-        double acc = 0.0;
-        int ti = (int) floor(t);
+        float t = ((float) j * (float) in_rate) / (float) out_rate;
+        float acc = 0.0f;
+        int ti = (int) floorf(t);
         int i;
         int i0 = ti - a + 1;
         int i1 = ti + a;
 
         for (i = i0; i <= i1; ++i) {
-            float w = dashcdg_lanczos_kernel((float) (t - (double) i), a);
+            float w = dashcdg_lanczos_kernel(t - (float) i, a);
             int ii = i;
 
             if (ii < 0) {
@@ -295,11 +396,12 @@ static void dashcdg_pcm_mono_resample_lanczos(
             } else if ((size_t) ii >= in_len) {
                 ii = (int) (in_len - 1U);
             }
-            acc += (double) in[(size_t) ii] * (double) w;
+            acc += (float) in[(size_t) ii] * w;
         }
-        out[j] = dashcdg_pcm_float_soft_limit_to_i16((float) acc);
+        out[j] = dashcdg_pcm_float_soft_limit_to_i16(acc);
     }
 }
+#endif /* !DASHCDG_HAVE_LIBSOXR */
 
 void dashcdg_pcm_mono_resample_cubic(
         const int16_t *in,
@@ -341,12 +443,12 @@ void dashcdg_pcm_mono_resample_cubic(
     }
 
     if (in_rate == 8000U && out_rate == 48000U && out_len == in_len * 6U) {
-        dashcdg_pcm_mono_resample_lanczos(in, in_len, in_rate, out, out_len, out_rate, 4);
+        dashcdg_pcm_mono_upsample_catmull_rom_exact_ratio(in, in_len, out, out_len, in_rate, out_rate);
         return;
     }
 
     if (in_rate == 16000U && out_rate == 48000U && out_len == in_len * 3U) {
-        dashcdg_pcm_mono_resample_lanczos(in, in_len, in_rate, out, out_len, out_rate, 4);
+        dashcdg_pcm_mono_upsample_catmull_rom_exact_ratio(in, in_len, out, out_len, in_rate, out_rate);
         return;
     }
 

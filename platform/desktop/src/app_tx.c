@@ -2923,6 +2923,8 @@ static void dashcdg_tx_roll_session_rx_reporters_locked(void) {
     g_tx_state.v4_rx_phase_error_max_ms = 0;
     g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
     g_tx_state.v4_group_sync_phase_spread_ms = 0;
+    g_tx_state.v4_group_sync_target_latency_ms = 0U;
+    g_tx_state.v4_rx_group_target_latency_ms = 0U;
     g_tx_state.v4_group_sync_measure_anchor_local_ms = 0U;
     for (i = 0U; i < DASHCDG_TX_RX_REPORTER_SLOTS; ++i) {
         struct dashcdg_tx_rx_reporter *slot = &g_tx_state.rx_reporters[i];
@@ -4526,6 +4528,13 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
 
     if (abs_ema_count > 0U) {
         group_target_latency_ms = dashcdg_tx_group_target_from_latencies_median(abs_ema_samples, abs_ema_count);
+    } else if (active_count > 0U && g_tx_state.v4_group_sync_target_latency_ms != 0U) {
+        /*
+         * All reporters can be temporarily controller-ineligible (degraded empty-buf, health-hold,
+         * clock-noisy, etc.). Publishing group_target=0 and wiping spreads causes clock_sync/RX to
+         * lose the shared timeline mid-session; hold the last good aggregate until controllers return.
+         */
+        group_target_latency_ms = g_tx_state.v4_group_sync_target_latency_ms;
     }
 
     g_tx_state.v4_rx_stats_reporters_active = active_count;
@@ -4563,7 +4572,7 @@ static void dashcdg_tx_refresh_rx_measurements_locked(uint64_t now_ms) {
         } else {
             g_tx_state.v4_group_sync_phase_spread_ms = 0;
         }
-    } else {
+    } else if (!(active_count > 0U && abs_ema_count == 0U)) {
         g_tx_state.v4_rx_phase_error_min_ms = 0;
         g_tx_state.v4_rx_phase_error_max_ms = 0;
         g_tx_state.v4_group_sync_pipeline_spread_ms = 0;
@@ -6284,7 +6293,7 @@ static int dashcdg_tx_send_v4_clock_sync_locked(uint64_t now_ms, uint8_t *packet
             ((target_ms & DASHCDG_V4_CLOCK_SYNC_SYNCCTRL_TARGET_MASK) << DASHCDG_V4_CLOCK_SYNC_SYNCCTRL_TARGET_SHIFT) |
             ((spread_ms & DASHCDG_V4_CLOCK_SYNC_SYNCCTRL_SPREAD_MASK) << DASHCDG_V4_CLOCK_SYNC_SYNCCTRL_SPREAD_SHIFT) |
             startup_base;
-    if (g_tx_state.v4_group_sync_mode == DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE &&
+    if (mode == DASHCDG_TX_GROUP_SYNC_MODE_ACTIVE &&
             dashcdg_tx_select_audio_sync_leader_locked(&leader_instance_id, &leader_trim_ppm)) {
         leader_instance_lo = (uint16_t) (leader_instance_id & 0xffffU);
     }

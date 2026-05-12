@@ -861,6 +861,8 @@ static int g_endpoint_is_broadcast;
 static uint32_t g_rx_stats_interval_ms = DASHCDG_RX_STATS_DEFAULT_INTERVAL_MS;
 static uint32_t g_rx_av_sync_log_ms = 0U;
 static uint64_t g_rx_last_av_sync_log_ms = 0U;
+static uint32_t g_rx_audio_loss_log_ms = 0U;
+static uint64_t g_rx_last_audio_loss_log_ms = 0U;
 static FILE *g_rx_metrics_jsonl_file = NULL;
 static char g_rx_metrics_jsonl_path[512];
 static uint64_t g_rx_metrics_last_emit_ms = 0U;
@@ -1853,7 +1855,7 @@ static int dashcdg_rx_ipv4_is_broadcast(const struct in_addr *address) {
 static void dashcdg_rx_print_usage(const char *argv0) {
 #if DASHCDG_RX_HAVE_GLUT
     RX_ERR(
-            "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-stats-port <port>] [--rx-repair-port <port>] [--rx-av-sync-log-ms <ms>]\n"
+            "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-stats-port <port>] [--rx-repair-port <port>] [--rx-av-sync-log-ms <ms>] [--rx-audio-loss-log-ms <ms>]\n"
             "       [--rx-start-hold-min-ms <ms>] [--rx-start-hold-max-ms <ms>]\n"
             "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--metrics-jsonl <path>] [--win-gdi|--gdi] [endpoint-address] [port]\n",
             argv0
@@ -1862,7 +1864,7 @@ static void dashcdg_rx_print_usage(const char *argv0) {
     RX_ERR( "  default: OpenGL first; on Windows, falls back to GDI if GL init fails\n");
 #else
     RX_ERR(
-            "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-stats-port <port>] [--rx-repair-port <port>] [--rx-av-sync-log-ms <ms>]\n"
+            "usage: %s [--help] [--headless] [--rx-drop-audio] [--rx-stats-ms <ms>] [--rx-stats-port <port>] [--rx-repair-port <port>] [--rx-av-sync-log-ms <ms>] [--rx-audio-loss-log-ms <ms>]\n"
             "       [--rx-start-hold-min-ms <ms>] [--rx-start-hold-max-ms <ms>]\n"
             "       [--rx-graphics-clock dac|sender] [--rx-graphics-trim-ms <signed>] [--metrics-jsonl <path>] [endpoint-address] [port]\n",
             argv0
@@ -1914,6 +1916,7 @@ static void dashcdg_rx_cli_print_help(const char *argv0) {
     RX_OUT( "--rx-repair-port <port>: secondary repair stream port (default %d; set to media port to disable).\n", DASHCDG_RX_DEFAULT_REPAIR_PORT);
     RX_OUT(
             "\n--rx-av-sync-log-ms <ms>: stderr timeline line every N ms (0 = off) — dac vs sender vs snapshot.\n"
+            "--rx-audio-loss-log-ms <ms>: periodic jitter loss breakdown (pending UDP drops, reorder, SKIP reasons).\n"
             "--rx-start-hold-min-ms <ms>: startup silence hold before DAC start (default 1000).\n"
             "--rx-start-hold-max-ms <ms>: force DAC release timeout from session change (default 2500).\n"
             "--rx-graphics-clock dac|sender: dac = align raster to locally heard audio (default); "
@@ -4322,6 +4325,40 @@ static void dashcdg_rx_publish_render_snapshot_locked(uint64_t local_now_ms) {
         }
     }
 
+    if (g_rx_audio_loss_log_ms > 0U && g_receiver.audio_jitter.initialized) {
+        if (g_rx_last_audio_loss_log_ms == 0U ||
+                local_now_ms - g_rx_last_audio_loss_log_ms >= (uint64_t) g_rx_audio_loss_log_ms) {
+            struct dashcdg_audio_jitter_buffer *aj = &g_receiver.audio_jitter;
+            uint64_t snd_pb_probe = 0U;
+            int have_snd_pb = dashcdg_rx_sender_playback_now_locked(&g_receiver, local_now_ms, &snd_pb_probe);
+
+            g_rx_last_audio_loss_log_ms = local_now_ms;
+            RX_ERR(
+                    "[rx-audio-loss] next=%u high=%u occ=%u pend_drop=%" DASHCDG_RX_PRIu64
+                    " reorder=%" DASHCDG_RX_PRIu64 " miss_skips=%" DASHCDG_RX_PRIu64
+                    " skip_nc=%" DASHCDG_RX_PRIu64 " skip_hr=%" DASHCDG_RX_PRIu64 " skip_sf=%" DASHCDG_RX_PRIu64
+                    " skip_gj=%" DASHCDG_RX_PRIu64 " skip_sa=%" DASHCDG_RX_PRIu64 " skip_eh=%" DASHCDG_RX_PRIu64
+                    " skip_st=%" DASHCDG_RX_PRIu64 " codec=%u primed=%d have_snd_pb=%d\n",
+                    (unsigned int) aj->next_media_sequence,
+                    (unsigned int) aj->highest_media_sequence_seen,
+                    (unsigned int) dashcdg_audio_jitter_occupied_count(aj),
+                    (uint64_t) aj->pending_drops,
+                    (uint64_t) aj->reordered_packets,
+                    (uint64_t) g_receiver.audio_missing_skips,
+                    (uint64_t) aj->drain_skip_no_clock_gap,
+                    (uint64_t) aj->drain_skip_hard_resync,
+                    (uint64_t) aj->drain_skip_stall_full,
+                    (uint64_t) aj->drain_skip_sender_gap_jump,
+                    (uint64_t) aj->drain_skip_sender_seq_advance,
+                    (uint64_t) aj->drain_skip_sender_empty_hole,
+                    (uint64_t) aj->drain_skip_starvation_empty,
+                    (unsigned int) g_receiver.announced_audio_codec_id,
+                    g_receiver.jitter_audio_decode_primed,
+                    have_snd_pb
+            );
+        }
+    }
+
     snapshot.valid = 1;
     snapshot.playback_ms = playback_ms;
     /*
@@ -5182,7 +5219,8 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
         int have_trim_ppm_for_frame,
         uint64_t playback_ms,
         uint8_t wire_frame_ms,
-        uint8_t codec_id
+        uint8_t codec_id,
+        int apply_nb_tx_makeup
 );
 #define DASHCDG_RX_DEGRADED_FRAME_MS_FALLBACK 20U
 static int dashcdg_rx_queue_degraded_for_frame_locked(
@@ -5228,7 +5266,8 @@ static int dashcdg_rx_queue_degraded_for_frame_locked(
             have_trim_ppm_for_frame,
             frame->playback_ms,
             frame->frame_ms,
-            frame->codec_id
+            frame->codec_id,
+            0
     );
 }
 
@@ -5242,10 +5281,22 @@ static int dashcdg_rx_queue_decoded_interleaved_pcm_locked(
         int have_trim_ppm_for_frame,
         uint64_t playback_ms,
         uint8_t wire_frame_ms,
-        uint8_t codec_id
+        uint8_t codec_id,
+        int apply_nb_tx_makeup
 ) {
     size_t queued_frames = 0U;
     size_t expected_queued_fc = 0U;
+
+    if (apply_nb_tx_makeup) {
+        int32_t txg = dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15(codec_id);
+
+        if (txg > 0) {
+            unsigned int ch = host_output_channels == 0U ? 1U : (unsigned int)host_output_channels;
+
+            dashcdg_pcm_interleaved_s16_undo_encode_headroom_inplace(
+                    pcm, (size_t)decoded_frames, ch, txg);
+        }
+    }
 
     {
         uint32_t ses_sr;
@@ -5801,7 +5852,8 @@ static int dashcdg_rx_apply_audio_frame_locked(
             have_trim_ppm_for_frame,
             frame->playback_ms,
             frame->frame_ms,
-            frame->codec_id);
+            frame->codec_id,
+            1);
 }
 
 static int dashcdg_rx_apply_amr_wb_lost_skips_locked(
@@ -5885,7 +5937,8 @@ static int dashcdg_rx_apply_amr_wb_lost_skips_locked(
                 have_trim_ppm_for_frame,
                 have_sender_playback ? sender_playback_now_ms : 0ULL,
                 frame_ms_line,
-                DASHCDG_V4_AUDIO_CODEC_AMR_WB);
+                DASHCDG_V4_AUDIO_CODEC_AMR_WB,
+                1);
         if (qrc <= 0) {
             break;
         }
@@ -6080,7 +6133,7 @@ static void dashcdg_rx_drain_media_locked(struct receiver_state *state, uint64_t
                             have_sender_playback,
                             miss_delta
                     );
-                    state->jitter_audio_decode_primed = 1;
+                    /* Do not set jitter_audio_decode_primed on SKIP — see badge_rx PLC path + gap-ahead jitter. */
                     state->last_audio_jitter_apply_local_ms = local_now_ms;
                     state->last_progress_local_ms = local_now_ms;
                     progressed = 1;
@@ -6747,6 +6800,14 @@ static void dashcdg_rx_reconcile_v4_audio_codec_from_chunk_locked(
             wire_profile_id,
             wire_codec_id
     );
+
+    /*
+     * `configure_audio_locked` clears jitter but leaves playback_base_* on the old codec timeline.
+     * Mid-track codec switches then compare sender playback vs next chunk tags using stale anchors,
+     * producing continuity SKIP/PLC storms until a hard resync. Re-bootstrap from the next chunk.
+     */
+    state->playback_base_ms = 0U;
+    state->playback_base_sender_ms = 0U;
 
     state->announced_audio_frame_ms = wire_frame_ms;
     state->announced_audio_profile_id = wire_profile_id;
@@ -9237,6 +9298,21 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
             g_rx_av_sync_log_ms = (uint32_t) strtoul(argv[i], NULL, 10);
             continue;
         }
+        if (strcmp(argv[i], "--rx-audio-loss-log-ms") == 0) {
+            if (i + 1 >= argc) {
+                RX_ERR("%s: --rx-audio-loss-log-ms requires a non-negative integer (0 = off)\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
+                return 1;
+            }
+            ++i;
+            if (!dashcdg_rx_is_number(argv[i])) {
+                RX_ERR("%s: --rx-audio-loss-log-ms expects a non-negative integer\n", argv[0]);
+                dashcdg_rx_logger_shutdown_if_needed();
+                return 1;
+            }
+            g_rx_audio_loss_log_ms = (uint32_t) strtoul(argv[i], NULL, 10);
+            continue;
+        }
         if (strcmp(argv[i], "--rx-start-hold-min-ms") == 0) {
             if (i + 1 >= argc || !dashcdg_rx_is_number(argv[i + 1])) {
                 RX_ERR("%s: --rx-start-hold-min-ms requires a non-negative integer\n", argv[0]);
@@ -9358,7 +9434,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
     g_rx_repair_port = (repair_port > 0 && repair_port != port) ? repair_port : 0;
     RX_OUT(
             "[rx] config: stats_ms=%u stats_port=%d repair_port=%d codec=%s hud=%s start_hold=%u..%ums "
-            "nack_cooldown=%ums (per-group mask-aware; set DASHCDG_RX_LOG_REPAIR_NACK=1 for repair-nack lines)\n",
+            "audio_loss_log_ms=%u nack_cooldown=%ums (per-group mask-aware; set DASHCDG_RX_LOG_REPAIR_NACK=1 for repair-nack lines)\n",
            (unsigned int) g_rx_stats_interval_ms,
            g_rx_stats_port,
            g_rx_repair_port > 0 ? g_rx_repair_port : port,
@@ -9366,6 +9442,7 @@ int dashcdg_desktop_rx_main(int argc, char **argv) {
            g_hud_visible ? "on" : "off",
            (unsigned int) g_rx_audio_start_min_hold_ms,
            (unsigned int) g_rx_audio_start_max_hold_ms,
+           (unsigned int) g_rx_audio_loss_log_ms,
            (unsigned int) DASHCDG_RX_REPAIR_NACK_COOLDOWN_MS);
 
 #if DASHCDG_RX_HAVE_GLUT

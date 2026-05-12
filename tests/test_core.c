@@ -695,6 +695,53 @@ static void test_audio_jitter_duplicate_drop(void) {
     assert(jb.pending_drops > drops_before);
 }
 
+static void test_audio_jitter_full_ring_evicts_furthest_ahead(void) {
+    struct dashcdg_audio_jitter_buffer jb;
+    const uint8_t pl[] = {0x01};
+    size_t cap;
+    uint32_t base;
+    size_t k;
+
+    dashcdg_audio_jitter_init(&jb);
+    cap = dashcdg_audio_jitter_capacity(&jb);
+    assert(cap >= 2U);
+    base = 100U;
+    for (k = 0U; k < cap; ++k) {
+        assert(
+                dashcdg_audio_jitter_insert(
+                        &jb,
+                        base + (uint32_t) k,
+                        (uint64_t)(base + (uint32_t) k) * 20ULL,
+                        20U,
+                        0U,
+                        0U,
+                        pl,
+                        sizeof(pl),
+                        1
+                ) == 1
+        );
+    }
+    assert(dashcdg_audio_jitter_occupied_count(&jb) == cap);
+    assert(jb.insert_evicted_furthest_for_space == 0U);
+    assert(
+            dashcdg_audio_jitter_insert(
+                    &jb,
+                    base + (uint32_t) cap,
+                    (uint64_t)(base + (uint32_t) cap) * 20ULL,
+                    20U,
+                    0U,
+                    0U,
+                    pl,
+                    sizeof(pl),
+                    1
+            ) == 1
+    );
+    assert(jb.insert_evicted_furthest_for_space == 1U);
+    assert(dashcdg_audio_jitter_find(&jb, base + (uint32_t) cap - 1U) == NULL);
+    assert(dashcdg_audio_jitter_find(&jb, base + (uint32_t) cap) != NULL);
+    dashcdg_audio_jitter_release(&jb);
+}
+
 static void test_audio_jitter_drain_apply_and_note(void) {
     struct dashcdg_audio_jitter_buffer jb;
     struct dashcdg_audio_jitter_frame *frame = NULL;
@@ -1730,6 +1777,7 @@ int main(void) {
     test_v4_audio_codec_predicate_helpers();
     test_media_clock();
     test_audio_jitter_duplicate_drop();
+    test_audio_jitter_full_ring_evicts_furthest_ahead();
     test_audio_jitter_drain_apply_and_note();
     test_audio_jitter_drain_skip_missing();
     test_audio_jitter_drain_no_ghost_skip_small_clock_skew();

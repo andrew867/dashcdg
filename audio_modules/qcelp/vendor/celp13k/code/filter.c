@@ -55,6 +55,7 @@ such commitments.
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #ifndef __APPLE__
 #include <malloc.h>
 #endif
@@ -63,6 +64,9 @@ such commitments.
 #include "tty_dbg.h"
 
 #define DEBUG(x)        
+#if defined(ESP_PLATFORM)
+#define DASHCDG_QCELP_TMPBUF_MAX_WORDS 512
+#endif
 
 void initialize_pole_filter(
     struct  POLE_FILTER     *filter,
@@ -305,16 +309,36 @@ void do_pole_filter_1_tap_interp(
     int                       update_flag 
 )
 {
-
   float  *tmpbuf;
+#if defined(ESP_PLATFORM)
+  float  tmpbuf_stack[DASHCDG_QCELP_TMPBUF_MAX_WORDS];
+#endif
   int    i,j;
+  int    needed_words;
 
-  if( (tmpbuf=(float *)(calloc((unsigned)numsamples+filter->max_order, sizeof(float)))) == NULL )
-  {
-    fprintf(stderr,"ERROR: do_pole_filter_1_tap_interp(): Cannot allocate %d words for tmpbuf[]\n",
-        numsamples+filter->max_order);
-    exit(0);
+  needed_words = numsamples + filter->max_order;
+#if defined(ESP_PLATFORM)
+  if (needed_words > DASHCDG_QCELP_TMPBUF_MAX_WORDS) {
+    fprintf(stderr,"WARN: do_pole_filter_1_tap_interp(): need=%d > scratch=%d, pass-through\n",
+        needed_words, DASHCDG_QCELP_TMPBUF_MAX_WORDS);
+    for (i=0; i<numsamples; i++) {
+      output[i]=input[i];
+    }
+    return;
   }
+  tmpbuf = tmpbuf_stack;
+  memset(tmpbuf, 0, (size_t)needed_words * sizeof(float));
+#else
+  if( (tmpbuf=(float *)(calloc((unsigned)needed_words, sizeof(float)))) == NULL )
+  {
+    fprintf(stderr,"WARN: do_pole_filter_1_tap_interp(): OOM for tmpbuf[] (%d words), pass-through\n",
+        needed_words);
+    for (i=0; i<numsamples; i++) {
+      output[i]=input[i];
+    }
+    return;
+  }
+#endif
 
                                 /* initialize first "order" locations to  */
                                 /* previous memories                      */
@@ -360,7 +384,9 @@ void do_pole_filter_1_tap_interp(
       filter->memory[i]=tmpbuf[filter->max_order+numsamples-i-1];
     }
   }
+#if !defined(ESP_PLATFORM)
   free((char*)tmpbuf);
+#endif
 }/* end of void do_pole_filter_1_tap_interp() */
 
 void do_zero_filter(
@@ -373,15 +399,35 @@ void do_zero_filter(
 {
 
   float  *tmpbuf;
+#if defined(ESP_PLATFORM)
+  float  tmpbuf_stack[DASHCDG_QCELP_TMPBUF_MAX_WORDS];
+#endif
   int    i,j;
+  int    needed_words;
 
-  
-  if( (tmpbuf=(float *)(calloc((unsigned)numsamples+filter->order, sizeof(float)))) == NULL )
-  {
-    fprintf(stderr,"ERROR: do_zero_filter(): Cannot allocate %d words for tmpbuf[]\n",
-        numsamples+filter->order);
-    exit(0);
+  needed_words = numsamples + filter->order;
+#if defined(ESP_PLATFORM)
+  if (needed_words > DASHCDG_QCELP_TMPBUF_MAX_WORDS) {
+    fprintf(stderr,"WARN: do_zero_filter(): need=%d > scratch=%d, pass-through\n",
+        needed_words, DASHCDG_QCELP_TMPBUF_MAX_WORDS);
+    for (i=0; i<numsamples; i++) {
+      output[i]=input[i];
+    }
+    return;
   }
+  tmpbuf = tmpbuf_stack;
+  memset(tmpbuf, 0, (size_t)needed_words * sizeof(float));
+#else
+  if( (tmpbuf=(float *)(calloc((unsigned)needed_words, sizeof(float)))) == NULL )
+  {
+    fprintf(stderr,"WARN: do_zero_filter(): OOM for tmpbuf[] (%d words), pass-through\n",
+        needed_words);
+    for (i=0; i<numsamples; i++) {
+      output[i]=input[i];
+    }
+    return;
+  }
+#endif
 
                                 /* initialize first "order" locations to  */
                                 /* previous memories                      */
@@ -409,7 +455,9 @@ void do_zero_filter(
       filter->memory[i]=tmpbuf[filter->order+numsamples-i-1];
     }
   }
+#if !defined(ESP_PLATFORM)
   free((char*)tmpbuf);
+#endif
 }
 
 #if 0
@@ -499,14 +547,35 @@ void do_fir_linear_filter(
 {
 
   float  *tmpbuf;
+#if defined(ESP_PLATFORM)
+  float  tmpbuf_stack[DASHCDG_QCELP_TMPBUF_MAX_WORDS];
+#endif
   int    i,j;
+  int    needed_words;
 
-  if( (tmpbuf=(float *)(calloc((unsigned)numsamples+filter->order, sizeof(float)))) == NULL )
-  {
-    fprintf(stderr,"ERROR: do_fir_linear_filter(): Cannot allocate %d words for tmpbuf[]\n",
-        numsamples+filter->order);
-    exit(0);
+  needed_words = numsamples + filter->order;
+#if defined(ESP_PLATFORM)
+  if (needed_words > DASHCDG_QCELP_TMPBUF_MAX_WORDS) {
+    fprintf(stderr,"WARN: do_fir_linear_filter(): need=%d > scratch=%d, pass-through\n",
+        needed_words, DASHCDG_QCELP_TMPBUF_MAX_WORDS);
+    for (i=0; i<numsamples; i++) {
+      output[i]=input[i];
+    }
+    return;
   }
+  tmpbuf = tmpbuf_stack;
+  memset(tmpbuf, 0, (size_t)needed_words * sizeof(float));
+#else
+  if( (tmpbuf=(float *)(calloc((unsigned)needed_words, sizeof(float)))) == NULL )
+  {
+    fprintf(stderr,"WARN: do_fir_linear_filter(): OOM for tmpbuf[] (%d words), pass-through\n",
+        needed_words);
+    for (i=0; i<numsamples; i++) {
+      output[i]=input[i];
+    }
+    return;
+  }
+#endif
 
                                 /* initialize first "order-1" locations to  */
                                 /* previous memories                      */
@@ -530,7 +599,9 @@ void do_fir_linear_filter(
       filter->memory[i]=tmpbuf[filter->order+numsamples-i-2];
     }
   }
+#if !defined(ESP_PLATFORM)
   free((char*)tmpbuf);
+#endif
 }
 
 void get_impulse_response_pole(

@@ -127,6 +127,7 @@ int dashcdg_amr_nb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, i
     }
     {
         unsigned char bits[64];
+        memset(bits, 0, sizeof(bits));
         memcpy(bits, in, in_len);
         Decoder_Interface_Decode(ctx->codec, bits, pcm8k, 0);
     }
@@ -161,6 +162,7 @@ int dashcdg_amr_nb_decoder_run_native(void *opaque, const uint8_t *in, size_t in
     }
     {
         unsigned char bits[64];
+        memset(bits, 0, sizeof(bits));
         memcpy(bits, in, in_len);
         Decoder_Interface_Decode(ctx->codec, bits, (short *)pcm8k_160, 0);
     }

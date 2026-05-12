@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "dashcdg/pcm_rate_convert.h"
+#include "dashcdg/protocol.h"
 
 static void test_dc_is_preserved_on_exact_narrowband_decimation(void) {
     int16_t in48k[960];
@@ -422,6 +423,53 @@ static void test_gain_q15_matches_nb_headroom_constant(void) {
     assert(mono[2] == (int16_t) exp_peak);
 }
 
+static void test_undo_nb_headroom_roundtrip_speech(void) {
+    int16_t mono[3] = { 10000, -10000, 16000 };
+    int16_t orig0 = mono[0];
+    int16_t orig1 = mono[1];
+    int16_t orig2 = mono[2];
+    int32_t d0;
+    int32_t d1;
+    int32_t d2;
+
+    dashcdg_pcm_interleaved_s16_gain_q15_inplace(mono, 3U, 1U, DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15);
+    dashcdg_pcm_interleaved_s16_undo_encode_headroom_inplace(mono, 3U, 1U, DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15);
+
+    d0 = (int32_t)mono[0] - (int32_t)orig0;
+    d1 = (int32_t)mono[1] - (int32_t)orig1;
+    d2 = (int32_t)mono[2] - (int32_t)orig2;
+    if (d0 < 0) {
+        d0 = -d0;
+    }
+    if (d1 < 0) {
+        d1 = -d1;
+    }
+    if (d2 < 0) {
+        d2 = -d2;
+    }
+    assert(d0 <= 1 && d1 <= 1 && d2 <= 1);
+}
+
+static void test_tx_nb_headroom_gain_lookup(void) {
+    assert(dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15((uint8_t)DASHCDG_V4_AUDIO_CODEC_OPUS) == 0);
+    assert(
+            dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15((uint8_t)DASHCDG_V4_AUDIO_CODEC_AMR_NB) ==
+            (int32_t)DASHCDG_AMR_NB_ENCODE_HEADROOM_GAIN_Q15
+    );
+    assert(
+            dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15((uint8_t)DASHCDG_V4_AUDIO_CODEC_BLUETOOTH_SBC) ==
+            (int32_t)DASHCDG_NB_ENCODE_HEADROOM_GAIN_Q15
+    );
+    assert(
+            dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15((uint8_t)DASHCDG_V4_AUDIO_CODEC_CELP13K) ==
+            (int32_t)DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15
+    );
+    assert(
+            dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15((uint8_t)DASHCDG_V4_AUDIO_CODEC_AMR_WB) ==
+            (int32_t)DASHCDG_SPEECH_CODEC_HEADROOM_GAIN_Q15
+    );
+}
+
 int main(void) {
     test_dc_is_preserved_on_exact_narrowband_decimation();
     test_dc_preserved_on_8k_to_48k_upsample();
@@ -431,6 +479,8 @@ int main(void) {
     test_stereo_to_mono_uses_linear_average();
     test_interleaved_to_mono_copies_single_channel_input();
     test_gain_q15_matches_nb_headroom_constant();
+    test_undo_nb_headroom_roundtrip_speech();
+    test_tx_nb_headroom_gain_lookup();
     test_interleaved_to_mono_averages_stereo_input();
     test_overlap_chunk0_matches_isolated_resample();
     test_mono_overlap_exact_ratio_48k_to_8k_matches_contiguous();

@@ -111,6 +111,16 @@ struct dashcdg_audio_jitter_buffer {
     uint64_t next_playback_ms;
     uint64_t reordered_packets;
     uint64_t pending_drops;
+    /** Ring full: dropped furthest-ahead buffered frame (`media_sequence` > drain cursor) to accept insert (reorder / hole-fill). */
+    uint64_t insert_evicted_furthest_for_space;
+    /** Monotonic counters: which branch in `dashcdg_audio_jitter_drain_step` produced SKIP. */
+    uint64_t drain_skip_no_clock_gap;
+    uint64_t drain_skip_hard_resync;
+    uint64_t drain_skip_stall_full;
+    uint64_t drain_skip_sender_gap_jump;
+    uint64_t drain_skip_sender_seq_advance;
+    uint64_t drain_skip_sender_empty_hole;
+    uint64_t drain_skip_starvation_empty;
 };
 
 struct dashcdg_audio_jitter_drain_input {
@@ -164,6 +174,9 @@ struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_find(
 struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_oldest(const struct dashcdg_audio_jitter_buffer *jb);
 
 size_t dashcdg_audio_jitter_occupied_count(const struct dashcdg_audio_jitter_buffer *jb);
+
+/** Ring full: dropped furthest-ahead frame to make room (reorder burst). Monotonic. */
+uint64_t dashcdg_audio_jitter_insert_evicted_furthest_for_space(const struct dashcdg_audio_jitter_buffer *jb);
 
 enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         struct dashcdg_audio_jitter_buffer *jb,

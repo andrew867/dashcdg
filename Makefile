@@ -596,8 +596,8 @@ ifneq ($(strip $(SOXR_LINK)),)
 TEST_PCM_RATE_CONVERT_EXTRA_OBJS += $(OBJ_DIR)/desktop_soxr_resample.o
 endif
 
-$(TEST_PCM_RATE_CONVERT_BIN): $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(TEST_PCM_RATE_CONVERT_EXTRA_OBJS)
-	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(TEST_PCM_RATE_CONVERT_EXTRA_OBJS) $(SOXR_LINK) -lm
+$(TEST_PCM_RATE_CONVERT_BIN): $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(PROTO_LIB) $(TEST_PCM_RATE_CONVERT_EXTRA_OBJS)
+	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_pcm_rate_convert.o $(OBJ_DIR)/desktop_pcm_rate_convert.o $(TEST_PCM_RATE_CONVERT_EXTRA_OBJS) $(PROTO_LIB) $(SOXR_LINK) -lm
 
 $(TEST_OPUS_ROUNDTRIP_BIN): $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJECT)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJ_DIR)/test_opus_roundtrip.o $(DESKTOP_OPUS_OBJECT) $(OPUS_LINK) -lm
@@ -612,6 +612,7 @@ $(TEST_NB_CODEC_ADAPTERS_BIN): \
 	$(OBJ_DIR)/desktop_nb_sbc_codec.o \
 	$(CODEC_EVRCC_OBJS) \
 	$(CODEC_SBC_OBJS) \
+	$(PROTO_LIB) \
 	$(TEST_PCM_RATE_CONVERT_EXTRA_OBJS)
 	$(CC) $(CFLAGS) $(EXTRA_LDFLAGS) -o $@ \
 		$(OBJ_DIR)/test_nb_codec_adapters.o \
@@ -624,6 +625,7 @@ $(TEST_NB_CODEC_ADAPTERS_BIN): \
 		$(CODEC_EVRCC_OBJS) \
 		$(CODEC_SBC_OBJS) \
 		$(TEST_PCM_RATE_CONVERT_EXTRA_OBJS) \
+		$(PROTO_LIB) \
 		$(SOXR_LINK) -lm
 
 $(PLAYER_BIN): $(OBJ_DIR)/app_desktop_player.o $(DESKTOP_RX_GL_OBJECT) $(DESKTOP_TX_OBJECT) $(DESKTOP_OPUS_OBJECT) $(DESKTOP_LIB) $(CORE_LIB) $(PROTO_LIB) $(DESKTOP_COMMON_OBJECTS) $(TX_UI_NCURSES_OBJ)

@@ -94,6 +94,14 @@ void dashcdg_audio_jitter_clear(struct dashcdg_audio_jitter_buffer *jb) {
         jb->next_playback_ms = 0U;
         jb->reordered_packets = 0U;
         jb->pending_drops = 0U;
+        jb->insert_evicted_furthest_for_space = 0U;
+        jb->drain_skip_no_clock_gap = 0U;
+        jb->drain_skip_hard_resync = 0U;
+        jb->drain_skip_stall_full = 0U;
+        jb->drain_skip_sender_gap_jump = 0U;
+        jb->drain_skip_sender_seq_advance = 0U;
+        jb->drain_skip_sender_empty_hole = 0U;
+        jb->drain_skip_starvation_empty = 0U;
         return;
     }
     for (size_t i = 0; i < jb->slot_capacity; ++i) {
@@ -105,6 +113,14 @@ void dashcdg_audio_jitter_clear(struct dashcdg_audio_jitter_buffer *jb) {
     jb->next_playback_ms = 0U;
     jb->reordered_packets = 0U;
     jb->pending_drops = 0U;
+    jb->insert_evicted_furthest_for_space = 0U;
+    jb->drain_skip_no_clock_gap = 0U;
+    jb->drain_skip_hard_resync = 0U;
+    jb->drain_skip_stall_full = 0U;
+    jb->drain_skip_sender_gap_jump = 0U;
+    jb->drain_skip_sender_seq_advance = 0U;
+    jb->drain_skip_sender_empty_hole = 0U;
+    jb->drain_skip_starvation_empty = 0U;
 #else
     dashcdg_audio_jitter_init(jb);
 #endif
@@ -123,6 +139,7 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
     uint64_t old_next_playback_ms;
     uint64_t old_reordered_packets;
     uint64_t old_pending_drops;
+    uint64_t old_insert_evicted_furthest_for_space;
     uint32_t copied_highest = 0U;
     int copied_any = 0;
     size_t copied = 0U;
@@ -140,6 +157,7 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
     old_next_playback_ms = jb->next_playback_ms;
     old_reordered_packets = jb->reordered_packets;
     old_pending_drops = jb->pending_drops;
+    old_insert_evicted_furthest_for_space = jb->insert_evicted_furthest_for_space;
 
     slots = (struct dashcdg_audio_jitter_frame *) aj_heap_calloc(slot_count, sizeof(*slots));
     if (slots == NULL) {
@@ -166,6 +184,7 @@ int dashcdg_audio_jitter_resize(struct dashcdg_audio_jitter_buffer *jb, size_t s
     jb->next_playback_ms = old_next_playback_ms;
     jb->reordered_packets = old_reordered_packets;
     jb->pending_drops = old_pending_drops;
+    jb->insert_evicted_furthest_for_space = old_insert_evicted_furthest_for_space;
 
     if (old_slots != NULL && old_cap > 0U && old_initialized) {
         picked = (uint8_t *) aj_heap_calloc(old_cap, sizeof(uint8_t));
@@ -278,6 +297,40 @@ struct dashcdg_audio_jitter_frame *dashcdg_audio_jitter_oldest(const struct dash
     return oldest;
 }
 
+/*
+ * For a full ring, evict the buffered frame with the largest `media_sequence` that is still *strictly
+ * after* the drain cursor. That frees a slot for a late in-order or gap-fill packet without discarding
+ * the next frame we are about to APPLY (and avoids the pathological 1-slot case where evicting the only
+ * occupied slot would skip playout).
+ */
+static struct dashcdg_audio_jitter_frame *audio_jb_furthest_strictly_ahead(
+        const struct dashcdg_audio_jitter_buffer *jb
+) {
+    struct dashcdg_audio_jitter_frame *best = NULL;
+    size_t cap = audio_jb_capacity(jb);
+
+    if (jb == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        if (!jb->slots[i].occupied) {
+            continue;
+        }
+        if (jb->slots[i].media_sequence <= jb->next_media_sequence) {
+            continue;
+        }
+        if (best == NULL || jb->slots[i].media_sequence > best->media_sequence) {
+            best = (struct dashcdg_audio_jitter_frame *) &jb->slots[i];
+        }
+    }
+    return best;
+}
+
+uint64_t dashcdg_audio_jitter_insert_evicted_furthest_for_space(const struct dashcdg_audio_jitter_buffer *jb)
+{
+    return (jb != NULL) ? jb->insert_evicted_furthest_for_space : 0ULL;
+}
+
 size_t dashcdg_audio_jitter_occupied_count(const struct dashcdg_audio_jitter_buffer *jb) {
     size_t n = 0U;
     size_t cap = audio_jb_capacity(jb);
@@ -339,10 +392,18 @@ int dashcdg_audio_jitter_insert(
         }
     }
     if (slot == NULL) {
-        if (count_stats) {
-            jb->pending_drops++;
+        struct dashcdg_audio_jitter_frame *evict = audio_jb_furthest_strictly_ahead(jb);
+
+        if (evict == NULL) {
+            if (count_stats) {
+                jb->pending_drops++;
+            }
+            return 0;
         }
-        return 0;
+        if (count_stats) {
+            jb->insert_evicted_furthest_for_space++;
+        }
+        slot = evict;
     }
 
     audio_jb_zero_slot(slot);
@@ -436,6 +497,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
                 *out_missing_skips_delta = (uint64_t) jump;
                 jb->next_media_sequence = oldest->media_sequence;
                 jb->next_playback_ms = oldest->playback_ms;
+                jb->drain_skip_no_clock_gap++;
                 return DASHCDG_AUDIO_DRAIN_SKIP;
             }
         }
@@ -468,6 +530,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             *out_missing_skips_delta = (uint64_t) jump;
             jb->next_media_sequence = oldest->media_sequence;
             jb->next_playback_ms += (uint64_t) jump * (uint64_t) in->announced_audio_frame_ms;
+            jb->drain_skip_stall_full++;
             return DASHCDG_AUDIO_DRAIN_SKIP;
         }
     }
@@ -490,6 +553,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             *out_missing_skips_delta = 1U;
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+            jb->drain_skip_sender_gap_jump++;
         } else if (oldest != NULL) {
             if (in->primed_decode == 0) {
                 return DASHCDG_AUDIO_DRAIN_STOP;
@@ -497,6 +561,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             *out_missing_skips_delta = 1U;
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+            jb->drain_skip_sender_seq_advance++;
         } else if (in->primed_decode != 0) {
             uint64_t skew = (receiver_playback_now_ms > jb->next_playback_ms)
                     ? (receiver_playback_now_ms - jb->next_playback_ms)
@@ -519,6 +584,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
             *out_missing_skips_delta = 1U;
             jb->next_media_sequence++;
             jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+            jb->drain_skip_sender_empty_hole++;
         } else {
             return DASHCDG_AUDIO_DRAIN_STOP;
         }
@@ -535,6 +601,7 @@ enum dashcdg_audio_drain_step dashcdg_audio_jitter_drain_step(
         *out_missing_skips_delta = 1U;
         jb->next_media_sequence++;
         jb->next_playback_ms += (uint64_t) in->announced_audio_frame_ms;
+        jb->drain_skip_starvation_empty++;
         return DASHCDG_AUDIO_DRAIN_SKIP;
     }
 

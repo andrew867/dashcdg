@@ -128,6 +128,7 @@ int dashcdg_amr_wb_decoder_run(void *opaque, const uint8_t *in, size_t in_len, i
     }
     {
         UWord8 bits[NB_SERIAL_MAX];
+        memset(bits, 0, sizeof(bits));
         memcpy(bits, in, in_len);
         D_IF_decode(ctx->codec, bits, pcm16k, _good_frame);
     }
@@ -191,6 +192,7 @@ int dashcdg_amr_wb_decoder_run_native(void *opaque, const uint8_t *in, size_t in
     }
     {
         UWord8 bits[NB_SERIAL_MAX];
+        memset(bits, 0, sizeof(bits));
         memcpy(bits, in, in_len);
         D_IF_decode(ctx->codec, bits, (Word16 *)pcm16k_320, _good_frame);
     }

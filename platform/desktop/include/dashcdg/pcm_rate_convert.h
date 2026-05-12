@@ -62,6 +62,23 @@ void dashcdg_pcm_interleaved_s16_gain_q15_inplace(
         int32_t gain_q15
 );
 
+/*
+ * Undo `dashcdg_pcm_interleaved_s16_gain_q15_inplace` with the **same** encode_gain_q15 the desktop
+ * TX applied before narrowband encode (`platform/desktop/src/app_tx.c`). Uses int64 intermediates so
+ * gains above unity (e.g. inverse of −6 dB) do not clip prematurely.
+ */
+void dashcdg_pcm_interleaved_s16_undo_encode_headroom_inplace(
+        int16_t *pcm,
+        size_t frame_count,
+        unsigned int channels,
+        int32_t encode_gain_q15);
+
+/*
+ * Q15 gain TX applied before encode for this codec, or 0 when none (e.g. Opus wideband). Mirrors the
+ * narrowband branch in `app_tx.c` v4 audio encode.
+ */
+int32_t dashcdg_v4_audio_codec_tx_nb_headroom_gain_q15(uint8_t codec_id);
+
 /* RX streaming SRC: prepend this many past input samples so Lanczos sees continuity across frames. */
 #define DASHCDG_PCM_STEREO_SRC_OVERLAP_FRAMES 96
 
