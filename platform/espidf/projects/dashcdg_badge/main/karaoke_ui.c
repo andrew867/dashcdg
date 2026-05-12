@@ -9,9 +9,11 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "lvgl.h"
 
+#include "badge_exec.h"
 #include "battery_label.h"
 #include "badge_prefs.h"
 #include "badge_rx.h"
@@ -979,6 +981,7 @@ void dashcdg_karaoke_ui_sync_decode_layout_from_prefs(void)
 
 static void on_tick(lv_timer_t *t)
 {
+    const int64_t tick_us_start = esp_timer_get_time();
     tick_ctx_t *c = (tick_ctx_t *)lv_timer_get_user_data(t);
     if (c && c->disp) {
         /*
@@ -1033,6 +1036,18 @@ static void on_tick(lv_timer_t *t)
             }
         } else {
             s_mcast_modal_body_ticks = 0U;
+        }
+    }
+    /*
+     * T8: tick budget observation. The karaoke tick runs at ~33 ms (30 fps). The default budget
+     * of CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US (25 ms) leaves headroom for LVGL flush + indev.
+     * The observe API is non-blocking; a missed lock silently skips, so this never widens the tick.
+     */
+    {
+        const int64_t tick_us_end = esp_timer_get_time();
+        const int64_t delta = tick_us_end - tick_us_start;
+        if (delta > 0 && delta <= (int64_t)UINT32_MAX) {
+            dashcdg_badge_exec_ui_tick_observe("karaoke_ui", (uint32_t)delta);
         }
     }
 }

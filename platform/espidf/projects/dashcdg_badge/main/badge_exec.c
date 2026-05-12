@@ -82,6 +82,11 @@ typedef struct {
     esp_timer_handle_t liveness_timer;
     bool liveness_running;
     dashcdg_badge_exec_liveness_stats_t liveness_stats;
+    /* T8: LVGL tick budget observation */
+    dashcdg_badge_exec_ui_tick_info_t ui_ticks[DASHCDG_BADGE_EXEC_UI_TICK_SLOTS];
+    size_t ui_tick_count;
+    uint32_t ui_tick_dropped;
+    uint64_t ui_tick_last_log_ms[DASHCDG_BADGE_EXEC_UI_TICK_SLOTS];
 } badge_exec_state_t;
 
 static badge_exec_state_t s_state;
@@ -850,6 +855,135 @@ void dashcdg_badge_exec_liveness_get_stats(dashcdg_badge_exec_liveness_stats_t *
     }
     *out = s_state.liveness_stats;
     badge_exec_unlock();
+}
+
+/* ------------------------------------------------------------------------- */
+/*  LVGL tick budget observation (T8)                                        */
+/* ------------------------------------------------------------------------- */
+
+#ifndef CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US
+#define CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US 25000
+#endif
+#ifndef CONFIG_DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS
+#define CONFIG_DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS 5000
+#endif
+
+/* Caller must hold the executive lock. Returns slot index or SIZE_MAX. Increments ui_tick_dropped on overflow. */
+static size_t badge_exec_ui_tick_find_or_alloc_locked(const char *name)
+{
+    if (name == NULL || name[0] == '\0') {
+        return (size_t)-1;
+    }
+    for (size_t i = 0; i < s_state.ui_tick_count; ++i) {
+        if (s_state.ui_ticks[i].in_use && strncmp(s_state.ui_ticks[i].name, name,
+                                                  DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+            return i;
+        }
+    }
+    if (s_state.ui_tick_count >= DASHCDG_BADGE_EXEC_UI_TICK_SLOTS) {
+        s_state.ui_tick_dropped++;
+        return (size_t)-1;
+    }
+    size_t idx = s_state.ui_tick_count++;
+    memset(&s_state.ui_ticks[idx], 0, sizeof(s_state.ui_ticks[idx]));
+    strncpy(s_state.ui_ticks[idx].name, name, DASHCDG_BADGE_EXEC_TASK_NAME_MAX - 1);
+    s_state.ui_ticks[idx].name[DASHCDG_BADGE_EXEC_TASK_NAME_MAX - 1] = '\0';
+    s_state.ui_ticks[idx].in_use = 1;
+    s_state.ui_tick_last_log_ms[idx] = 0;
+    return idx;
+}
+
+void dashcdg_badge_exec_ui_tick_observe(const char *name, uint32_t dur_us)
+{
+    if (!s_state.initialized || name == NULL || name[0] == '\0') {
+        return;
+    }
+    if (!badge_exec_lock()) {
+        return;
+    }
+    size_t idx = badge_exec_ui_tick_find_or_alloc_locked(name);
+    bool emit_overrun = false;
+    uint32_t overruns = 0U;
+    uint32_t max_us = 0U;
+    if (idx != (size_t)-1) {
+        dashcdg_badge_exec_ui_tick_info_t *info = &s_state.ui_ticks[idx];
+        info->ticks++;
+        info->last_us = dur_us;
+        if (dur_us > info->max_us) {
+            info->max_us = dur_us;
+        }
+        if (dur_us > (uint32_t)CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US) {
+            info->overruns++;
+            uint64_t now_ms = dashcdg_badge_exec_now_ms();
+            if (now_ms - s_state.ui_tick_last_log_ms[idx]
+                    >= (uint64_t)CONFIG_DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS) {
+                s_state.ui_tick_last_log_ms[idx] = now_ms;
+                emit_overrun = true;
+                overruns = info->overruns;
+                max_us = info->max_us;
+            }
+        }
+    }
+    badge_exec_unlock();
+
+    if (emit_overrun) {
+        ESP_LOGW(TAG, "ui-tick over budget name=%s dur_us=%" PRIu32 " budget_us=%d max_us=%" PRIu32
+                 " overruns=%" PRIu32,
+                 name, dur_us, CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US, max_us, overruns);
+        dashcdg_badge_exec_trace("ui_tick_over",
+                                 "name=%s dur_us=%" PRIu32 " budget_us=%d max_us=%" PRIu32
+                                 " overruns=%" PRIu32,
+                                 name, dur_us, CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US,
+                                 max_us, overruns);
+    }
+}
+
+esp_err_t dashcdg_badge_exec_ui_tick_get_info(size_t idx,
+                                              dashcdg_badge_exec_ui_tick_info_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!s_state.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!badge_exec_lock()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    if (idx < s_state.ui_tick_count && s_state.ui_ticks[idx].in_use) {
+        *out = s_state.ui_ticks[idx];
+        err = ESP_OK;
+    }
+    badge_exec_unlock();
+    return err;
+}
+
+size_t dashcdg_badge_exec_ui_tick_get_count(void)
+{
+    if (!s_state.initialized) {
+        return 0;
+    }
+    size_t n = 0;
+    if (badge_exec_lock()) {
+        n = s_state.ui_tick_count;
+        badge_exec_unlock();
+    }
+    return n;
+}
+
+uint32_t dashcdg_badge_exec_ui_tick_get_dropped(void)
+{
+    if (!s_state.initialized) {
+        return 0;
+    }
+    uint32_t v = 0;
+    if (badge_exec_lock()) {
+        v = s_state.ui_tick_dropped;
+        badge_exec_unlock();
+    }
+    return v;
 }
 
 /* ------------------------------------------------------------------------- */

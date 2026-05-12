@@ -60,6 +60,29 @@ menu "DashCDG badge"
             Recovery is policy-defined and lives in the orchestrator; the sweep itself never
             touches the WDT or restarts tasks.
 
+    config DASHCDG_BADGE_UI_TICK_OVERRUN_US
+        int "Executive: LVGL tick overrun budget (microseconds)"
+        range 1000 200000
+        default 25000
+        help
+            Per-tick wall-time budget used by dashcdg_badge_exec_ui_tick_observe. Each LVGL timer
+            that opts in calls this helper at the end of its callback. When the measured tick
+            duration exceeds this budget the executive increments an overrun counter for that
+            timer and emits a throttled ESP_LOGW + [exec-trace] line. T8 is observe-only: there
+            is no automatic recovery or health transition. 25 ms leaves ~8 ms of headroom for the
+            karaoke tick (33 ms = 30 fps) and is the recommended default for soak builds. Lower
+            values surface marginal ticks earlier during development.
+
+    config DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS
+        int "Executive: throttle between LVGL tick overrun ESP_LOGW lines (ms)"
+        range 100 60000
+        default 5000
+        help
+            Per-name minimum spacing between overrun ESP_LOGW lines. The counters and last_us /
+            max_us fields are always updated; only the log line is throttled so a bursty overrun
+            window does not flood the UART. The structured [exec-trace] line is emitted on the
+            same throttle as the ESP_LOGW.
+
     config DASHCDG_BADGE_OPUS_MONO_ONLY
         bool "Opus RX: mono decoder only (saves internal RAM)"
         default y

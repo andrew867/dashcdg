@@ -327,6 +327,52 @@ typedef struct {
 void dashcdg_badge_exec_liveness_get_stats(dashcdg_badge_exec_liveness_stats_t *out);
 
 /* ------------------------------------------------------------------------- */
+/*  LVGL tick budget observation (T8)                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * LVGL timer callbacks share a single LVGL task. A callback that exceeds its scheduled period
+ * starves all other timers in the same task and is the dominant root cause of UI tearing /
+ * "frozen knobs" reports during bring-up. T8 introduces an observe-only contract:
+ *
+ *   1. Each high-frequency UI tick measures its wall duration with esp_timer.
+ *   2. It calls dashcdg_badge_exec_ui_tick_observe(name, dur_us) at the end of the tick.
+ *   3. The executive maintains a small bounded table (one slot per unique name) recording
+ *      last duration, max duration, total tick count, and over-budget count.
+ *   4. When dur_us exceeds CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US, the executive emits a
+ *      throttled [exec-trace] line (one log per name every 5 s) and increments the overrun
+ *      counter. No automatic reboot, no health transition - this is the data layer that the
+ *      readiness checklist verifies before enforcement is enabled.
+ *
+ * Safe to call from any non-ISR context. Names are matched as 0-terminated strings up to
+ * DASHCDG_BADGE_EXEC_TASK_NAME_MAX bytes; longer names are truncated. Table is bounded by
+ * DASHCDG_BADGE_EXEC_UI_TICK_SLOTS; further unique names are dropped (drop counter exposed).
+ */
+
+#define DASHCDG_BADGE_EXEC_UI_TICK_SLOTS 8
+
+typedef struct {
+    char name[DASHCDG_BADGE_EXEC_TASK_NAME_MAX];
+    uint32_t ticks;          /* total calls to _ui_tick_observe with this name */
+    uint32_t overruns;       /* dur_us > CONFIG_DASHCDG_BADGE_UI_TICK_OVERRUN_US */
+    uint32_t last_us;        /* most recent duration */
+    uint32_t max_us;         /* peak duration since boot */
+    uint8_t in_use;
+} dashcdg_badge_exec_ui_tick_info_t;
+
+void dashcdg_badge_exec_ui_tick_observe(const char *name, uint32_t dur_us);
+
+esp_err_t dashcdg_badge_exec_ui_tick_get_info(size_t idx,
+                                              dashcdg_badge_exec_ui_tick_info_t *out);
+
+size_t dashcdg_badge_exec_ui_tick_get_count(void);
+
+/*
+ * Number of unique tick names dropped because DASHCDG_BADGE_EXEC_UI_TICK_SLOTS was exhausted.
+ */
+uint32_t dashcdg_badge_exec_ui_tick_get_dropped(void);
+
+/* ------------------------------------------------------------------------- */
 /*  Timing                                                                   */
 /* ------------------------------------------------------------------------- */
 
