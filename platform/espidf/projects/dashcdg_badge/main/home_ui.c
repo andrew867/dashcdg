@@ -897,7 +897,7 @@ esp_err_t dashcdg_home_ui_present(lv_disp_t *disp)
     s_status_timer = lv_timer_create(home_status_timer_cb, 3000, NULL);
     lvgl_port_unlock();
 
-    dashcdg_wifi_debug_maybe_autolaunch_karaoke(disp);
+    dashcdg_wifi_debug_try_autolaunch_after_home(disp);
     dashcdg_platform_hw_set_screen(DASHCDG_HW_SCREEN_HOME);
     return ESP_OK;
 }

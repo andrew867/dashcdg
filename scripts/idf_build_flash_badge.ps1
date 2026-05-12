@@ -1,9 +1,12 @@
 <#
 .SYNOPSIS
   PowerShell-only: ESP-IDF build + flash (no UART capture). For build + flash + log, use idf_flash_then_capture_badge.ps1.
+.DESCRIPTION
+  Use -BuildOnly from automation when you only need `idf.py build` (no serial port / no esptool flash).
 #>
 param(
-    [string]$Port = "COM6"
+    [string]$Port = "COM6",
+    [switch]$BuildOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,4 +26,8 @@ $badgeDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\platform\
 Set-Location -LiteralPath $badgeDir
 
 idf.py --version
-idf.py -p $Port build flash
+if ($BuildOnly) {
+    idf.py build
+} else {
+    idf.py -p $Port build flash
+}

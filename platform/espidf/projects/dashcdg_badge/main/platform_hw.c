@@ -21,7 +21,7 @@
 #ifndef DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK
 /*
  * ESP-IDF v5.5.x `dac_channel_mask_t` (see peripherals/dac.html): DAC_CHANNEL_MASK_CH0 = GPIO25,
- * DAC_CHANNEL_MASK_CH1 = GPIO26. Intro text calls those "channel 1" / "channel 2" by pin order —
+ * DAC_CHANNEL_MASK_CH1 = GPIO26. Intro text calls those "channel 1" / "channel 2" by pin order â
  * IO26 is driver CH1, not "mask CH2" (there is no CH2 on ESP32).
  */
 #define DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK DAC_CHANNEL_MASK_CH1
@@ -182,8 +182,8 @@ static const beep_note_t k_blip_seq[] = {
 
 /*
  * AY-3-8910-class PSG + DMA PCM is very feasible on this chip: core emu is typically a few KB
- * of code plus ~1–4 KB ring buffer at 32–44.1 kHz mono before any waveform LUTs. Not integrated
- * here — output is still LEDC multi-tone; a future path could stream PCM via I2S or RMT DMA into
+ * of code plus ~1â4 KB ring buffer at 32â44.1 kHz mono before any waveform LUTs. Not integrated
+ * here â output is still LEDC multi-tone; a future path could stream PCM via I2S or RMT DMA into
  * the same amp chain for recognizable square/wave chip timbres.
  */
 
@@ -207,13 +207,15 @@ static volatile bool s_karaoke_pcm_streaming;
 /*
  * Mono 8-bit DAC stream. ESP32 DAC DMA cannot always clock very low sample rates directly; we clamp
  * hardware `freq_hz` to a safe floor and upsample in software when needed.
- * DMA chunk in samples: 160 @ ≤12 kHz nominal (20 ms @ 8 k), else 320.
+ * DMA chunk in samples: 160 @ â¤12 kHz nominal (20 ms @ 8 k), else 320.
  */
 #define KARAOKE_DAC_CHUNK_SAMPLES_MAX 1024u
 #define KARAOKE_DAC_MIN_SAFE_HZ 24000u
-/** Linear PCM → 8-bit DAC sample gain numerator (denominator 32768); higher = louder line-out. */
+/** Linear PCM â 8-bit DAC sample gain numerator (denominator 32768); higher = louder line-out.
+ * 200 pegged u8 rails (16â239) on normal programme peaks â harsh buzz; ~108 keeps typical music
+ * below clipping so the SC8002B chain is not hammering the DAC limits when UI volume is high. */
 #ifndef KARAOKE_DAC_PCM_GAIN_NUM
-#define KARAOKE_DAC_PCM_GAIN_NUM 200
+#define KARAOKE_DAC_PCM_GAIN_NUM 108
 #endif
 static dac_continuous_handle_t s_karaoke_dac_handle;
 static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_CHUNK_SAMPLES_MAX];
@@ -224,11 +226,11 @@ static uint32_t s_karaoke_dac_open_effective_hz;
 static int32_t s_karaoke_dac_trim_ppm;
 static uint32_t s_karaoke_dac_upsample_accum;
 /*
- * When DMA buffer alloc fails (NO_MEM), badge_rx was calling begin() on every push → hundreds of
+ * When DMA buffer alloc fails (NO_MEM), badge_rx was calling begin() on every push â hundreds of
  * failed allocs/sec, no headroom recovery, and amp/DAC "pop" as enable is retried forever.
  */
 static TickType_t s_karaoke_dac_begin_cool_until_tick;
-/** Serializes `s_karaoke_dac_fill` / chunk DMA writes — badge_rx + LVGL cooperative drain + idle pad run on different tasks. */
+/** Serializes `s_karaoke_dac_fill` / chunk DMA writes â badge_rx + LVGL cooperative drain + idle pad run on different tasks. */
 static SemaphoreHandle_t s_karaoke_dac_io_mtx;
 
 static void karaoke_dac_io_mutex_init(void)
@@ -261,7 +263,7 @@ static void karaoke_dac_note_dma_write_result(esp_err_t e)
     }
 }
 
-/** 0–100 linear gain before `KARAOKE_DAC_PCM_GAIN_NUM`; 0 ⇒ no samples fed (see `dashcdg_platform_hw_set_karaoke_output_volume_pct`). */
+/** 0â100 linear gain before `KARAOKE_DAC_PCM_GAIN_NUM`; 0 â no samples fed (see `dashcdg_platform_hw_set_karaoke_output_volume_pct`). */
 static volatile uint8_t s_karaoke_out_vol_pct = 85U;
 
 static uint32_t karaoke_dac_effective_hz(uint32_t nominal_hz, int32_t ppm)
@@ -301,9 +303,9 @@ static size_t karaoke_dac_pick_chunk_samples(uint32_t nominal_hz)
 }
 
 /*
- * Software upsampling (nom Hz PCM → eff Hz DAC) must emit an integer number of u8 samples per
- * nominal frame (e.g. 160×24000/8000 = 480). If DMA chunk (often 320 @24k) does not divide that
- * total, pad_partial inserts silence every frame → slow / broken playback.
+ * Software upsampling (nom Hz PCM â eff Hz DAC) must emit an integer number of u8 samples per
+ * nominal frame (e.g. 160Ã24000/8000 = 480). If DMA chunk (often 320 @24k) does not divide that
+ * total, pad_partial inserts silence every frame â slow / broken playback.
  */
 static size_t karaoke_dac_gcd_size(size_t a, size_t b)
 {
@@ -390,7 +392,7 @@ static bool pm_idle_eligible_locked(uint64_t now)
             return false;
         }
         /*
-         * Audio-only karaoke: without CDG, `s_cdg_stream_ok` is false — the branch below could still
+         * Audio-only karaoke: without CDG, `s_cdg_stream_ok` is false â the branch below could still
          * allow idle auto-sleep when mcast RX gaps exceed IDLE_DIM_MS. Panel sleep forces modem PS and
          * stops badge_rx (see pm_commit_panel_sleep_locked), which sounds like silence / hash then fuzz.
          */
@@ -634,7 +636,7 @@ static esp_err_t rgb_status_ledc_channels_rebind(void)
 }
 
 /**
- * Active-low cathodes to 3V3 through resistors: PWM "full duty off" still has tiny low phases → glow.
+ * Active-low cathodes to 3V3 through resistors: PWM "full duty off" still has tiny low phases â glow.
  * Stop LEDC with idle high, then drive GPIO outputs solid high so no sink current.
  */
 static void rgb_pins_force_off_active_low(void)
@@ -735,9 +737,18 @@ static void amp_set_run(bool run)
             return;
         }
     } else if (run && !s_amp_run_state) {
-        if (now_ms > s_amp_last_switch_ms &&
-            (now_ms - s_amp_last_switch_ms) < (uint64_t)AMP_MIN_OFF_DWELL_MS) {
-            return;
+        /*
+         * After beeps/UI, /SHDN dwell avoids pop. Karaoke RX already owns the DAC â blocking re-enable
+         * here left the amp off while PCM still fed the line (hash / âmotorboatingâ between good bursts).
+         */
+#if CONFIG_IDF_TARGET_ESP32
+        if (s_karaoke_dac_handle == NULL)
+#endif
+        {
+            if (now_ms > s_amp_last_switch_ms &&
+                (now_ms - s_amp_last_switch_ms) < (uint64_t)AMP_MIN_OFF_DWELL_MS) {
+                return;
+            }
         }
     }
     /* SC8002B: VDD on shutdown = shutdown. LOW = amp on. */
@@ -778,7 +789,7 @@ static void beep_mute_locked(void)
 
 /**
  * Map saved 5..100 "percent" to LEDC duty with a strong low-end taper.
- * Linear mapping made 7–8% painfully loud through the SC8002B + divider; use a power law
+ * Linear mapping made 7â8% painfully loud through the SC8002B + divider; use a power law
  * so low settings are actually quiet (perceptual-ish without full log10 on every tick).
  */
 static uint32_t beep_peak_duty_u8(void)
@@ -894,7 +905,7 @@ static void beep_seq_tick_locked(uint64_t now)
         return;
     }
 #endif
-    /* Idle: do NOT call `beep_mute_locked` every tick — that was toggling /SHDN + PWM at 15–40 Hz and
+    /* Idle: do NOT call `beep_mute_locked` every tick â that was toggling /SHDN + PWM at 15â40 Hz and
      * choked UI beeps (amp never stayed on long enough for the triad envelope). */
     if (s_seq_len == 0U) {
         return;
@@ -1021,7 +1032,7 @@ static esp_err_t ledc_beep_audio_channel_attach_locked(void)
 
 /**
  * `dac_continuous_write(..., timeout_ms)` expects milliseconds; negative => block forever (see ESP-IDF
- * `dac_continuous.h`). Do not pass FreeRTOS ticks here — that becomes an accidental ~few-ms timeout.
+ * `dac_continuous.h`). Do not pass FreeRTOS ticks here â that becomes an accidental ~few-ms timeout.
  */
 static int karaoke_dac_continuous_write_timeout_ms(void)
 {
@@ -1047,7 +1058,7 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
     karaoke_dac_io_mutex_init();
     /*
      * Must drain competing producers (`karaoke_dac_push`, idle pad, lab PCM) before tearing down DMA.
-     * Caller holds `s_mtx` (platform); I/O mutex is inner — same ordering as push (I/O only).
+     * Caller holds `s_mtx` (platform); I/O mutex is inner â same ordering as push (I/O only).
      */
     if (xSemaphoreTake(s_karaoke_dac_io_mtx, portMAX_DELAY) != pdTRUE) {
         return;
@@ -1104,8 +1115,15 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
     if (chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
         chunk = KARAOKE_DAC_CHUNK_SAMPLES_MAX;
     }
+    /*
+     * Reuse only on (nominal_hz, eff_hz). Do not require `s_karaoke_dac_chunk_samples == chunk`:
+     * `chunk` is the ideal output width from `karaoke_dac_pick_output_chunk_samples`, but
+     * `dac_continuous_new_channels` may succeed with a smaller `buf_try`; `s_karaoke_dac_chunk_samples`
+     * is then the actual DMA quantum. Comparing those forced a teardown on every begin() while
+     * rates were unchanged - audible as hash / "DAC reset" cadence.
+     */
     if (s_karaoke_dac_handle != NULL && s_karaoke_dac_open_nominal_hz == nominal_hz &&
-            s_karaoke_dac_open_effective_hz == eff_hz && s_karaoke_dac_chunk_samples == chunk) {
+            s_karaoke_dac_open_effective_hz == eff_hz) {
         amp_set_run(true);
         __atomic_store_n(&s_karaoke_pcm_streaming, true, __ATOMIC_RELEASE);
         return true;
@@ -1117,26 +1135,43 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
     beep_seq_abort_locked();
     (void)ledc_stop(LEDC_MODE, LEDC_CH_AUDIO, 0);
     {
-        static const uint8_t k_desc_candidates[] = {48U, 32U, 24U, 16U, 12U, 8U};
-
+        static const uint8_t k_desc_candidates[] = {2U, 3U, 4U, 6U, 8U, 12U, 16U};
+        static const uint16_t k_buf_candidates[] = {64U, 96U, 128U, 192U, 256U, 320U, 384U, 512U, 640U};
+        const size_t n_buf_cand = sizeof(k_buf_candidates) / sizeof(k_buf_candidates[0]);
+        size_t attempt_count = 0U;
         de = ESP_FAIL;
-        for (size_t di = 0U; di < sizeof(k_desc_candidates); di++) {
-            dac_continuous_config_t dcfg = {
-                .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
-                /* Deeper descriptor rings reduce transient timeouts under Wi‑Fi/LVGL load; fall back on NO_MEM. */
-                .desc_num = k_desc_candidates[di],
-                .buf_size = (uint32_t)chunk,
-                .freq_hz = eff_hz,
-                .offset = 0,
-                .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
-                .chan_mode = DAC_CHANNEL_MODE_SIMUL,
-            };
-            de = dac_continuous_new_channels(&dcfg, &s_karaoke_dac_handle);
-            if (de == ESP_OK) {
-                break;
+        /* Prefer largest buf_try <= chunk so `s_karaoke_dac_chunk_samples` matches the pick when heap allows. */
+        for (size_t bi = n_buf_cand; bi > 0U; bi--) {
+            uint32_t buf_try = (uint32_t)k_buf_candidates[bi - 1U];
+            if (buf_try > (uint32_t)chunk) {
+                continue;
             }
-            s_karaoke_dac_handle = NULL;
-            if (de != ESP_ERR_NO_MEM) {
+            for (size_t di = 0U; di < sizeof(k_desc_candidates); di++) {
+                if (attempt_count++ >= 10U) {
+                    de = ESP_ERR_NO_MEM;
+                    break;
+                }
+                dac_continuous_config_t dcfg = {
+                    .chan_mask = DASHCDG_HW_ESP32_DAC_LINE_CHANNEL_MASK,
+                    /* Try smallest DMA footprint first; repeated NO_MEM create/destroy attempts can fragment heap. */
+                    .desc_num = k_desc_candidates[di],
+                    .buf_size = buf_try,
+                    .freq_hz = eff_hz,
+                    .offset = 0,
+                    .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
+                    .chan_mode = DAC_CHANNEL_MODE_SIMUL,
+                };
+                de = dac_continuous_new_channels(&dcfg, &s_karaoke_dac_handle);
+                if (de == ESP_OK) {
+                    s_karaoke_dac_chunk_samples = (size_t)buf_try;
+                    break;
+                }
+                s_karaoke_dac_handle = NULL;
+                if (de != ESP_ERR_NO_MEM) {
+                    break;
+                }
+            }
+            if (de == ESP_OK || de != ESP_ERR_NO_MEM) {
                 break;
             }
         }
@@ -1157,7 +1192,7 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
             }
             s_karaoke_dac_handle = NULL;
             if (de == ESP_ERR_NO_MEM) {
-                s_karaoke_dac_begin_cool_until_tick = nowt + pdMS_TO_TICKS(2500);
+                s_karaoke_dac_begin_cool_until_tick = nowt + pdMS_TO_TICKS(8000);
             }
             (void)ledc_beep_audio_channel_attach_locked();
             return false;
@@ -1254,11 +1289,9 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
     uint32_t nom_hz = s_karaoke_dac_open_nominal_hz;
     uint32_t eff_hz = s_karaoke_dac_open_effective_hz;
     const uint32_t vol_pct = (uint32_t)s_karaoke_out_vol_pct;
+    const int feed_silence = (vol_pct == 0U) ? 1 : 0;
 
     if (pcm == NULL || samples == 0U || s_karaoke_dac_handle == NULL) {
-        return;
-    }
-    if (vol_pct == 0U) {
         return;
     }
     karaoke_dac_io_mutex_init();
@@ -1268,17 +1301,30 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
         chunk = 640U;
     }
-    amp_set_run(true);
+    /*
+     * UI "mute" uses vol_pct=0 + amp off. Returning early here starved `dac_continuous` (no DMA
+     * submits while decode still ran) and produced loud hash / zipper on the line â keep the same
+     * nominal sample cadence with digital silence (8-bit midpoint).
+     */
+    if (!feed_silence) {
+        amp_set_run(true);
+    }
     for (size_t i = 0U; i < samples; ++i) {
-        int32_t s = ((int32_t)pcm[i] * (int32_t)vol_pct) / 100;
-        int32_t u = (s * (int32_t)KARAOKE_DAC_PCM_GAIN_NUM) / 32768 + 128;
+        int32_t u;
         uint32_t emit = 1U;
 
-        if (u < 16) {
-            u = 16;
-        }
-        if (u > 239) {
-            u = 239;
+        if (feed_silence) {
+            u = 128;
+        } else {
+            int32_t s = ((int32_t)pcm[i] * (int32_t)vol_pct) / 100;
+
+            u = (s * (int32_t)KARAOKE_DAC_PCM_GAIN_NUM) / 32768 + 128;
+            if (u < 16) {
+                u = 16;
+            }
+            if (u > 239) {
+                u = 239;
+            }
         }
         if (nom_hz != 0U && eff_hz > nom_hz) {
             uint64_t acc = (uint64_t)s_karaoke_dac_upsample_accum + (uint64_t)eff_hz;
@@ -1311,8 +1357,12 @@ void dashcdg_platform_hw_set_karaoke_output_volume_pct(uint8_t pct_0_100)
         pct_0_100 = 100U;
     }
     s_karaoke_out_vol_pct = pct_0_100;
-    if (pct_0_100 == 0U && s_mtx != NULL && xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) == pdTRUE) {
-        amp_set_run(false);
+    if (s_mtx != NULL && xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) == pdTRUE) {
+        if (pct_0_100 == 0U) {
+            amp_set_run(false);
+        } else {
+            amp_set_run(true);
+        }
         xSemaphoreGive(s_mtx);
     }
 }
@@ -1326,7 +1376,7 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
 {
     karaoke_dac_io_mutex_init();
     /*
-     * Same mutex as push — do not use `s_mtx` here; RX drain does not hold platform mutex during PCM push,
+     * Same mutex as push â do not use `s_mtx` here; RX drain does not hold platform mutex during PCM push,
      * and mixing mutexes caused races with `karaoke_dac_push_mono_s16`.
      */
     if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(8)) != pdTRUE) {
@@ -1348,7 +1398,8 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
 }
 
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
-        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out)
+        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
+        uint32_t *pending_pcm_u8_fill_out)
 {
     if (dma_chunks_ok != NULL) {
         *dma_chunks_ok = s_karaoke_dac_dma_chunks_ok;
@@ -1361,6 +1412,16 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
     }
     if (chunk_u8_out != NULL) {
         *chunk_u8_out = (uint32_t)s_karaoke_dac_chunk_samples;
+    }
+    if (pending_pcm_u8_fill_out != NULL) {
+        *pending_pcm_u8_fill_out = 0U;
+        karaoke_dac_io_mutex_init();
+        if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(1)) == pdTRUE) {
+            if (s_karaoke_dac_handle != NULL) {
+                *pending_pcm_u8_fill_out = (uint32_t)s_karaoke_dac_fill;
+            }
+            xSemaphoreGive(s_karaoke_dac_io_mtx);
+        }
     }
 }
 #endif
@@ -1393,7 +1454,8 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
 }
 
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
-        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out)
+        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
+        uint32_t *pending_pcm_u8_fill_out)
 {
     if (dma_chunks_ok != NULL) {
         *dma_chunks_ok = 0U;
@@ -1406,6 +1468,9 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
     }
     if (chunk_u8_out != NULL) {
         *chunk_u8_out = 0U;
+    }
+    if (pending_pcm_u8_fill_out != NULL) {
+        *pending_pcm_u8_fill_out = 0U;
     }
 }
 
@@ -1774,9 +1839,17 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
                     (void)esp_wifi_set_ps(WIFI_PS_NONE);
                 }
             } else if (prev == DASHCDG_HW_SCREEN_KARAOKE && s != DASHCDG_HW_SCREEN_KARAOKE) {
+                /*
+                 * Leaving karaoke used to restore WIFI_PS_MAX_MODEM immediately. Navigation calls
+                 * `set_screen(HOME)` before `dashcdg_badge_rx_stop()`, so multicast RX was still
+                 * active â modem sleep starves IGMP/mcast and reads as ~20s burst loss / jitter peg.
+                 * Keep WIFI_PS_NONE until RX stops; then `dashcdg_platform_hw_on_badge_rx_stopped`.
+                 */
                 if (s_wifi_ps_karaoke_saved_valid) {
-                    (void)esp_wifi_set_ps(s_wifi_ps_karaoke_saved);
-                    s_wifi_ps_karaoke_saved_valid = false;
+                    if (!dashcdg_badge_rx_is_running()) {
+                        (void)esp_wifi_set_ps(s_wifi_ps_karaoke_saved);
+                        s_wifi_ps_karaoke_saved_valid = false;
+                    }
                 }
 #if CONFIG_IDF_TARGET_ESP32
                 if (!__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED) &&
@@ -1791,6 +1864,21 @@ void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s)
         }
         vTaskDelay(pdMS_TO_TICKS(3));
     }
+}
+
+void dashcdg_platform_hw_on_badge_rx_stopped(void)
+{
+    if (!s_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) != pdTRUE) {
+        return;
+    }
+    if (s_wifi_ps_karaoke_saved_valid && s_screen != DASHCDG_HW_SCREEN_KARAOKE) {
+        (void)esp_wifi_set_ps(s_wifi_ps_karaoke_saved);
+        s_wifi_ps_karaoke_saved_valid = false;
+    }
+    xSemaphoreGive(s_mtx);
 }
 
 void dashcdg_platform_hw_set_cdg_stream_ok(bool ok)
@@ -2048,7 +2136,7 @@ void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8)
 #if CONFIG_IDF_TARGET_ESP32
     /*
      * Native lab path feeds `karaoke_dac_push_mono_s16` from `badge_lab_ym.c`.
-     * Map legacy PWM-centered duty → s16 compatible with `KARAOKE_DAC_PCM_GAIN_NUM`.
+     * Map legacy PWM-centered duty â s16 compatible with `KARAOKE_DAC_PCM_GAIN_NUM`.
      */
     if (s_karaoke_dac_handle != NULL) {
         int32_t c = (int32_t)duty_u8 - 128;

@@ -40,6 +40,13 @@ void dashcdg_platform_hw_backlight_set_pct(uint8_t pct_0_100);
 void dashcdg_platform_hw_set_screen(dashcdg_hw_screen_t s);
 
 /**
+ * Call once after `dashcdg_badge_rx_stop()` completes when multicast RX has torn down.
+ * Applies deferred WiFi modem power-save restore when the UI left karaoke before RX stopped
+ * (navigation sets screen → HOME while `badge_rx` was still running — must not restore PS until here).
+ */
+void dashcdg_platform_hw_on_badge_rx_stopped(void);
+
+/**
  * Karaoke / RX path: call from UI tick when multicast CDG looks alive (clock + deltas pending).
  * Feeds a faster "stream OK" LED personality while on the karaoke screen.
  */
@@ -119,9 +126,12 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
 /**
  * UART proof counters (ESP32): successful `dac_continuous_write` chunk count vs failures.
  * Reset when karaoke DAC opens successfully. eff_hz_out/chunk_u8_out describe active DMA timing.
+ * Optional `pending_pcm_u8_fill_out`: snapshot of partial-chunk fill (bytes in `karaoke_dac_push` queue
+ * before the next full `dac_continuous_write`). Pass NULL if unused.
  */
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
-        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out);
+        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
+        uint32_t *pending_pcm_u8_fill_out);
 /**
  * Release SC8002B shutdown (amp on) when karaoke RX starts so the speaker path is not left muted
  * until the first decoded frame (no startup click through DAC otherwise).

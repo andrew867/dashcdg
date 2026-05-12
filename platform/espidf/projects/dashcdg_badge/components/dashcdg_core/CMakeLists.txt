@@ -20,8 +20,8 @@ idf_component_register(
 # 14 slots: extra dram0 headroom on ESP32-WROOM-32 (no PSRAM) with AMR-WB + if_rom linked.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_CDG_BATCH_JITTER_SLOT_COUNT=14)
 # Audio jitter: keep struct off dram0 .bss budget (64 slots ~18 KiB). 24 ~= 0.5 s @ 20 ms frames.
-# ~0.6 s @ 20 ms frames; helps Wi-Fi reorder bursts without evicting as often (heap struct, not .bss).
-target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_SLOT_COUNT=30)
+# ~0.72 s @ 20 ms frames; larger reorder window + fewer furthest-slot evictions on Wi-Fi (heap, not .bss).
+target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_SLOT_COUNT=36)
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_AUDIO_JITTER_HEAP_BACKED=1)
 # Match badge_rx heap_caps_* alloc/free — libc calloc on same TLSF heap caused teardown asserts.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC DASHCDG_USE_ESP_HEAP_CAPS=1)

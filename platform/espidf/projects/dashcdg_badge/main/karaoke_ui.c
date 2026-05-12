@@ -407,10 +407,20 @@ static void karaoke_status_bar_update_fast(const dashcdg_badge_rx_stats_t *st)
         }
         uint32_t loss_tenths = (loss_for_display + 5U) / 10U; /* per-10k to percent with one decimal */
         if (st->audio_slots_capacity > 0U) {
-            ap = (unsigned)((st->audio_jb_pending_slots * 100U) / (uint32_t)st->audio_slots_capacity);
+            uint32_t occ = st->audio_jb_pending_slots;
+
+            if (occ > (uint32_t)st->audio_slots_capacity) {
+                occ = (uint32_t)st->audio_slots_capacity;
+            }
+            ap = (unsigned)((occ * 100U) / (uint32_t)st->audio_slots_capacity);
         }
         if (st->video_slots_capacity > 0U) {
-            vp = (unsigned)(((uint32_t)st->jb_pending_slots * 100U) / (uint32_t)st->video_slots_capacity);
+            uint32_t vocc = (uint32_t)st->jb_pending_slots;
+
+            if (vocc > (uint32_t)st->video_slots_capacity) {
+                vocc = (uint32_t)st->video_slots_capacity;
+            }
+            vp = (unsigned)((vocc * 100U) / (uint32_t)st->video_slots_capacity);
         }
         snprintf(line, sizeof(line), "%s %u.%u%% a%u%% v%u%%", sym, (unsigned)(loss_tenths / 10U),
                  (unsigned)(loss_tenths % 10U), ap, vp);
@@ -637,10 +647,20 @@ static void karaoke_mcast_modal_update_dashboard(void)
         loss_x100 = (unsigned)lx100;
     }
     if (st.audio_slots_capacity > 0U) {
-        audio_occ_pct = (unsigned)((st.audio_jb_pending_slots * 100U) / (uint32_t)st.audio_slots_capacity);
+        uint32_t occ = st.audio_jb_pending_slots;
+
+        if (occ > (uint32_t)st.audio_slots_capacity) {
+            occ = (uint32_t)st.audio_slots_capacity;
+        }
+        audio_occ_pct = (unsigned)((occ * 100U) / (uint32_t)st.audio_slots_capacity);
     }
     if (st.video_slots_capacity > 0U) {
-        video_occ_pct = (unsigned)(((uint32_t)st.jb_pending_slots * 100U) / (uint32_t)st.video_slots_capacity);
+        uint32_t vocc = (uint32_t)st.jb_pending_slots;
+
+        if (vocc > (uint32_t)st.video_slots_capacity) {
+            vocc = (uint32_t)st.video_slots_capacity;
+        }
+        video_occ_pct = (unsigned)((vocc * 100U) / (uint32_t)st.video_slots_capacity);
     }
     switch (st.memory_profile) {
     case 0:

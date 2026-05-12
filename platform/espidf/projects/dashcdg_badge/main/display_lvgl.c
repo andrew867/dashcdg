@@ -514,7 +514,9 @@ esp_err_t dashcdg_display_lvgl_init(lv_disp_t **out_disp)
 
     gpio_set_level(CYD_GPIO_LCD_BL, 1);
 
-    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    /* Karaoke/CDG + nav run on the LVGL task; default stack (~7 KiB) has overflowed in lab. */
+    lvgl_cfg.task_stack = 16384;
     ESP_RETURN_ON_ERROR(lvgl_port_init(&lvgl_cfg), TAG, "lvgl_port_init");
 
     const lvgl_port_display_cfg_t disp_cfg = {

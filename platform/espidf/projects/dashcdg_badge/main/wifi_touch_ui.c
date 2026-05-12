@@ -27,6 +27,23 @@
 
 static const char *TAG = "wifi_ui";
 static bool s_wifi_driver_ready;
+
+/** IDF may re-apply default modem PS on (re)association; keep multicast RX from sleeping the radio. */
+static void wifi_touch_clamp_ps_none_if_rx_active(void)
+{
+    if (dashcdg_badge_rx_is_running()) {
+        (void)esp_wifi_set_ps(WIFI_PS_NONE);
+    }
+}
+
+/** ESP-IDF `wifi_config_t` SSID/password are fixed arrays; avoid `strncpy(..., n-1)` — GCC stringop-truncation. */
+static void wifi_touch_copy_to_cfg_field(uint8_t *dst, size_t dst_sz, const char *src)
+{
+    if (dst == NULL || dst_sz == 0U) {
+        return;
+    }
+    snprintf((char *)dst, dst_sz, "%s", (src != NULL) ? src : "");
+}
 static esp_netif_t *s_wifi_sta_netif;
 static const char *NVS_NS = "dashcfg";
 
@@ -46,10 +63,21 @@ static bool s_dbg_auto_karaoke_done_this_boot;
 static bool s_dbg_auto_karaoke_dhcp_seen;
 static bool s_dbg_auto_karaoke_launch_posted;
 
-static void dbg_auto_karaoke_launch_async(void *disp_ptr)
+/**
+ * Runs on the LVGL thread via `lv_async_call`. Resolves `lv_display_get_default()` here so DHCP before
+ * display registration does not pass a stale/wrong pointer from `IP_EVENT` (sys_evt task).
+ */
+static void dbg_auto_karaoke_launch_async(void *unused)
 {
-    lv_disp_t *disp = (lv_disp_t *)disp_ptr;
-    if (!disp || s_dbg_auto_karaoke_done_this_boot || !s_dbg_auto_karaoke_dhcp_seen) {
+    (void)unused;
+    lv_disp_t *disp = lv_display_get_default();
+
+    if (!disp) {
+        /* DHCP beat LVGL registration — clear posted so `try_autolaunch_after_home` can retry. */
+        s_dbg_auto_karaoke_launch_posted = false;
+        return;
+    }
+    if (s_dbg_auto_karaoke_done_this_boot || !s_dbg_auto_karaoke_dhcp_seen) {
         s_dbg_auto_karaoke_launch_posted = false;
         return;
     }
@@ -58,7 +86,16 @@ static void dbg_auto_karaoke_launch_async(void *disp_ptr)
     s_dbg_auto_karaoke_done_this_boot = true;
     s_dbg_auto_karaoke_launch_posted = false;
 }
-#endif
+
+static void dbg_auto_karaoke_schedule_launch_once(void)
+{
+    if (s_dbg_auto_karaoke_done_this_boot || s_dbg_auto_karaoke_launch_posted) {
+        return;
+    }
+    s_dbg_auto_karaoke_launch_posted = true;
+    lv_async_call(dbg_auto_karaoke_launch_async, NULL);
+}
+#endif /* CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP */
 
 static bool wifi_touch_ui_is_active(void)
 {
@@ -204,17 +241,19 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
                 ESP_LOGW(TAG, "dhcpc_start after STA_CONNECTED: %s", esp_err_to_name(d));
             }
         }
+        wifi_touch_clamp_ps_none_if_rx_active();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ui_statusf("Online\nIP: " IPSTR, IP2STR(&ev->ip_info.ip));
         /* OpenWrt mcast-to-unicast: re-bind STA UDP + IGMP after DHCP (RX may have started with no IP). */
+        wifi_touch_clamp_ps_none_if_rx_active();
         dashcdg_badge_rx_notify_sta_got_ip();
 
         wifi_config_t wc = {0};
         if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {
             nvs_save_creds((const char *)wc.sta.ssid, (const char *)wc.sta.password);
         }
-        dashcdg_wifi_debug_maybe_autolaunch_karaoke(lv_display_get_default());
+        dashcdg_wifi_debug_on_sta_got_ip();
     }
 }
 
@@ -243,7 +282,7 @@ static void on_connect(lv_event_t *e)
     if (lvgl_port_lock(1000)) {
         lv_dropdown_get_selected_str(s_dd_ssid, ssid, sizeof(ssid));
         const char *pw = lv_textarea_get_text(s_ta_pass);
-        strncpy(psk, pw, sizeof(psk) - 1);
+        snprintf(psk, sizeof(psk), "%s", pw != NULL ? pw : "");
         lvgl_port_unlock();
     }
 
@@ -253,9 +292,10 @@ static void on_connect(lv_event_t *e)
     }
 
     wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, psk, sizeof(wc.sta.password) - 1);
+    wifi_touch_copy_to_cfg_field(wc.sta.ssid, sizeof(wc.sta.ssid), ssid);
+    wifi_touch_copy_to_cfg_field(wc.sta.password, sizeof(wc.sta.password), psk);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wc.sta.listen_interval = 1;
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (err != ESP_OK) {
@@ -476,9 +516,11 @@ static esp_err_t try_auto_connect_saved(void)
     }
 
     wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, psk, sizeof(wc.sta.password) - 1);
+    wifi_touch_copy_to_cfg_field(wc.sta.ssid, sizeof(wc.sta.ssid), ssid);
+    wifi_touch_copy_to_cfg_field(wc.sta.password, sizeof(wc.sta.password), psk);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    /* Min listen interval (beacon periods): if modem PS is ever active, wake often for DTIM/mcast. */
+    wc.sta.listen_interval = 1;
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wc), TAG, "set saved");
     ui_statusf("Auto-connect...\n%s", ssid);
@@ -498,9 +540,10 @@ static esp_err_t wifi_reconnect_apply_saved(void)
     }
 
     wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, psk, sizeof(wc.sta.password) - 1);
+    wifi_touch_copy_to_cfg_field(wc.sta.ssid, sizeof(wc.sta.ssid), ssid);
+    wifi_touch_copy_to_cfg_field(wc.sta.password, sizeof(wc.sta.password), psk);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wc.sta.listen_interval = 1;
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (err != ESP_OK) {
@@ -629,18 +672,35 @@ esp_err_t dashcdg_wifi_touch_ui_start(lv_disp_t *disp)
     return dashcdg_wifi_touch_ui_present(disp);
 }
 
-void dashcdg_wifi_debug_maybe_autolaunch_karaoke(lv_disp_t *disp)
+void dashcdg_wifi_debug_on_sta_got_ip(void)
 {
 #if CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP
-    if (!disp || s_dbg_auto_karaoke_done_this_boot) {
+    if (s_dbg_auto_karaoke_done_this_boot) {
         return;
     }
     s_dbg_auto_karaoke_dhcp_seen = true;
-    if (s_dbg_auto_karaoke_launch_posted) {
+    dbg_auto_karaoke_schedule_launch_once();
+#endif
+}
+
+void dashcdg_wifi_debug_try_autolaunch_after_home(lv_disp_t *disp)
+{
+#if CONFIG_DASHCDG_BADGE_DEBUG_AUTO_LAUNCH_KARAOKE_AFTER_DHCP
+    esp_netif_ip_info_t ipi;
+
+    if (!disp || s_dbg_auto_karaoke_done_this_boot) {
         return;
     }
-    s_dbg_auto_karaoke_launch_posted = true;
-    lv_async_call(dbg_auto_karaoke_launch_async, disp);
+    {
+        esp_netif_t *na = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+        if (na == NULL || esp_netif_get_ip_info(na, &ipi) != ESP_OK || ipi.ip.addr == 0U) {
+            return;
+        }
+    }
+    /* STA already had a lease before LVGL finished — arm the same one-shot path as GOT_IP. */
+    s_dbg_auto_karaoke_dhcp_seen = true;
+    dbg_auto_karaoke_schedule_launch_once();
 #else
     (void)disp;
 #endif

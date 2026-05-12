@@ -152,4 +152,12 @@ menu "DashCDG badge"
         help
             Shorter wake when CDG drain is off — keeps DAC + Opus drain cadence tighter.
 
+    config DASHCDG_BADGE_AUDIO_DIAG_UART_INFO
+        bool "UART: audio chop / proof lines at INFO (default DEBUG)"
+        default n
+        help
+            When enabled, badge_rx prints `audio_chop`, `AUDIO_UART_PROOF`, and audio_only cumulative
+            lines at ESP_LOGI once per second while decode is on — useful for field RCA without raising
+            global log level. Keep off for normal builds (UART bandwidth + CPU).
+
 endmenu
