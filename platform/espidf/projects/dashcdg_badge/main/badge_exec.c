@@ -52,6 +52,18 @@ static const char *TAG = "badge_exec";
 #define CONFIG_DASHCDG_BADGE_EXEC_LOCK_TIMEOUT_MS 20
 #endif
 
+#ifndef CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS
+#define CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS 1000
+#endif
+
+#ifndef CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS
+#define CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS 2000
+#endif
+
+#ifndef CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE
+#define CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE 0
+#endif
+
 #define BADGE_EXEC_LOCK_TICKS pdMS_TO_TICKS(CONFIG_DASHCDG_BADGE_EXEC_LOCK_TIMEOUT_MS)
 
 /* Bits whose ownership belongs to the orchestrator decision, not to subsystem publishers. */
@@ -66,6 +78,10 @@ typedef struct {
     size_t task_count;
     bool initialized;
     bool boot_complete_published;
+    /* T7: liveness sweep state */
+    esp_timer_handle_t liveness_timer;
+    bool liveness_running;
+    dashcdg_badge_exec_liveness_stats_t liveness_stats;
 } badge_exec_state_t;
 
 static badge_exec_state_t s_state;
@@ -630,6 +646,210 @@ size_t dashcdg_badge_exec_get_task_count(void)
     size_t n = s_state.task_count;
     badge_exec_unlock();
     return n;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Liveness sweep (T7)                                                      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Task -> owning subsystem map. Used by enforce-mode to mark the right subsystem DEGRADED on
+ * stall. Tasks not listed here still log stalls (observe path) but do not transition any health.
+ * `__attribute__((unused))` keeps the build clean when enforce is off (observe-only default).
+ */
+__attribute__((unused))
+static dashcdg_badge_exec_subsystem_t badge_exec_task_to_subsystem(const char *name)
+{
+    if (name == NULL) {
+        return DASHCDG_BADGE_EXEC_SUB__COUNT;
+    }
+    if (strncmp(name, "badge_rx", DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+        return DASHCDG_BADGE_EXEC_SUB_RX;
+    }
+    if (strncmp(name, "sp_blit", DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+        return DASHCDG_BADGE_EXEC_SUB_DISPLAY;
+    }
+    if (strncmp(name, "wifi_owner", DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+        return DASHCDG_BADGE_EXEC_SUB_WIFI_STA;
+    }
+    if (strncmp(name, "wifi_reconn", DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+        return DASHCDG_BADGE_EXEC_SUB_WIFI_STA;
+    }
+    if (strncmp(name, "dashcdg_hw", DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+        return DASHCDG_BADGE_EXEC_SUB_PLATFORM_HW;
+    }
+    if (strncmp(name, "dashcdg_lab_ym", DASHCDG_BADGE_EXEC_TASK_NAME_MAX) == 0) {
+        return DASHCDG_BADGE_EXEC_SUB_AUDIO_LAB;
+    }
+    return DASHCDG_BADGE_EXEC_SUB__COUNT;
+}
+
+static void badge_exec_liveness_sweep_cb(void *arg)
+{
+    (void)arg;
+    if (!s_state.initialized) {
+        return;
+    }
+
+    /* Refresh stack high-water marks first (cheap; no health writes). */
+    dashcdg_badge_exec_refresh_stack_hwm();
+
+    const uint64_t now_ms = dashcdg_badge_exec_now_ms();
+    const uint64_t stall_threshold = (uint64_t)CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS;
+
+    /*
+     * Snapshot each task slot under the lock, then emit traces + (in enforce mode) call
+     * set_health outside the lock so we never block holding the registry mutex.
+     */
+    struct {
+        char name[DASHCDG_BADGE_EXEC_TASK_NAME_MAX];
+        uint32_t lag_ms;
+        uint32_t work_lag_ms;
+        uint32_t stack_hwm;
+        bool stalled;
+        bool in_use;
+    } snap[DASHCDG_BADGE_EXEC_TASK_SLOTS];
+
+    memset(snap, 0, sizeof(snap));
+
+    if (!badge_exec_lock()) {
+        return;
+    }
+    for (size_t i = 0; i < DASHCDG_BADGE_EXEC_TASK_SLOTS; ++i) {
+        const dashcdg_badge_exec_task_info_t *slot = &s_state.tasks[i];
+
+        if (!slot->in_use) {
+            continue;
+        }
+        snap[i].in_use = true;
+        snprintf(snap[i].name, sizeof(snap[i].name), "%s", slot->name);
+        snap[i].lag_ms = (slot->last_heartbeat_ms != 0U && now_ms > slot->last_heartbeat_ms)
+                                ? (uint32_t)(now_ms - slot->last_heartbeat_ms)
+                                : 0U;
+        snap[i].work_lag_ms = (slot->last_work_ms != 0U && now_ms > slot->last_work_ms)
+                                      ? (uint32_t)(now_ms - slot->last_work_ms)
+                                      : 0U;
+        snap[i].stack_hwm = slot->stack_high_water;
+        snap[i].stalled = ((uint64_t)snap[i].lag_ms >= stall_threshold);
+    }
+    s_state.liveness_stats.sweeps_total++;
+    badge_exec_unlock();
+
+    /* Emit traces / observe stalls outside the lock. */
+    uint32_t worst_lag = 0U;
+    uint32_t stalls_this_sweep = 0U;
+    uint32_t enforce_transitions_this_sweep = 0U;
+
+    for (size_t i = 0; i < DASHCDG_BADGE_EXEC_TASK_SLOTS; ++i) {
+        if (!snap[i].in_use) {
+            continue;
+        }
+        if (snap[i].lag_ms > worst_lag) {
+            worst_lag = snap[i].lag_ms;
+        }
+        if (!snap[i].stalled) {
+            continue;
+        }
+        ++stalls_this_sweep;
+        dashcdg_badge_exec_trace("liveness_stall",
+                                 "task=%s lag_ms=%" PRIu32 " work_lag_ms=%" PRIu32
+                                 " hwm_words=%" PRIu32 " enforce=%d",
+                                 snap[i].name, snap[i].lag_ms, snap[i].work_lag_ms,
+                                 snap[i].stack_hwm,
+                                 CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE);
+        ESP_LOGW(TAG, "liveness stall task=%s lag_ms=%" PRIu32 " work_lag_ms=%" PRIu32
+                      " hwm_words=%" PRIu32,
+                 snap[i].name, snap[i].lag_ms, snap[i].work_lag_ms, snap[i].stack_hwm);
+#if CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE
+        {
+            dashcdg_badge_exec_subsystem_t sub = badge_exec_task_to_subsystem(snap[i].name);
+            if (sub != DASHCDG_BADGE_EXEC_SUB__COUNT) {
+                char reason[DASHCDG_BADGE_EXEC_REASON_MAX];
+                snprintf(reason, sizeof(reason), "no_hb:%s:%" PRIu32, snap[i].name, snap[i].lag_ms);
+                if (dashcdg_badge_exec_set_health(sub, DASHCDG_BADGE_EXEC_HEALTH_DEGRADED, reason) == ESP_OK) {
+                    ++enforce_transitions_this_sweep;
+                }
+            }
+        }
+#endif
+    }
+
+    if (stalls_this_sweep > 0U || worst_lag > 0U) {
+        if (badge_exec_lock()) {
+            s_state.liveness_stats.stalls_observed += stalls_this_sweep;
+            s_state.liveness_stats.enforce_transitions += enforce_transitions_this_sweep;
+            if (worst_lag > s_state.liveness_stats.worst_lag_ms) {
+                s_state.liveness_stats.worst_lag_ms = worst_lag;
+            }
+            badge_exec_unlock();
+        }
+    }
+}
+
+esp_err_t dashcdg_badge_exec_liveness_start(void)
+{
+    if (!s_state.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_state.liveness_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_state.liveness_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = &badge_exec_liveness_sweep_cb,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "exec_live",
+            .skip_unhandled_events = true,
+        };
+        esp_err_t r = esp_timer_create(&args, &s_state.liveness_timer);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "liveness timer create failed err=0x%x", (unsigned)r);
+            return r;
+        }
+    }
+    esp_err_t r = esp_timer_start_periodic(s_state.liveness_timer,
+                                           (uint64_t)CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS * 1000ULL);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "liveness timer start failed err=0x%x", (unsigned)r);
+        return r;
+    }
+    s_state.liveness_running = true;
+    ESP_LOGI(TAG, "liveness sweep up interval_ms=%d stall_ms=%d enforce=%d",
+             CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS,
+             CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS,
+             CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE);
+    dashcdg_badge_exec_trace("liveness_start",
+                             "interval_ms=%d stall_ms=%d enforce=%d",
+                             CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS,
+                             CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS,
+                             CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE);
+    return ESP_OK;
+}
+
+void dashcdg_badge_exec_liveness_stop(void)
+{
+    if (!s_state.liveness_running || s_state.liveness_timer == NULL) {
+        return;
+    }
+    (void)esp_timer_stop(s_state.liveness_timer);
+    s_state.liveness_running = false;
+}
+
+void dashcdg_badge_exec_liveness_get_stats(dashcdg_badge_exec_liveness_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!s_state.initialized) {
+        return;
+    }
+    if (!badge_exec_lock()) {
+        return;
+    }
+    *out = s_state.liveness_stats;
+    badge_exec_unlock();
 }
 
 /* ------------------------------------------------------------------------- */

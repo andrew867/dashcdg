@@ -247,5 +247,17 @@ void app_main(void)
         }
     }
 
+    /*
+     * T7: start the periodic liveness sweep now that all primary tasks are registered. Per the
+     * executive refactor spec the sweep starts in observe-only mode (logs stalls; never restarts).
+     * Enabling enforce-mode is a Kconfig switch flipped after a clean soak run.
+     */
+    {
+        esp_err_t ls = dashcdg_badge_exec_liveness_start();
+        if (ls != ESP_OK && ls != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "liveness sweep start: %s", esp_err_to_name(ls));
+        }
+    }
+
     ESP_LOGI(TAG, "launcher running");
 }

@@ -295,6 +295,38 @@ esp_err_t dashcdg_badge_exec_get_task_info(size_t idx, dashcdg_badge_exec_task_i
 size_t dashcdg_badge_exec_get_task_count(void);
 
 /* ------------------------------------------------------------------------- */
+/*  Liveness sweep (T7)                                                      */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Start the periodic liveness sweep. The sweep runs from an esp_timer (no dedicated task) and
+ * performs only registry walks: refresh stack high-water marks, compute heartbeat lag, emit a
+ * [exec-trace] line per stalled task, and update the global stall counters.
+ *
+ * Per the T7 design contract this is observe-only by default (CONFIG_DASHCDG_BADGE_EXEC_LIVENESS_
+ * ENFORCE = n). When enforce is set, the sweep ALSO calls dashcdg_badge_exec_set_health(...
+ * DEGRADED, "no_heartbeat") for the subsystem that owns each stalled task (mapping defined in
+ * badge_exec.c). The sweep never reboots the badge or calls into the WDT directly.
+ *
+ * Returns ESP_OK on first call, ESP_ERR_INVALID_STATE if already running or exec not initialized.
+ */
+esp_err_t dashcdg_badge_exec_liveness_start(void);
+
+/**
+ * Stop the periodic liveness sweep. Used by tests and shutdown paths. Idempotent.
+ */
+void dashcdg_badge_exec_liveness_stop(void);
+
+typedef struct {
+    uint32_t sweeps_total;        /* incremented every sweep tick */
+    uint32_t stalls_observed;     /* per-task stall observations (one per stalled task per sweep) */
+    uint32_t enforce_transitions; /* health transitions made by the sweep when enforce is on */
+    uint32_t worst_lag_ms;        /* peak (now - last_heartbeat_ms) seen across all tasks */
+} dashcdg_badge_exec_liveness_stats_t;
+
+void dashcdg_badge_exec_liveness_get_stats(dashcdg_badge_exec_liveness_stats_t *out);
+
+/* ------------------------------------------------------------------------- */
 /*  Timing                                                                   */
 /* ------------------------------------------------------------------------- */
 

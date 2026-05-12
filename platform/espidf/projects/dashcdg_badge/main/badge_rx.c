@@ -4679,6 +4679,12 @@ static void badge_rx_pump_main_fd(int pump_fd, uint8_t *buf, size_t buf_cap)
                     xSemaphoreGive(s_mtx);
                     badge_rx_pump_flush_deferred_audio_drain(now_ms);
                     dashcdg_platform_hw_note_karaoke_mcast_rx(now_ms);
+                    /*
+                     * T7: mark progress (not just heartbeat) so the liveness sweep can tell
+                     * "alive idle" from "alive making forward progress". Stale progress with
+                     * fresh heartbeats means the pump is running but not draining packets.
+                     */
+                    dashcdg_badge_exec_task_progress("badge_rx");
                 }
             }
         }
@@ -4909,6 +4915,12 @@ static void badge_rx_task(void *arg)
          * serialized on the task side.
          */
         badge_rx_drain_commands();
+        /*
+         * T7: liveness heartbeat at the top of every iteration. The executive sweep treats
+         * lag > STALL_MS as evidence that this task is wedged. The heartbeat is intentionally
+         * cheap (single mutex try-take then drop) so it cannot itself stall the pump.
+         */
+        dashcdg_badge_exec_task_heartbeat("badge_rx");
 #if defined(ESP_PLATFORM)
         /*
          * Something (NVS default, coexist, or a race with screen PM) can re-enable modem PS while RX

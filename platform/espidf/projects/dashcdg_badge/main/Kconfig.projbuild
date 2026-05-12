@@ -30,6 +30,36 @@ menu "DashCDG badge"
             BOOT_WIFI_DHCP_TIMEOUT and marks SUB_WIFI_STA as TIMEOUT. The background reconnect task
             continues running; this bit only feeds the orchestrator's nominal/degraded decision.
 
+    config DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS
+        int "Executive: liveness sweep interval (ms)"
+        range 100 60000
+        default 1000
+        help
+            How often badge_exec walks the task registry to refresh stack high-water marks and
+            check per-task heartbeat lag. The sweep runs from an esp_timer dispatch task and
+            performs only registry walks (no I/O). 1 s is the recommended default for soak builds;
+            lower (250-500 ms) helps catch transient stalls in development.
+
+    config DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS
+        int "Executive: per-task stall threshold (ms)"
+        range 200 30000
+        default 2000
+        help
+            A registered task is "stalled" when (now - last_heartbeat_ms) exceeds this threshold.
+            The sweep emits an [exec-trace] line for every stall observation and increments the
+            global stalls_observed counter. T7 enforce-mode (below) decides whether a stall also
+            transitions the owning subsystem health to DEGRADED.
+
+    config DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE
+        bool "Executive: liveness sweep enforces health transitions"
+        default n
+        help
+            Per the executive refactor spec (T7) liveness starts in observe-only mode -- the sweep
+            logs stalls but does not change any subsystem health. After a clean soak run, enable
+            this to let the sweep mark the owning subsystem DEGRADED when a stall is observed.
+            Recovery is policy-defined and lives in the orchestrator; the sweep itself never
+            touches the WDT or restarts tasks.
+
     config DASHCDG_BADGE_OPUS_MONO_ONLY
         bool "Opus RX: mono decoder only (saves internal RAM)"
         default y
