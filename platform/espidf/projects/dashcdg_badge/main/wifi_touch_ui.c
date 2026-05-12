@@ -85,6 +85,13 @@ static void boot_dhcp_timer_cancel(void)
     }
 }
 
+/*
+ * TAG is used by both the legacy wifi/UI code further down AND by the wifi_owner queue
+ * helpers immediately below; declare once here so both compile cleanly. (T3 left a forward
+ * reference behind that landed in commit but only got caught on a fresh build with no ccache.)
+ */
+static const char *TAG = "wifi_ui";
+
 /* Forward declarations for helpers defined further below that wifi_owner needs to call. */
 static void rebuild_dropdown_from_scan(void);
 static void ui_statusf(const char *fmt, ...);
@@ -273,7 +280,6 @@ static void wifi_owner_start_once(void)
              (unsigned)WIFI_OWNER_TASK_PRIO);
 }
 
-static const char *TAG = "wifi_ui";
 static bool s_wifi_driver_ready;
 
 /** IDF may re-apply default modem PS on (re)association; keep multicast RX from sleeping the radio. */
