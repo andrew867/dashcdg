@@ -110,16 +110,27 @@ static const char *TAG = "badge_rx";
 #else
 #define BADGE_RX_SELECT_TIMEOUT_AUDIO_ONLY_MS 6U
 #endif
-#if CONFIG_DASHCDG_BADGE_RX_PUMP_MUTEX_MS > 0
+/*
+ * Bounded wait policy (T5): every hot-path xSemaphoreTake on `s_mtx` MUST be finite. Per the
+ * FreeRTOS executive refactor spec (docs/specs/esp32-badge-freertos-executive-refactor-spec.md
+ * §3.4 "bounded waits"), portMAX_DELAY in the media/repair pump can cause unbounded latency
+ * spikes that the WDT cannot detect (the task is blocked-on-mutex, not spinning). The Kconfig
+ * range minimum is enforced at 20 ms so a zero value cannot reintroduce the legacy infinite wait.
+ */
+#if CONFIG_DASHCDG_BADGE_RX_PUMP_MUTEX_MS < 1
+#error "CONFIG_DASHCDG_BADGE_RX_PUMP_MUTEX_MS must be > 0 — see T5 in esp32-badge-freertos-refactor-implementation-tranches.md"
+#endif
 #define BADGE_RX_PUMP_MUTEX_TICKS pdMS_TO_TICKS(CONFIG_DASHCDG_BADGE_RX_PUMP_MUTEX_MS)
-#else
-#define BADGE_RX_PUMP_MUTEX_TICKS portMAX_DELAY
+#if CONFIG_DASHCDG_BADGE_RX_REPAIR_MUTEX_MS < 1
+#error "CONFIG_DASHCDG_BADGE_RX_REPAIR_MUTEX_MS must be > 0 — see T5 in esp32-badge-freertos-refactor-implementation-tranches.md"
 #endif
-#if CONFIG_DASHCDG_BADGE_RX_REPAIR_MUTEX_MS > 0
 #define BADGE_RX_REPAIR_MUTEX_TICKS pdMS_TO_TICKS(CONFIG_DASHCDG_BADGE_RX_REPAIR_MUTEX_MS)
-#else
-#define BADGE_RX_REPAIR_MUTEX_TICKS portMAX_DELAY
-#endif
+/*
+ * Session reset re-acquire: rare path (track change). Bounded but generous so we do not silently
+ * abort a session reset on a transient mutex hold. On timeout we abort the reset and return -1;
+ * the caller must surface that to telemetry (s_rx_mtx_session_reset_timeouts).
+ */
+#define BADGE_RX_SESSION_RESET_MTX_MS 5000U
 /** Max audio jitter drain steps per call (AMR 20 ms frames; catch up after a UDP burst). */
 #define BADGE_RX_AUDIO_DRAIN_GUARD 32U
 #define BADGE_RX_AUDIO_DRAIN_BUDGET_MIXED 6U
@@ -539,6 +550,9 @@ static QueueHandle_t s_rx_cmd_q;
 static volatile uint32_t s_rx_cmd_q_drops;
 static volatile uint16_t s_rx_cmd_q_high_water;
 static volatile uint32_t s_rx_cmd_q_applied;
+
+/* T5: bounded waits — session reset re-acquire timeouts (separate counter from pump/repair). */
+static volatile uint32_t s_rx_mtx_session_reset_timeouts;
 static uint32_t s_rx_mcast_media_datagrams;
 static uint32_t s_rx_ucast_media_datagrams;
 static uint32_t s_media_sequence_duplicate_hits;
@@ -3844,8 +3858,17 @@ static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
     s_last_audio_codec_inited = 0U;
     s_playback_paused = 0U;
     badge_rx_audio_start_gate_stall_clear();
-    if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(TAG, "session reset: mutex re-acquire failed");
+    /*
+     * T5: bounded wait only. The reset path drops `s_mtx`, performs heavy resets, then must
+     * re-acquire to update locked state. A 5 s ceiling is generous (track changes are rare and
+     * RX hold time on the mutex is normally < 50 ms) but still finite — if we time out, abort
+     * the reset and let the next session attempt retry. Counted via `s_rx_mtx_session_reset_timeouts`.
+     */
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(BADGE_RX_SESSION_RESET_MTX_MS)) != pdTRUE) {
+        s_rx_mtx_session_reset_timeouts++;
+        ESP_LOGE(TAG, "session reset: mutex re-acquire timed out after %ums (count=%u)",
+                 (unsigned)BADGE_RX_SESSION_RESET_MTX_MS,
+                 (unsigned)s_rx_mtx_session_reset_timeouts);
         return -1;
     }
 
@@ -4588,10 +4611,13 @@ static void badge_rx_pump_flush_deferred_audio_drain(uint64_t local_now_ms)
         return;
     }
     if (xSemaphoreTake(s_mtx, mtx_ticks) != pdTRUE) {
+        /*
+         * T5: bounded wait only. On timeout, count it and skip this drain pass — the next
+         * pump iteration will retry. The audio drain is naturally idempotent (the staging ring
+         * remains intact); no fallback portMAX_DELAY take.
+         */
         s_stats.rx_mtx_pump_timeouts++;
-        if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
-            return;
-        }
+        return;
     }
     badge_rx_deferred_audio_drain_if_pending_locked(local_now_ms);
     xSemaphoreGive(s_mtx);
@@ -4623,10 +4649,14 @@ static void badge_rx_pump_main_fd(int pump_fd, uint8_t *buf, size_t buf_cap)
                 TickType_t mtx_ticks = BADGE_RX_PUMP_MUTEX_TICKS;
 
                 if (xSemaphoreTake(s_mtx, mtx_ticks) != pdTRUE) {
+                    /*
+                     * T5: bounded wait only. Drop this datagram — counted in `rx_mtx_pump_timeouts`
+                     * and shows up in v4_rx_stats. Loss correction via repair/FEC handles the
+                     * occasional bounded-wait timeout; an unbounded fallback was masking real
+                     * priority-inversion stalls from the WDT.
+                     */
                     s_stats.rx_mtx_pump_timeouts++;
-                    if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
-                        continue;
-                    }
+                    continue;
                 }
                 if (src.sin_family == AF_INET && badge_rx_ipv4_is_unicast_src(src.sin_addr.s_addr)) {
                     s_v4_tx_src_ipv4 = src.sin_addr.s_addr;
@@ -5117,10 +5147,14 @@ static void badge_rx_task(void *arg)
                     break;
                 }
                 if (xSemaphoreTake(s_mtx, BADGE_RX_REPAIR_MUTEX_TICKS) != pdTRUE) {
+                    /*
+                     * T5: bounded wait only. Drop the repair datagram (counted in
+                     * `rx_mtx_repair_timeouts`). Missing one repair packet at worst increases
+                     * residual loss for the affected group; missing the watchdog because we
+                     * blocked on portMAX_DELAY would brick the badge.
+                     */
                     s_stats.rx_mtx_repair_timeouts++;
-                    if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
-                        continue;
-                    }
+                    continue;
                 }
                 if (src.sin_family == AF_INET && badge_rx_ipv4_is_unicast_src(src.sin_addr.s_addr)) {
                     s_v4_tx_src_ipv4 = src.sin_addr.s_addr;
@@ -5139,10 +5173,9 @@ static void badge_rx_task(void *arg)
                     break;
                 }
                 if (xSemaphoreTake(s_mtx, BADGE_RX_REPAIR_MUTEX_TICKS) != pdTRUE) {
+                    /* T5: bounded wait only — see mcast repair path comment above. */
                     s_stats.rx_mtx_repair_timeouts++;
-                    if (xSemaphoreTake(s_mtx, portMAX_DELAY) != pdTRUE) {
-                        continue;
-                    }
+                    continue;
                 }
                 if (src.sin_family == AF_INET && badge_rx_ipv4_is_unicast_src(src.sin_addr.s_addr)) {
                     s_v4_tx_src_ipv4 = src.sin_addr.s_addr;
@@ -5969,6 +6002,8 @@ static void badge_rx_stats_finalize_public_view(dashcdg_badge_rx_stats_t *out, u
     out->rx_cmd_q_drops = s_rx_cmd_q_drops;
     out->rx_cmd_q_high_water = s_rx_cmd_q_high_water;
     out->rx_cmd_q_applied = s_rx_cmd_q_applied;
+    /* T5: bounded-wait counter (session reset re-acquire failures). */
+    out->rx_mtx_session_reset_timeouts = s_rx_mtx_session_reset_timeouts;
     snprintf(out->tx_stats_dest, sizeof(out->tx_stats_dest), "--");
     if (s_v4_tx_src_ipv4 != 0U) {
         uint32_t h = ntohl(s_v4_tx_src_ipv4);

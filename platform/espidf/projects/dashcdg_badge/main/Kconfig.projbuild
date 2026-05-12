@@ -144,19 +144,22 @@ menu "DashCDG badge"
             Keep below or near the badge RX task (5) so real-time UDP decode is not starved.
 
     config DASHCDG_BADGE_RX_PUMP_MUTEX_MS
-        int "RX media pump: s_mtx wait timeout ms (0 = wait forever)"
-        range 0 5000
+        int "RX media pump: s_mtx wait timeout ms"
+        range 20 5000
         default 400
         help
-            Bounds xSemaphoreTake in badge_rx_pump_main_fd. On rare timeout the datagram is dropped
-            (counter rx_mtx_pump_timeouts). Use 0 only for legacy debugging.
+            Bounds xSemaphoreTake in badge_rx_pump_main_fd. On timeout the datagram is dropped
+            (counter rx_mtx_pump_timeouts). The minimum (20 ms) is enforced because the FreeRTOS
+            executive refactor (T5) forbids unbounded waits in hot paths -- portMAX_DELAY here
+            would mask priority-inversion stalls from the watchdog.
 
     config DASHCDG_BADGE_RX_REPAIR_MUTEX_MS
-        int "RX repair recv: s_mtx wait timeout ms (0 = wait forever)"
-        range 0 5000
+        int "RX repair recv: s_mtx wait timeout ms"
+        range 20 5000
         default 400
         help
-            Same semantics as pump timeout for repair/FEC recv loops.
+            Same semantics as the pump timeout for repair/FEC recv loops (counter
+            rx_mtx_repair_timeouts). Minimum 20 ms by T5 design contract.
 
     config DASHCDG_BADGE_DAC_WRITE_TIMEOUT_MS
         int "Karaoke DAC: dac_continuous_write max block ms (0 = infinite)"

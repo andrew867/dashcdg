@@ -163,6 +163,8 @@ typedef struct {
     uint16_t rx_cmd_q_high_water;
     /** RX owner command queue: total commands dequeued and applied by the RX task. */
     uint32_t rx_cmd_q_applied;
+    /** T5: session reset path failed to re-acquire `s_mtx` within the bounded wait (session aborted). */
+    uint32_t rx_mtx_session_reset_timeouts;
 } dashcdg_badge_rx_stats_t;
 
 #define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U

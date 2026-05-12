@@ -37,13 +37,23 @@ static QueueHandle_t s_work_q;
 static TaskHandle_t s_worker_task;
 static uint8_t s_inited;
 
+/*
+ * T5: even idle waits are bounded so the worker can publish heartbeats to the executive
+ * task registry. 500 ms is well above typical CDG band cadence (~7 ms/band at 30 fps) and
+ * keeps the executive's liveness watchdog accurate without burning CPU.
+ */
+#define SP_BLIT_WORKER_RX_WAIT_MS 500U
+
 static void sp_blit_worker_task(void *arg)
 {
     (void)arg;
     sp_blit_msg_t m;
 
     for (;;) {
-        if (xQueueReceive(s_work_q, &m, portMAX_DELAY) != pdTRUE) {
+        BaseType_t got = xQueueReceive(s_work_q, &m, pdMS_TO_TICKS(SP_BLIT_WORKER_RX_WAIT_MS));
+
+        dashcdg_badge_exec_task_heartbeat("sp_blit");
+        if (got != pdTRUE) {
             continue;
         }
         if (m.w <= 0 || m.h <= 0 || m.slot >= CONFIG_DASHCDG_BADGE_SP_BLIT_POOL_SLOTS) {
