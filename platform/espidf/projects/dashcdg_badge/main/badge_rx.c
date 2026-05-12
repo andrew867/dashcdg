@@ -47,6 +47,7 @@
 #include "dashcdg/protocol.h"
 
 #include "badge_cdg_rgb565.h"
+#include "badge_exec.h"
 #include "badge_prefs.h"
 #include "display_lvgl.h"
 #include "platform_hw.h"
@@ -5410,9 +5411,11 @@ void dashcdg_badge_rx_start(void)
     s_cdg_skip_hold_until_local_ms = 0U;
 
     s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
+    bool rx_video_heap_ok = true;
     if (s_video_decode_enabled) {
         if (badge_rx_ensure_heap() != 0) {
             ESP_LOGW(TAG, "CDG/jitter unavailable — multicast RX, parse, clock sync still run");
+            rx_video_heap_ok = false;
         } else {
             dashcdg_cdg_state_init(s_cdg);
             dashcdg_cdg_batch_jitter_init(s_jb);
@@ -5528,6 +5531,48 @@ void dashcdg_badge_rx_start(void)
             badge_rx_try_open_ucast_sockets();
             ESP_LOGI(TAG, "IGMP bootstrap: STA got IP before karaoke RX started — extra join pass done");
         }
+
+        /*
+         * Publish RX boot facts and overall RX health. Audio decode and video decode are
+         * independent (see docs/specs/esp32-badge-freertos-executive-refactor-spec.md s4.3);
+         * we always set RX_RESOURCES_OK when video heap is healthy or video is off, and we
+         * set RX_NO_CDG_HEAP / RX_AUDIO_ONLY_OK when one path is degraded. The orchestrator
+         * decision is already made by the time karaoke starts; these are latched evidence for
+         * later test/log reading.
+         */
+        if (s_video_decode_enabled && !rx_video_heap_ok) {
+            (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_RX_NO_CDG_HEAP,
+                                                       "cdg_jb_alloc_fail");
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX_CDG,
+                                                DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                                "no_heap");
+        } else if (s_video_decode_enabled) {
+            (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_RX_RESOURCES_OK,
+                                                       "video_audio_ok");
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX_CDG,
+                                                DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+        } else if (s_audio_decode_enabled) {
+            (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_RX_AUDIO_ONLY_OK,
+                                                       "video_off_audio_only");
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX_CDG,
+                                                DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                                "video_off");
+        }
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX,
+                                            DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX_AUDIO,
+                                            s_audio_decode_enabled
+                                                ? DASHCDG_BADGE_EXEC_HEALTH_OK
+                                                : DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                            s_audio_decode_enabled ? NULL : "audio_decode_off");
+        (void)dashcdg_badge_exec_register_task("badge_rx", s_rx_task,
+                                               (uint8_t)BADGE_RX_TASK_PRIO,
+#if CONFIG_FREERTOS_UNICORE
+                                               (int8_t)-1,
+#else
+                                               (int8_t)BADGE_RX_TASK_CORE,
+#endif
+                                               (uint16_t)BADGE_RX_STACK);
     }
 }
 
@@ -5568,6 +5613,9 @@ void dashcdg_badge_rx_stop(void)
     for (int i = 0; i < 80 && s_rx_task != NULL; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    (void)dashcdg_badge_exec_unregister_task("badge_rx");
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX,
+                                        DASHCDG_BADGE_EXEC_HEALTH_UNKNOWN, "stopped");
     badge_rx_v4_anchor_asm_reset();
     dashcdg_platform_hw_karaoke_dac_stop();
     badge_rx_amr_decoder_reset();

@@ -159,38 +159,91 @@ void app_main(void)
     err = dashcdg_display_lvgl_init(&disp);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "display init failed: %s", esp_err_to_name(err));
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_DISPLAY_FATAL,
+                                                   esp_err_to_name(err));
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_DISPLAY,
+                                            DASHCDG_BADGE_EXEC_HEALTH_FAILED_FATAL,
+                                            esp_err_to_name(err));
         return;
     }
     ESP_LOGI(TAG, "display OK");
+    (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_DISPLAY_OK, NULL);
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_DISPLAY,
+                                        DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
 
     {
         esp_err_t vb = dashcdg_vbat_sense_init();
         if (vb != ESP_OK) {
             ESP_LOGW(TAG, "Vbat sense init: %s", esp_err_to_name(vb));
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_VBAT,
+                                                DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                                esp_err_to_name(vb));
+        } else {
+            (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_VBAT_OK, NULL);
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_VBAT,
+                                                DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
         }
     }
     {
         esp_err_t ph = dashcdg_platform_hw_init();
         if (ph != ESP_OK) {
             ESP_LOGW(TAG, "platform hw init: %s", esp_err_to_name(ph));
+            (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_HW_PARTIAL,
+                                                       esp_err_to_name(ph));
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_PLATFORM_HW,
+                                                DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                                esp_err_to_name(ph));
+        } else {
+            (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_HW_OK, NULL);
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_PLATFORM_HW,
+                                                DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
         }
     }
 
-    if (!dashcdg_touch_cal_store_has_valid()) {
+    const bool touch_cal_valid = dashcdg_touch_cal_store_has_valid();
+    if (!touch_cal_valid) {
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_TOUCH_CAL_REQUIRED,
+                                                   "no_valid_calibration");
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_TOUCH,
+                                            DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                            "cal_required");
         esp_err_t c = dashcdg_touch_cal_ui_present(disp, false, dashcdg_nav_home, NULL);
         if (c != ESP_OK) {
             ESP_LOGW(TAG, "touch cal UI failed (%s), opening home", esp_err_to_name(c));
             err = dashcdg_home_ui_present(disp);
             if (err != ESP_OK) {
                 dashcdg_show_boot_error_screen(disp, "home_ui_present", err);
+                (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_LVGL_UI,
+                                                    DASHCDG_BADGE_EXEC_HEALTH_FAILED_FATAL,
+                                                    esp_err_to_name(err));
                 return;
             }
         }
     } else {
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_TOUCH_OK, NULL);
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_TOUCH,
+                                            DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
         err = dashcdg_home_ui_present(disp);
         if (err != ESP_OK) {
             dashcdg_show_boot_error_screen(disp, "home_ui_present", err);
+            (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_LVGL_UI,
+                                                DASHCDG_BADGE_EXEC_HEALTH_FAILED_FATAL,
+                                                esp_err_to_name(err));
             return;
+        }
+    }
+
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_LVGL_UI,
+                                        DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+
+    /*
+     * Boot orchestrator decision. We are now interactive (home or touch-cal UI is up). DHCP may
+     * still be in flight - that becomes a runtime health transition rather than a boot block.
+     */
+    {
+        esp_err_t dec = dashcdg_badge_exec_decide_boot_complete();
+        if (dec != ESP_OK && dec != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "boot decision: %s", esp_err_to_name(dec));
         }
     }
 

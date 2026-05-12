@@ -5,6 +5,7 @@
  */
 #include "badge_lab_ym.h"
 
+#include "badge_exec.h"
 #include "platform_hw.h"
 
 #include "esp_log.h"
@@ -385,6 +386,11 @@ void dashcdg_badge_lab_ym_init(void)
         s_task = NULL;
         return;
     }
+    (void)dashcdg_badge_exec_register_task("dashcdg_lab_ym", s_task,
+                                           (uint8_t)LAB_TASK_PRIO, (int8_t)-1,
+                                           (uint16_t)LAB_TASK_STACK);
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_AUDIO_LAB,
+                                        DASHCDG_BADGE_EXEC_HEALTH_OK, "task_up");
     const esp_timer_create_args_t tcfg = {
         .callback = &lab_pcm_timer_cb,
         .arg = NULL,

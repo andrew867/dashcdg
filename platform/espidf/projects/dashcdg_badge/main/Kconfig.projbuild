@@ -20,6 +20,16 @@ menu "DashCDG badge"
             On timeout the publisher returns ESP_ERR_TIMEOUT and the caller logs/drops; heartbeats
             use a non-blocking attempt and silently skip on contention.
 
+    config DASHCDG_BADGE_EXEC_WIFI_DHCP_TIMEOUT_MS
+        int "Executive: boot DHCP timeout (ms) before publishing BOOT_WIFI_DHCP_TIMEOUT"
+        range 1000 60000
+        default 10000
+        help
+            Latched boot fact. If the saved-credentials connect succeeds (WIFI_EVENT_STA_CONNECTED)
+            but no IP_EVENT_STA_GOT_IP arrives within this window, badge_exec publishes
+            BOOT_WIFI_DHCP_TIMEOUT and marks SUB_WIFI_STA as TIMEOUT. The background reconnect task
+            continues running; this bit only feeds the orchestrator's nominal/degraded decision.
+
     config DASHCDG_BADGE_OPUS_MONO_ONLY
         bool "Opus RX: mono decoder only (saves internal RAM)"
         default y

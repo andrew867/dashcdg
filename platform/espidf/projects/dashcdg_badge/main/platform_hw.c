@@ -8,6 +8,7 @@
 
 #include "board_badge_hw.h"
 #include "board_cyd_freenove_32.h"
+#include "badge_exec.h"
 #include "badge_prefs.h"
 #include "badge_rx.h"
 
@@ -1783,6 +1784,9 @@ esp_err_t dashcdg_platform_hw_init(void)
     }
     s_ready = true;
     ESP_LOGI(TAG, "platform hw task started (prio %d)", HW_TASK_PRIO);
+    (void)dashcdg_badge_exec_register_task("dashcdg_hw", s_hw_task,
+                                           (uint8_t)HW_TASK_PRIO, (int8_t)-1,
+                                           (uint16_t)HW_TASK_STACK);
     return ESP_OK;
 }
 

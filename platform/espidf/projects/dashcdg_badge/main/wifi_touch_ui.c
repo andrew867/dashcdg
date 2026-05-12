@@ -18,12 +18,68 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "badge_exec.h"
 #include "badge_ui_flair.h"
 #include "display_lvgl.h"
 #include "nav.h"
 #include "platform_hw.h"
 #include "badge_rx.h"
+#include "esp_timer.h"
 #include "wifi_touch_ui.h"
+
+/*
+ * DHCP timeout for the boot orchestrator: armed when the saved-credentials connect succeeds, fired
+ * once if IP_EVENT_STA_GOT_IP hasn't arrived in CONFIG_DASHCDG_BADGE_EXEC_WIFI_DHCP_TIMEOUT_MS, and
+ * cancelled the moment we see GOT_IP. We only arm once per boot: the BOOT_WIFI_DHCP_TIMEOUT bit is
+ * a latched boot fact, not a runtime "is the link healthy?" signal.
+ */
+#ifndef CONFIG_DASHCDG_BADGE_EXEC_WIFI_DHCP_TIMEOUT_MS
+#define CONFIG_DASHCDG_BADGE_EXEC_WIFI_DHCP_TIMEOUT_MS 10000
+#endif
+static esp_timer_handle_t s_boot_dhcp_timer;
+static bool s_boot_dhcp_armed;
+static bool s_boot_wifi_got_ip;
+
+static void boot_dhcp_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_boot_wifi_got_ip) {
+        return;
+    }
+    (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_DHCP_TIMEOUT,
+                                                "no_got_ip_within_timeout");
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
+                                        DASHCDG_BADGE_EXEC_HEALTH_TIMEOUT, "dhcp_timeout");
+}
+
+static void boot_dhcp_timer_arm_once(void)
+{
+    if (s_boot_dhcp_armed || s_boot_wifi_got_ip) {
+        return;
+    }
+    if (s_boot_dhcp_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = boot_dhcp_timer_cb,
+            .name = "boot_dhcp_to",
+        };
+        if (esp_timer_create(&args, &s_boot_dhcp_timer) != ESP_OK) {
+            s_boot_dhcp_timer = NULL;
+            return;
+        }
+    }
+    if (esp_timer_start_once(s_boot_dhcp_timer,
+                             (uint64_t)CONFIG_DASHCDG_BADGE_EXEC_WIFI_DHCP_TIMEOUT_MS * 1000ULL) == ESP_OK) {
+        s_boot_dhcp_armed = true;
+    }
+}
+
+static void boot_dhcp_timer_cancel(void)
+{
+    if (s_boot_dhcp_timer != NULL && s_boot_dhcp_armed) {
+        (void)esp_timer_stop(s_boot_dhcp_timer);
+        s_boot_dhcp_armed = false;
+    }
+}
 
 static const char *TAG = "wifi_ui";
 static bool s_wifi_driver_ready;
@@ -231,6 +287,9 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         } else {
             ui_statusf("Disconnected\n(tap Connect after Scan)");
         }
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
+                                            DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                            "disconnected");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         /* Fresh DHCP on each association avoids stale lwIP client state / odd subnets on some APs. */
         esp_netif_t *na = s_wifi_sta_netif ? s_wifi_sta_netif : esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -242,11 +301,22 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             }
         }
         wifi_touch_clamp_ps_none_if_rx_active();
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_CONNECTING,
+                                                    "sta_connected_awaiting_ip");
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
+                                            DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                            "awaiting_ip");
+        boot_dhcp_timer_arm_once();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ui_statusf("Online\nIP: " IPSTR, IP2STR(&ev->ip_info.ip));
         /* OpenWrt mcast-to-unicast: re-bind STA UDP + IGMP after DHCP (RX may have started with no IP). */
         wifi_touch_clamp_ps_none_if_rx_active();
+        s_boot_wifi_got_ip = true;
+        boot_dhcp_timer_cancel();
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_GOT_IP, "got_ip");
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
+                                            DASHCDG_BADGE_EXEC_HEALTH_OK, "got_ip");
         dashcdg_badge_rx_notify_sta_got_ip();
 
         wifi_config_t wc = {0};
@@ -512,6 +582,10 @@ static esp_err_t try_auto_connect_saved(void)
     char ssid[65] = {0};
     char psk[65] = {0};
     if (nvs_load_creds(ssid, sizeof(ssid), psk, sizeof(psk)) != ESP_OK) {
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_NO_CREDS,
+                                                    "no_saved_creds");
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_STA,
+                                            DASHCDG_BADGE_EXEC_HEALTH_DEGRADED, "no_saved_creds");
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -598,6 +672,9 @@ static void wifi_reconn_task_start_once(void)
         s_reconn_task = NULL;
     } else {
         ESP_LOGI(TAG, "wifi_reconn: background reconnect every 2–5 s when disconnected + creds saved");
+        (void)dashcdg_badge_exec_register_task("wifi_reconn", s_reconn_task,
+                                               (uint8_t)WIFI_RECONN_TASK_PRIO, (int8_t)-1,
+                                               (uint16_t)WIFI_RECONN_STACK_WORDS);
     }
 }
 
@@ -636,6 +713,9 @@ esp_err_t dashcdg_wifi_ensure_init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi_start");
 
     s_wifi_driver_ready = true;
+    (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_DRV_OK, "wifi_start_ok");
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_WIFI_DRV,
+                                        DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
     wifi_reconn_task_start_once();
     return ESP_OK;
 }

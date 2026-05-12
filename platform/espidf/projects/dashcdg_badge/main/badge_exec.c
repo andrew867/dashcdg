@@ -227,6 +227,133 @@ esp_err_t dashcdg_badge_exec_set_boot_complete(bool degraded, const char *reason
     return ESP_OK;
 }
 
+int dashcdg_badge_exec_get_boot_complete_state(void)
+{
+    if (!s_state.initialized) {
+        return 0;
+    }
+    uint32_t bits = (uint32_t)xEventGroupGetBits(s_state.boot_evt);
+    if (bits & DASHCDG_BADGE_EXEC_BOOT_COMPLETE_NOMINAL) {
+        return 1;
+    }
+    if (bits & DASHCDG_BADGE_EXEC_BOOT_COMPLETE_DEGRADED) {
+        return 2;
+    }
+    return 0;
+}
+
+/*
+ * Build a short human-readable reason describing why the boot was DEGRADED. Each contributing bit
+ * adds its short tag to a comma-separated list. NOMINAL boots produce "ok".
+ */
+static void badge_exec_format_boot_reason(uint32_t bits, bool degraded,
+                                          char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0U) {
+        return;
+    }
+    if (!degraded) {
+        snprintf(out, out_len, "ok");
+        return;
+    }
+    size_t off = 0;
+    out[0] = '\0';
+
+#define BADGE_EXEC_REASON_APPEND(bit_mask, tag) do { \
+    if ((bits & (bit_mask)) != 0U && off + 1 < out_len) { \
+        int n = snprintf(out + off, out_len - off, "%s%s", (off > 0U) ? "," : "", (tag)); \
+        if (n > 0) { off += (size_t)n; } \
+    } \
+} while (0)
+
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_NVS_FATAL, "nvs_fatal");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_NVS_RECOVERED, "nvs_recovered");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_DISPLAY_FATAL, "display_fatal");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_WIFI_NO_CREDS, "wifi_no_creds");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_WIFI_DHCP_TIMEOUT, "wifi_dhcp_timeout");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_HW_PARTIAL, "hw_partial");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_TOUCH_CAL_REQUIRED, "touch_cal_required");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_RX_NO_CDG_HEAP, "rx_no_cdg_heap");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_DAC_DEGRADED, "dac_degraded");
+    BADGE_EXEC_REASON_APPEND(DASHCDG_BADGE_EXEC_BOOT_RX_AUDIO_ONLY_OK, "rx_audio_only");
+
+#undef BADGE_EXEC_REASON_APPEND
+
+    if (off == 0U) {
+        snprintf(out, out_len, "degraded");
+    }
+}
+
+esp_err_t dashcdg_badge_exec_decide_boot_complete(void)
+{
+    if (!s_state.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_state.boot_complete_published) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint32_t bits = (uint32_t)xEventGroupGetBits(s_state.boot_evt);
+
+    const uint32_t nvs_any = DASHCDG_BADGE_EXEC_BOOT_NVS_OK | DASHCDG_BADGE_EXEC_BOOT_NVS_RECOVERED;
+    const uint32_t touch_any = DASHCDG_BADGE_EXEC_BOOT_TOUCH_OK | DASHCDG_BADGE_EXEC_BOOT_TOUCH_CAL_REQUIRED;
+    const uint32_t hw_any = DASHCDG_BADGE_EXEC_BOOT_HW_OK | DASHCDG_BADGE_EXEC_BOOT_HW_PARTIAL;
+
+    bool required_ok =
+        (bits & nvs_any) != 0U &&
+        (bits & DASHCDG_BADGE_EXEC_BOOT_NETIF_OK) != 0U &&
+        (bits & DASHCDG_BADGE_EXEC_BOOT_EVT_LOOP_OK) != 0U &&
+        (bits & DASHCDG_BADGE_EXEC_BOOT_WIFI_DRV_OK) != 0U &&
+        (bits & DASHCDG_BADGE_EXEC_BOOT_DISPLAY_OK) != 0U &&
+        (bits & touch_any) != 0U &&
+        (bits & hw_any) != 0U;
+
+    /* Forced degraded triggers. */
+    const uint32_t degraded_mask =
+        DASHCDG_BADGE_EXEC_BOOT_NVS_RECOVERED |
+        DASHCDG_BADGE_EXEC_BOOT_NVS_FATAL |
+        DASHCDG_BADGE_EXEC_BOOT_DISPLAY_FATAL |
+        DASHCDG_BADGE_EXEC_BOOT_WIFI_NO_CREDS |
+        DASHCDG_BADGE_EXEC_BOOT_WIFI_DHCP_TIMEOUT |
+        DASHCDG_BADGE_EXEC_BOOT_HW_PARTIAL |
+        DASHCDG_BADGE_EXEC_BOOT_TOUCH_CAL_REQUIRED |
+        DASHCDG_BADGE_EXEC_BOOT_RX_NO_CDG_HEAP |
+        DASHCDG_BADGE_EXEC_BOOT_DAC_DEGRADED |
+        DASHCDG_BADGE_EXEC_BOOT_RX_AUDIO_ONLY_OK;
+
+    bool degraded = !required_ok || ((bits & degraded_mask) != 0U);
+
+    char reason[80];
+    badge_exec_format_boot_reason(bits, degraded, reason, sizeof(reason));
+    if (!required_ok) {
+        /* Make it obvious which required bit was missing. */
+        char missing[64];
+        size_t off = 0;
+        missing[0] = '\0';
+#define BADGE_EXEC_MISSING_APPEND(mask, tag) do { \
+    if ((bits & (mask)) == 0U && off + 1 < sizeof(missing)) { \
+        int n = snprintf(missing + off, sizeof(missing) - off, "%s%s", (off > 0U) ? "," : "", (tag)); \
+        if (n > 0) { off += (size_t)n; } \
+    } \
+} while (0)
+        if ((bits & nvs_any) == 0U) { BADGE_EXEC_MISSING_APPEND(nvs_any, "nvs"); }
+        BADGE_EXEC_MISSING_APPEND(DASHCDG_BADGE_EXEC_BOOT_NETIF_OK, "netif");
+        BADGE_EXEC_MISSING_APPEND(DASHCDG_BADGE_EXEC_BOOT_EVT_LOOP_OK, "evt_loop");
+        BADGE_EXEC_MISSING_APPEND(DASHCDG_BADGE_EXEC_BOOT_WIFI_DRV_OK, "wifi_drv");
+        BADGE_EXEC_MISSING_APPEND(DASHCDG_BADGE_EXEC_BOOT_DISPLAY_OK, "display");
+        if ((bits & touch_any) == 0U) { BADGE_EXEC_MISSING_APPEND(touch_any, "touch"); }
+        if ((bits & hw_any) == 0U) { BADGE_EXEC_MISSING_APPEND(hw_any, "hw"); }
+#undef BADGE_EXEC_MISSING_APPEND
+        char merged[sizeof(reason)];
+        snprintf(merged, sizeof(merged), "missing=%s%s%s",
+                 missing,
+                 reason[0] ? "," : "",
+                 reason[0] ? reason : "");
+        return dashcdg_badge_exec_set_boot_complete(true, merged);
+    }
+    return dashcdg_badge_exec_set_boot_complete(degraded, reason);
+}
+
 /* ------------------------------------------------------------------------- */
 /*  Health table                                                             */
 /* ------------------------------------------------------------------------- */

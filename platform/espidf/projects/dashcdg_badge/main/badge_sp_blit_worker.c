@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "badge_exec.h"
 #include "badge_rx.h"
 
 static const char *TAG = "sp_blit";
@@ -108,6 +109,10 @@ void dashcdg_sp_blit_worker_init(void)
     s_inited = 1;
     ESP_LOGI(TAG, "deferred SPI blit worker up (slots=%d prio=%d)", CONFIG_DASHCDG_BADGE_SP_BLIT_POOL_SLOTS,
              CONFIG_DASHCDG_BADGE_SP_BLIT_TASK_PRIO);
+    (void)dashcdg_badge_exec_register_task("sp_blit", s_worker_task,
+                                           (uint8_t)CONFIG_DASHCDG_BADGE_SP_BLIT_TASK_PRIO,
+                                           (int8_t)0,
+                                           (uint16_t)stack_words);
 }
 
 void dashcdg_sp_blit_worker_try_init(void)

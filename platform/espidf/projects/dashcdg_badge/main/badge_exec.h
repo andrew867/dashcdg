@@ -198,6 +198,30 @@ bool dashcdg_badge_exec_wait_boot_all(uint32_t mask, uint32_t timeout_ms);
  */
 esp_err_t dashcdg_badge_exec_set_boot_complete(bool degraded, const char *reason);
 
+/**
+ * Run the default boot-complete decision: look at currently latched boot bits and publish
+ * BOOT_COMPLETE_NOMINAL when every required dependency reports OK and no degraded triggers are
+ * latched; otherwise publish BOOT_COMPLETE_DEGRADED with a reason that lists the contributing
+ * bits. Idempotent (subsequent calls return ESP_ERR_INVALID_STATE).
+ *
+ * Decision rules (see docs/specs/esp32-badge-freertos-executive-refactor-spec.md section 4):
+ *   - Required for NOMINAL:
+ *       (NVS_OK | NVS_RECOVERED) & NETIF_OK & EVT_LOOP_OK & WIFI_DRV_OK & DISPLAY_OK &
+ *       (TOUCH_OK | TOUCH_CAL_REQUIRED) & (HW_OK | HW_PARTIAL).
+ *   - Any of NVS_RECOVERED, WIFI_NO_CREDS, WIFI_DHCP_TIMEOUT, HW_PARTIAL, TOUCH_CAL_REQUIRED,
+ *     RX_NO_CDG_HEAP, DAC_DEGRADED, RX_AUDIO_ONLY_OK forces DEGRADED.
+ *   - DISPLAY_FATAL or NVS_FATAL would have already aborted boot; if either is still set the
+ *     decision falls through to DEGRADED with a fatal reason string (the caller should not be
+ *     proceeding in that case).
+ *   - Audio/video independence: RX_NO_CDG_HEAP and DAC_DEGRADED produce DEGRADED but never FATAL.
+ */
+esp_err_t dashcdg_badge_exec_decide_boot_complete(void);
+
+/**
+ * 0 = not yet decided, 1 = nominal, 2 = degraded.
+ */
+int dashcdg_badge_exec_get_boot_complete_state(void);
+
 /* ------------------------------------------------------------------------- */
 /*  Health table                                                             */
 /* ------------------------------------------------------------------------- */
