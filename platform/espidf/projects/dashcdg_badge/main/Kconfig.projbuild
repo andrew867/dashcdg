@@ -83,6 +83,28 @@ menu "DashCDG badge"
             window does not flood the UART. The structured [exec-trace] line is emitted on the
             same throttle as the ESP_LOGW.
 
+    config DASHCDG_BADGE_DAC_DEGRADE_DROPS
+        int "DAC route: wrong-owner drop count that latches SUB_DAC = DEGRADED"
+        range 8 100000
+        default 256
+        help
+            When dashcdg_platform_hw_dac_route_get_stats.wrong_owner_drops crosses this
+            threshold the platform publishes BOOT_DAC_DEGRADED and transitions SUB_DAC ->
+            DEGRADED ("route_conflict_drops"). The transition is one-shot per boot; the
+            counter keeps climbing for forensics but no further health transitions occur.
+            Audio still attempts to play on the surviving route. Set higher for environments
+            with bursty arbitration; lower for early bring-up to flag misuse aggressively.
+
+    config DASHCDG_BADGE_DAC_DEGRADE_TIMEOUTS
+        int "DAC route: I/O mutex timeout count that latches SUB_DAC = DEGRADED"
+        range 4 100000
+        default 64
+        help
+            Sum of dashcdg_platform_hw_dac_route_get_stats.io_mtx_timeouts_push +
+            io_mtx_timeouts_stop. Crossing this threshold transitions SUB_DAC -> DEGRADED
+            ("route_io_mtx_timeouts"). One-shot per boot; the push path itself remains a
+            bounded wait + drop chunk (so audio glitches rather than the badge wedging).
+
     config DASHCDG_BADGE_OPUS_MONO_ONLY
         bool "Opus RX: mono decoder only (saves internal RAM)"
         default y

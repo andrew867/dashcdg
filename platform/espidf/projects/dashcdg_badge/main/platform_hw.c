@@ -253,6 +253,47 @@ static volatile uint32_t s_dac_route_wrong_owner_drops;
 static volatile uint32_t s_dac_route_io_mtx_timeouts_push;
 static volatile uint32_t s_dac_route_io_mtx_timeouts_stop;
 static volatile uint32_t s_dac_route_claim_conflicts;
+/* T9: one-shot degraded transitions. We promote SUB_DAC -> DEGRADED at most once per boot to
+ * avoid log spam; counters keep accumulating for forensics. */
+static volatile uint8_t s_dac_route_degraded_published;
+
+#ifndef CONFIG_DASHCDG_BADGE_DAC_DEGRADE_DROPS
+#define CONFIG_DASHCDG_BADGE_DAC_DEGRADE_DROPS 256
+#endif
+#ifndef CONFIG_DASHCDG_BADGE_DAC_DEGRADE_TIMEOUTS
+#define CONFIG_DASHCDG_BADGE_DAC_DEGRADE_TIMEOUTS 64
+#endif
+
+static void dac_route_observe_degraded_locked(uint32_t drops,
+                                              uint32_t to_push,
+                                              uint32_t to_stop,
+                                              const char *reason)
+{
+    if (s_dac_route_degraded_published) {
+        return;
+    }
+    if (drops < (uint32_t)CONFIG_DASHCDG_BADGE_DAC_DEGRADE_DROPS &&
+        (to_push + to_stop) < (uint32_t)CONFIG_DASHCDG_BADGE_DAC_DEGRADE_TIMEOUTS) {
+        return;
+    }
+    s_dac_route_degraded_published = 1U;
+    (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_DAC_DEGRADED,
+                                                reason);
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_DAC,
+                                        DASHCDG_BADGE_EXEC_HEALTH_DEGRADED,
+                                        reason);
+    dashcdg_badge_exec_trace("dac_degraded",
+                             "reason=%s drops=%u to_push=%u to_stop=%u",
+                             reason, (unsigned)drops, (unsigned)to_push, (unsigned)to_stop);
+}
+
+static void dac_route_observe_degraded(const char *reason)
+{
+    uint32_t drops = __atomic_load_n(&s_dac_route_wrong_owner_drops, __ATOMIC_RELAXED);
+    uint32_t to_push = __atomic_load_n(&s_dac_route_io_mtx_timeouts_push, __ATOMIC_RELAXED);
+    uint32_t to_stop = __atomic_load_n(&s_dac_route_io_mtx_timeouts_stop, __ATOMIC_RELAXED);
+    dac_route_observe_degraded_locked(drops, to_push, to_stop, reason);
+}
 
 /*
  * T5/T6: bounded waits on the DAC I/O mutex. Push budget is hot-path (per-decoded-PCM-chunk);
@@ -271,6 +312,7 @@ bool dashcdg_platform_hw_dac_route_claim(dashcdg_dac_route_owner_t owner)
     karaoke_dac_io_mutex_init();
     if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_STOP_MS)) != pdTRUE) {
         __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_stop, 1U, __ATOMIC_RELAXED);
+        dac_route_observe_degraded("route_io_mtx_timeouts");
         return false;
     }
     if (s_dac_route_owner == (uint8_t)DASHCDG_DAC_ROUTE_NONE ||
@@ -292,6 +334,7 @@ void dashcdg_platform_hw_dac_route_release(dashcdg_dac_route_owner_t owner)
     karaoke_dac_io_mutex_init();
     if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_STOP_MS)) != pdTRUE) {
         __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_stop, 1U, __ATOMIC_RELAXED);
+        dac_route_observe_degraded("route_io_mtx_timeouts");
         return;
     }
     if (s_dac_route_owner == (uint8_t)owner) {
@@ -1151,6 +1194,7 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
      */
     if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_STOP_MS)) != pdTRUE) {
         __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_stop, 1U, __ATOMIC_RELAXED);
+        dac_route_observe_degraded("route_io_mtx_timeouts");
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
@@ -1193,7 +1237,21 @@ void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
      * synth output into karaoke. Idempotent if already KARAOKE_RX. Failure here is non-fatal:
      * the lab is currently the owner and lab UI is expected to release on screen change.
      */
-    (void)dashcdg_platform_hw_dac_route_claim(DASHCDG_DAC_ROUTE_KARAOKE_RX);
+    bool claimed = dashcdg_platform_hw_dac_route_claim(DASHCDG_DAC_ROUTE_KARAOKE_RX);
+    /*
+     * T9: first successful route claim is also the first "DAC end-to-end is wired" evidence we have
+     * on this boot. Latch BOOT_DAC_OK and SUB_DAC = OK (idempotent: publish_boot_event /
+     * set_health are no-ops on a repeat) so the readiness checklist + telemetry can show the DAC
+     * coming live.  We only do this if we haven't already published DEGRADED -- staying DEGRADED
+     * is sticky on purpose so a one-time threshold breach is visible after recovery.
+     */
+    if (claimed && !s_dac_route_degraded_published) {
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_DAC_OK,
+                                                    "karaoke_rx_claim");
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_DAC,
+                                            DASHCDG_BADGE_EXEC_HEALTH_OK,
+                                            "karaoke_rx_claim");
+    }
 }
 
 /** Caller holds `s_mtx`. Opens or reuses `dac_continuous` for karaoke/lab at `nominal_hz`. */
@@ -1410,6 +1468,7 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
             owner != (uint8_t)DASHCDG_DAC_ROUTE_KARAOKE_RX &&
             owner != (uint8_t)DASHCDG_DAC_ROUTE_AUDIO_LAB) {
             __atomic_fetch_add(&s_dac_route_wrong_owner_drops, 1U, __ATOMIC_RELAXED);
+            dac_route_observe_degraded("route_conflict_drops");
             return;
         }
     }
@@ -1420,6 +1479,7 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
      */
     if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_PUSH_MS)) != pdTRUE) {
         __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_push, 1U, __ATOMIC_RELAXED);
+        dac_route_observe_degraded("route_io_mtx_timeouts");
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
@@ -2203,6 +2263,17 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
      */
     if (!dashcdg_platform_hw_dac_route_claim(DASHCDG_DAC_ROUTE_AUDIO_LAB)) {
         return false;
+    }
+    /*
+     * T9: same latch as the karaoke path -- first successful claim becomes BOOT_DAC_OK if no
+     * degraded transition has already been published. Idempotent and sticky-degraded-friendly.
+     */
+    if (!s_dac_route_degraded_published) {
+        (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_DAC_OK,
+                                                    "audio_lab_claim");
+        (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_DAC,
+                                            DASHCDG_BADGE_EXEC_HEALTH_OK,
+                                            "audio_lab_claim");
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
         dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);

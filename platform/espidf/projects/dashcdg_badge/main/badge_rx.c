@@ -2312,6 +2312,18 @@ static void badge_rx_try_alloc_cdg_jitter(void)
     s_cdg_blit_max_y = DASHCDG_BADGE_RX_VISIBLE_H;
     (void)badge_rx_ensure_blit_scratch();
     ESP_LOGI(TAG, "CDG/jitter buffers allocated (late bind)");
+    /*
+     * T9: formalize low-heap degraded paths. RX may have started in audio-only mode with
+     * SUB_RX_CDG = DEGRADED (no_heap). On a successful late-bind we want the boot-events log
+     * to show that the system recovered: publish BOOT_RX_RESOURCES_OK (latched / idempotent)
+     * and transition SUB_RX_CDG -> OK with a clear reason so the readiness table reflects the
+     * new state and any UI/test that reads the health table observes the recovery.
+     */
+    (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_RX_RESOURCES_OK,
+                                                "cdg_late_bind");
+    (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX_CDG,
+                                        DASHCDG_BADGE_EXEC_HEALTH_OK,
+                                        "late_bind");
 }
 
 /** Apply CDG-heap upgrade attempt from inside the RX task. Owner-only. */
