@@ -59,16 +59,16 @@ The refactor is complete only when all of the following are true:
 | Milestone | State |
 | --- | --- |
 | Documentation package authored | Done |
-| T1 - badge_exec skeleton + task registry | Pending |
-| T2 - boot event publication + orchestrator | Pending |
-| T3 - Wi-Fi event handler de-risking | Pending |
-| T4 - RX owner command queue | Pending |
-| T5 - bounded RX hot-path waits | Pending |
-| T6 - HW owner / DAC arbitration | Pending |
-| T7 - WDT and liveness policy | Pending |
-| T8 - LVGL timer cleanup | Pending |
-| T9 - low-heap / degraded path hardening | Pending |
-| T10 - closeout | Pending |
+| T1 - badge_exec skeleton + task registry | Done |
+| T2 - boot event publication + orchestrator | Done |
+| T3 - Wi-Fi event handler de-risking | Done |
+| T4 - RX owner command queue | Done |
+| T5 - bounded RX hot-path waits | Done |
+| T6 - HW owner / DAC arbitration | Done |
+| T7 - WDT and liveness policy | Done (observe-only; enforce after soak) |
+| T8 - LVGL timer cleanup | Done |
+| T9 - low-heap / degraded path hardening | Done for CDG heap + DAC; audio jitter / ucast dup deferred to T9b once counters exist |
+| T10 - closeout | In progress (status tables refreshed, summary parser fields added) |
 
 ## Non-negotiable review rule
 

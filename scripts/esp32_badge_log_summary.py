@@ -42,6 +42,28 @@ PATTERNS = {
     "audio_only_uart_mtx": re.compile(r"badge_rx:\s+audio_only\s+.*mtx_idle_miss=", re.IGNORECASE),
     # Hardware proof: DAC DMA chunks accepted vs ESP-IDF errors (grep AUDIO_UART_PROOF)
     "audio_uart_proof": re.compile(r"badge_rx:\s+AUDIO_UART_PROOF\s+", re.IGNORECASE),
+    # ---- FreeRTOS executive refactor (T1..T9) ----
+    # T1/T2 boot orchestrator: structured trace line emitted on each bit/health update.
+    "exec_trace_line": re.compile(r"\[exec-trace\]", re.IGNORECASE),
+    "exec_boot_publish": re.compile(r"\[exec-trace\]\s+boot_publish\s+", re.IGNORECASE),
+    "exec_boot_complete_nominal": re.compile(r"\[exec-trace\]\s+boot_complete\s+.*nominal", re.IGNORECASE),
+    "exec_boot_complete_degraded": re.compile(r"\[exec-trace\]\s+boot_complete\s+.*degraded", re.IGNORECASE),
+    "exec_health_degraded": re.compile(r"\[exec-trace\]\s+health\s+.*=degraded", re.IGNORECASE),
+    "exec_health_timeout": re.compile(r"\[exec-trace\]\s+health\s+.*=timeout", re.IGNORECASE),
+    # T2 boot DHCP timer expiry (Wi-Fi STA never got IP within boot window).
+    "exec_wifi_dhcp_timeout": re.compile(r"BOOT_WIFI_DHCP_TIMEOUT|wifi_dhcp_timeout", re.IGNORECASE),
+    # T7 liveness sweep: stall observation lines + enforce transitions.
+    "exec_liveness_stall": re.compile(r"\[exec-trace\]\s+liveness_stall\s+", re.IGNORECASE),
+    "exec_liveness_enforce": re.compile(r"\[exec-trace\]\s+liveness_enforce\s+", re.IGNORECASE),
+    # T8 LVGL tick budget: throttled overrun line per tick name.
+    "exec_ui_tick_over": re.compile(r"\[exec-trace\]\s+ui_tick_over\s+|ui-tick over budget", re.IGNORECASE),
+    # T9 DAC route arbitration degraded transitions.
+    "exec_dac_degraded": re.compile(r"\[exec-trace\]\s+dac_degraded\s+", re.IGNORECASE),
+    # T5/T6 hot-path bounded-wait drops: surfaced via badge_rx_get_stats but also appears as ESP_LOGW.
+    "rx_mtx_timeout_pump": re.compile(r"rx_mtx_pump_timeouts|s_mtx pump timeout", re.IGNORECASE),
+    "rx_mtx_timeout_repair": re.compile(r"rx_mtx_repair_timeouts|s_mtx repair timeout", re.IGNORECASE),
+    # T4 RX command queue back-pressure (commands dropped when q full).
+    "rx_cmd_q_drop": re.compile(r"rx cmd q full:", re.IGNORECASE),
 }
 
 
@@ -85,6 +107,20 @@ def print_table(rows: list[dict[str, int | str]]) -> None:
         "audio_chop_uart_stats",
         "audio_only_uart_mtx",
         "audio_uart_proof",
+        "exec_trace_line",
+        "exec_boot_publish",
+        "exec_boot_complete_nominal",
+        "exec_boot_complete_degraded",
+        "exec_health_degraded",
+        "exec_health_timeout",
+        "exec_wifi_dhcp_timeout",
+        "exec_liveness_stall",
+        "exec_liveness_enforce",
+        "exec_ui_tick_over",
+        "exec_dac_degraded",
+        "rx_mtx_timeout_pump",
+        "rx_mtx_timeout_repair",
+        "rx_cmd_q_drop",
     ]
     widths = {c: len(c) for c in cols}
     for row in rows:

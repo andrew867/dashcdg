@@ -7,6 +7,31 @@
 3. Every tranche must cite test IDs from [`../test/esp32-badge-freertos-executive-test-plan.md`](../test/esp32-badge-freertos-executive-test-plan.md).
 4. Any retained `portMAX_DELAY`, ISR callback, owner bypass, or WDT ambiguity needs a waiver in the spec/hazard docs.
 
+## Status
+
+As-shipped state of each tranche. Each row points at the primary code artifacts so any reviewer
+or follow-on tranche can locate the implementation without grep.
+
+| Tranche | Status | Primary artifacts | Key Kconfig knobs |
+| --- | --- | --- | --- |
+| T0 | DONE | `docs/specs/esp32-badge-freertos-*.md`, `docs/plans/esp32-badge-freertos-*.md`, `docs/test/esp32-badge-freertos-executive-test-plan.md`, `docs/ops/esp32-badge-freertos-*.md` | n/a |
+| T1 | DONE | `main/badge_exec.h`, `main/badge_exec.c`, `main/main.c` | `DASHCDG_BADGE_EXEC_TRACE`, `DASHCDG_BADGE_EXEC_LOCK_TIMEOUT_MS` |
+| T2 | DONE | `main/main.c`, `main/wifi_touch_ui.c` (boot DHCP timer), `main/badge_rx.c`, `main/platform_hw.c`, `main/badge_lab_ym.c` | `DASHCDG_BADGE_EXEC_WIFI_DHCP_TIMEOUT_MS` |
+| T3 | DONE | `main/wifi_touch_ui.c` (`wifi_owner_task_fn`, `wifi_owner_q`) | n/a |
+| T4 | DONE | `main/badge_rx.c` (`badge_rx_cmd_t`, `s_rx_cmd_q`, `badge_rx_drain_commands`), `main/badge_rx.h` (`rx_cmd_q_*` stats) | n/a |
+| T5 | DONE | `main/badge_rx.c` (`BADGE_RX_PUMP_MUTEX_TICKS`, `BADGE_RX_REPAIR_MUTEX_TICKS`, `BADGE_RX_SESSION_RESET_MTX_MS`), `main/badge_sp_blit_worker.c` (`SP_BLIT_WORKER_RX_WAIT_MS`) | `DASHCDG_BADGE_RX_PUMP_MUTEX_MS`, `DASHCDG_BADGE_RX_REPAIR_MUTEX_MS` |
+| T6 | DONE | `main/platform_hw.c` (`dac_route_*`), `main/platform_hw.h` (`dashcdg_dac_route_owner_t`, `_claim`, `_release`, `_get_stats`) | n/a |
+| T7 | DONE | `main/badge_exec.c` (`badge_exec_liveness_sweep_cb`, `dashcdg_badge_exec_liveness_*`), `main/main.c` (`liveness_start`) | `DASHCDG_BADGE_EXEC_LIVENESS_SWEEP_MS`, `DASHCDG_BADGE_EXEC_LIVENESS_STALL_MS`, `DASHCDG_BADGE_EXEC_LIVENESS_ENFORCE` |
+| T8 | DONE | `main/badge_exec.c` (`dashcdg_badge_exec_ui_tick_observe`), `main/karaoke_ui.c` (`on_tick` instrumentation) | `DASHCDG_BADGE_UI_TICK_OVERRUN_US`, `DASHCDG_BADGE_UI_TICK_LOG_THROTTLE_MS` |
+| T9 | DONE (DAC + CDG heap) | `main/badge_rx.c` (CDG late-bind health), `main/platform_hw.c` (`dac_route_observe_degraded`) | `DASHCDG_BADGE_DAC_DEGRADE_DROPS`, `DASHCDG_BADGE_DAC_DEGRADE_TIMEOUTS` |
+| T10 | IN PROGRESS | `scripts/esp32_badge_log_summary.py` (exec_* fields), this status table | n/a |
+
+Deferred from T9 to a follow-on tranche (T9b): audio jitter underrun and unicast-dup loss
+threshold-based degraded transitions. The required per-window counters
+(`audio_jb_underruns`, `ucast_dup_drops`) are not yet plumbed through the public RX stats
+struct. T10 ships the parser fields for the existing counters so a real soak run can size the
+thresholds before code wires the transitions.
+
 ## T0 - Baseline and forbidden-pattern gate
 
 ### Goal
