@@ -138,6 +138,46 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
  */
 void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void);
 
+/**
+ * DAC route arbitration (T6 - executive refactor). The same `dac_continuous` channel and amp path
+ * are shared between karaoke RX (decoded multicast PCM) and the audio lab (YM/Mary synth). Before
+ * T6 the two producers raced on `s_karaoke_dac_io_mtx` with portMAX_DELAY waits and there was no
+ * explicit owner -- a stale stream could chop the other's output.
+ *
+ * The route owner is a single enum (NONE / KARAOKE_RX / AUDIO_LAB). Producers MUST claim the route
+ * before opening the DAC and MUST release it after stop. Claims are idempotent for the same owner.
+ *
+ * Claim returns:
+ *   - true when the route is now held by `owner` (was NONE, or was already `owner`).
+ *   - false when a different owner holds the route. Caller must back off.
+ *
+ * Release is a no-op when the caller is not the current owner (safe to call defensively).
+ *
+ * See docs/specs/esp32-badge-freertos-executive-refactor-spec.md §3.5 (HW owner / DAC route).
+ */
+typedef enum {
+    DASHCDG_DAC_ROUTE_NONE = 0,
+    DASHCDG_DAC_ROUTE_KARAOKE_RX = 1,
+    DASHCDG_DAC_ROUTE_AUDIO_LAB = 2,
+} dashcdg_dac_route_owner_t;
+
+bool dashcdg_platform_hw_dac_route_claim(dashcdg_dac_route_owner_t owner);
+void dashcdg_platform_hw_dac_route_release(dashcdg_dac_route_owner_t owner);
+dashcdg_dac_route_owner_t dashcdg_platform_hw_dac_route_owner(void);
+
+/**
+ * Bounded-wait + arbitration counters for telemetry / soak triage. Pass NULL for any field
+ * you don't care about.
+ *   - wrong_owner_drops      : push_mono_s16 calls rejected because the wrong owner holds the route
+ *   - io_mtx_timeouts_push   : s_karaoke_dac_io_mtx bounded-wait timeouts in the PCM push path
+ *   - io_mtx_timeouts_stop   : s_karaoke_dac_io_mtx bounded-wait timeouts in the DAC stop path
+ *   - route_claim_conflicts  : claim() calls that returned false because a different owner held the route
+ */
+void dashcdg_platform_hw_dac_route_get_stats(uint32_t *wrong_owner_drops,
+                                             uint32_t *io_mtx_timeouts_push,
+                                             uint32_t *io_mtx_timeouts_stop,
+                                             uint32_t *route_claim_conflicts);
+
 /** Karaoke RX line-out volume 0–100 (linear; 0 ⇒ mute path / amp off request). */
 uint8_t dashcdg_platform_hw_get_karaoke_output_volume_pct(void);
 void dashcdg_platform_hw_set_karaoke_output_volume_pct(uint8_t pct_0_100);

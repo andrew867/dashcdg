@@ -241,6 +241,89 @@ static void karaoke_dac_io_mutex_init(void)
     }
 }
 
+/*
+ * DAC route arbitration (T6 - executive refactor).
+ * The route owner enum is protected by `s_karaoke_dac_io_mtx`: claim/release acquire the same
+ * mutex used by push/stop so an owner transition cannot race a DMA write.
+ *
+ * Counters are __atomic so the get_stats() reader does not need the mutex.
+ */
+static volatile uint8_t s_dac_route_owner; /* dashcdg_dac_route_owner_t */
+static volatile uint32_t s_dac_route_wrong_owner_drops;
+static volatile uint32_t s_dac_route_io_mtx_timeouts_push;
+static volatile uint32_t s_dac_route_io_mtx_timeouts_stop;
+static volatile uint32_t s_dac_route_claim_conflicts;
+
+/*
+ * T5/T6: bounded waits on the DAC I/O mutex. Push budget is hot-path (per-decoded-PCM-chunk);
+ * stop budget is lifecycle (caller can tolerate a longer wait but must not block forever).
+ */
+#define DASHCDG_DAC_IO_MTX_PUSH_MS 80U
+#define DASHCDG_DAC_IO_MTX_STOP_MS 500U
+
+bool dashcdg_platform_hw_dac_route_claim(dashcdg_dac_route_owner_t owner)
+{
+    bool ok = false;
+
+    if (owner == DASHCDG_DAC_ROUTE_NONE) {
+        return false;
+    }
+    karaoke_dac_io_mutex_init();
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_STOP_MS)) != pdTRUE) {
+        __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_stop, 1U, __ATOMIC_RELAXED);
+        return false;
+    }
+    if (s_dac_route_owner == (uint8_t)DASHCDG_DAC_ROUTE_NONE ||
+        s_dac_route_owner == (uint8_t)owner) {
+        s_dac_route_owner = (uint8_t)owner;
+        ok = true;
+    } else {
+        __atomic_fetch_add(&s_dac_route_claim_conflicts, 1U, __ATOMIC_RELAXED);
+    }
+    xSemaphoreGive(s_karaoke_dac_io_mtx);
+    return ok;
+}
+
+void dashcdg_platform_hw_dac_route_release(dashcdg_dac_route_owner_t owner)
+{
+    if (owner == DASHCDG_DAC_ROUTE_NONE) {
+        return;
+    }
+    karaoke_dac_io_mutex_init();
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_STOP_MS)) != pdTRUE) {
+        __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_stop, 1U, __ATOMIC_RELAXED);
+        return;
+    }
+    if (s_dac_route_owner == (uint8_t)owner) {
+        s_dac_route_owner = (uint8_t)DASHCDG_DAC_ROUTE_NONE;
+    }
+    xSemaphoreGive(s_karaoke_dac_io_mtx);
+}
+
+dashcdg_dac_route_owner_t dashcdg_platform_hw_dac_route_owner(void)
+{
+    return (dashcdg_dac_route_owner_t)__atomic_load_n(&s_dac_route_owner, __ATOMIC_ACQUIRE);
+}
+
+void dashcdg_platform_hw_dac_route_get_stats(uint32_t *wrong_owner_drops,
+                                             uint32_t *io_mtx_timeouts_push,
+                                             uint32_t *io_mtx_timeouts_stop,
+                                             uint32_t *route_claim_conflicts)
+{
+    if (wrong_owner_drops != NULL) {
+        *wrong_owner_drops = __atomic_load_n(&s_dac_route_wrong_owner_drops, __ATOMIC_RELAXED);
+    }
+    if (io_mtx_timeouts_push != NULL) {
+        *io_mtx_timeouts_push = __atomic_load_n(&s_dac_route_io_mtx_timeouts_push, __ATOMIC_RELAXED);
+    }
+    if (io_mtx_timeouts_stop != NULL) {
+        *io_mtx_timeouts_stop = __atomic_load_n(&s_dac_route_io_mtx_timeouts_stop, __ATOMIC_RELAXED);
+    }
+    if (route_claim_conflicts != NULL) {
+        *route_claim_conflicts = __atomic_load_n(&s_dac_route_claim_conflicts, __ATOMIC_RELAXED);
+    }
+}
+
 /** Count full DMA chunk submits (UART proof: should climb ~eff_hz/chunk_samps per second at 48 k). */
 static uint32_t s_karaoke_dac_dma_chunks_ok;
 static uint32_t s_karaoke_dac_dma_write_err;
@@ -1061,7 +1144,13 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
      * Must drain competing producers (`karaoke_dac_push`, idle pad, lab PCM) before tearing down DMA.
      * Caller holds `s_mtx` (platform); I/O mutex is inner â same ordering as push (I/O only).
      */
-    if (xSemaphoreTake(s_karaoke_dac_io_mtx, portMAX_DELAY) != pdTRUE) {
+    /*
+     * T5/T6: bounded wait. portMAX_DELAY here was the legacy fallback; on timeout we abort
+     * the stop and count it -- the next caller retries. Avoids unbounded teardown stalls when
+     * a buggy producer holds the I/O mutex.
+     */
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_STOP_MS)) != pdTRUE) {
+        __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_stop, 1U, __ATOMIC_RELAXED);
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
@@ -1099,6 +1188,12 @@ void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
     }
     amp_set_run(true);
     xSemaphoreGive(s_mtx);
+    /*
+     * T6: claim the DAC route for karaoke RX so a stale audio-lab handoff cannot keep streaming
+     * synth output into karaoke. Idempotent if already KARAOKE_RX. Failure here is non-fatal:
+     * the lab is currently the owner and lab UI is expected to release on screen change.
+     */
+    (void)dashcdg_platform_hw_dac_route_claim(DASHCDG_DAC_ROUTE_KARAOKE_RX);
 }
 
 /** Caller holds `s_mtx`. Opens or reuses `dac_continuous` for karaoke/lab at `nominal_hz`. */
@@ -1282,6 +1377,11 @@ void dashcdg_platform_hw_karaoke_dac_stop(void)
     s_karaoke_dac_trim_ppm = 0;
     beep_mute_locked();
     xSemaphoreGive(s_mtx);
+    /*
+     * T6: release the DAC route after stop so the audio lab can claim it on the next entry.
+     * Defensive: only releases if karaoke RX is the current owner (no-op otherwise).
+     */
+    dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_KARAOKE_RX);
 }
 
 void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t samples)
@@ -1296,7 +1396,30 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
         return;
     }
     karaoke_dac_io_mutex_init();
-    if (xSemaphoreTake(s_karaoke_dac_io_mtx, portMAX_DELAY) != pdTRUE) {
+    /*
+     * T6: route arbitration. If a different owner currently holds the DAC route we drop the chunk
+     * (counted via wrong_owner_drops). The push function is shared between karaoke RX and the
+     * audio lab; both legitimate owners pass this check because they each claim() before opening.
+     * If owner is still NONE (e.g. legacy caller forgot to claim), we still allow the push for
+     * backward compatibility so existing audio paths keep working.
+     */
+    {
+        uint8_t owner = __atomic_load_n(&s_dac_route_owner, __ATOMIC_ACQUIRE);
+
+        if (owner != (uint8_t)DASHCDG_DAC_ROUTE_NONE &&
+            owner != (uint8_t)DASHCDG_DAC_ROUTE_KARAOKE_RX &&
+            owner != (uint8_t)DASHCDG_DAC_ROUTE_AUDIO_LAB) {
+            __atomic_fetch_add(&s_dac_route_wrong_owner_drops, 1U, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+    /*
+     * T5/T6: bounded wait (was portMAX_DELAY). On timeout we drop the PCM chunk
+     * (counted via dac_route.io_mtx_timeouts_push). Decoded audio loss is preferable to
+     * a hung push -- WDT must still be able to detect a stuck DAC writer.
+     */
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(DASHCDG_DAC_IO_MTX_PUSH_MS)) != pdTRUE) {
+        __atomic_fetch_add(&s_dac_route_io_mtx_timeouts_push, 1U, __ATOMIC_RELAXED);
         return;
     }
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
@@ -2073,7 +2196,16 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
     if (!s_mtx) {
         return false;
     }
+    /*
+     * T6: claim DAC route for AUDIO_LAB before opening. If karaoke RX still holds the route
+     * (user shouldn't have been able to get here, but be defensive), refuse the start cleanly.
+     * Counter route_claim_conflicts surfaces this in telemetry.
+     */
+    if (!dashcdg_platform_hw_dac_route_claim(DASHCDG_DAC_ROUTE_AUDIO_LAB)) {
+        return false;
+    }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
+        dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
         return false;
     }
 #if CONFIG_IDF_TARGET_ESP32
@@ -2081,6 +2213,7 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
         TickType_t now = xTaskGetTickCount();
         if (s_karaoke_dac_begin_cool_until_tick != (TickType_t)0 && now < s_karaoke_dac_begin_cool_until_tick) {
             xSemaphoreGive(s_mtx);
+            dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
             return false;
         }
     }
@@ -2093,6 +2226,10 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
         __atomic_store_n(&s_lab_pcm_streaming, true, __ATOMIC_RELEASE);
     }
     xSemaphoreGive(s_mtx);
+    if (!ok) {
+        /* Release route so karaoke RX (or a retry) can claim. */
+        dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
+    }
     return ok;
 #else
     /* Play demo: abort UI triad state; lab owns IO26 while streaming. */
@@ -2118,9 +2255,12 @@ void dashcdg_platform_hw_lab_pcm_stream_end(void)
      * would silence UI beeps forever (beep_seq_tick returns early while streaming is true). */
     __atomic_store_n(&s_lab_pcm_streaming, false, __ATOMIC_RELEASE);
     if (!s_mtx) {
+        /* T6: still release the route so a stuck flag-only state cannot keep karaoke locked out. */
+        dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
         return;
     }
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(120)) != pdTRUE) {
+        dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
         return;
     }
 #if CONFIG_IDF_TARGET_ESP32
@@ -2129,6 +2269,8 @@ void dashcdg_platform_hw_lab_pcm_stream_end(void)
     beep_seq_abort_locked();
     beep_mute_locked();
     xSemaphoreGive(s_mtx);
+    /* T6: release route after stop. */
+    dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
 }
 
 void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8)
