@@ -387,6 +387,15 @@ static struct dashcdg_cdg_batch_jitter_buffer *s_jb;
 static struct dashcdg_media_clock s_mclk;
 
 static struct dashcdg_audio_jitter_buffer *s_audio_jb;
+/**
+ * Lock-free mirrors of audio jitter occupancy / capacity. Maintained by the RX drain hot path
+ * so HUD readers (LVGL `karaoke_ui`, `get_stats`) can render a live value even when `s_mtx` is
+ * busy. The pre-fix path returned the last-mutex-locked `s_stats.audio_jb_pending_slots` on
+ * fallback, which is exactly the "JB sticky at 100%" bug the user reports — the snapshot froze
+ * at whatever was captured during the last successful 5 ms wait, often right after a burst.
+ */
+static volatile uint16_t s_audio_jb_pending_slots_atomic;
+static volatile uint16_t s_audio_jb_capacity_atomic;
 /** Decode PCM staging (size `s_pcm_scratch_samples` int16_t samples). */
 static int16_t *s_amr_pcm48_scratch;
 static size_t s_pcm_scratch_samples;
@@ -1440,6 +1449,34 @@ static void badge_rx_uart_touch_jb_peak_for_chop(void)
         if (o > s_uart_audio_chop_jb_peak) {
             s_uart_audio_chop_jb_peak = o;
         }
+    }
+}
+
+/**
+ * Refresh the lock-free audio-jitter occupancy / capacity mirrors. Anyone who has just inserted
+ * a chunk, drained a chunk, cleared, or resized the ring should call this so HUD readers (LVGL
+ * `karaoke_ui`, `get_stats` 5 ms-timeout fallback) never freeze at a stale snapshot. Cheap
+ * (couple of word stores); safe to call unconditionally even with `s_audio_jb == NULL`.
+ */
+static inline void badge_rx_audio_jb_mirror_publish(void)
+{
+    if (s_audio_jb == NULL) {
+        __atomic_store_n(&s_audio_jb_pending_slots_atomic, 0U, __ATOMIC_RELAXED);
+        __atomic_store_n(&s_audio_jb_capacity_atomic, 0U, __ATOMIC_RELAXED);
+        return;
+    }
+    {
+        size_t occ = dashcdg_audio_jitter_occupied_count(s_audio_jb);
+        size_t cap = dashcdg_audio_jitter_capacity(s_audio_jb);
+
+        if (occ > 0xFFFFU) {
+            occ = 0xFFFFU;
+        }
+        if (cap > 0xFFFFU) {
+            cap = 0xFFFFU;
+        }
+        __atomic_store_n(&s_audio_jb_pending_slots_atomic, (uint16_t)occ, __ATOMIC_RELAXED);
+        __atomic_store_n(&s_audio_jb_capacity_atomic, (uint16_t)cap, __ATOMIC_RELAXED);
     }
 }
 
@@ -2548,6 +2585,7 @@ static void badge_rx_free_audio_jitter(void)
         s_amr_pcm48_scratch = NULL;
         s_pcm_scratch_samples = 0U;
     }
+    badge_rx_audio_jb_mirror_publish();
 }
 
 static void badge_rx_resize_audio_locked(size_t slots)
@@ -3771,6 +3809,13 @@ static void badge_rx_drain_v4_audio(uint64_t local_now_ms)
         plc_ring = BADGE_RX_AUDIO_DRAIN_GUARD_AUDIO_ONLY;
     }
     badge_rx_drain_v4_audio_budget(local_now_ms, guard_steps, plc_ring);
+    /*
+     * Single end-of-drain publish keeps the HUD mirror live without spraying atomic stores into
+     * every note_applied / PLC branch above.  Pairs with the post-insert publish in
+     * `handle_v4_audio_chunk` so the HUD reads the most recent occupancy after either side of
+     * the producer / consumer pair runs.
+     */
+    badge_rx_audio_jb_mirror_publish();
 }
 
 static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64_t local_now_ms)
@@ -3832,6 +3877,12 @@ static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64
         return;
     }
     /*
+     * Successful insert: publish the live occupancy/capacity so the karaoke HUD does not show a
+     * stale snapshot (the "JB stays at 100%" symptom -- get_stats fallback used to return whatever
+     * s_stats was after the previous mutex-held write, which often captured a burst peak).
+     */
+    badge_rx_audio_jb_mirror_publish();
+    /*
      * Do not drain here: `badge_rx_pump_main_fd` holds `s_mtx` for the whole datagram. Deferring
      * decode/PLC until after `xSemaphoreGive` shortens the critical section and lets the next
      * `recvfrom` run sooner (see `s_pump_defer_audio_drain`).
@@ -3862,7 +3913,15 @@ static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
         dashcdg_audio_jitter_clear(s_audio_jb);
     }
     badge_rx_amr_decoder_reset();
-    dashcdg_platform_hw_karaoke_dac_stop();
+    /*
+     * Track / session change: do NOT tear down the DAC handle here. `karaoke_dac_stop` calls
+     * `dac_continuous_disable` + `dac_continuous_del_channels`, which produced the audible "pop"
+     * on every new song (and again when the user reported "click when the track name populates" —
+     * same code path, just the first session). `session_break` emits one DMA chunk of DC silence
+     * (~13 ms) so the previous waveform tails off cleanly, then leaves the DAC running so the next
+     * push slips into the live DMA ring with no re-open / amp churn.
+     */
+    dashcdg_platform_hw_karaoke_dac_session_break();
     s_audio_decode_primed = 0;
     badge_rx_audio_last_mono_reset();
     s_last_audio_jitter_apply_local_ms = 0U;
@@ -4109,7 +4168,12 @@ static void handle_clock_sync(const struct dashcdg_packet_view *view, uint64_t l
             dashcdg_audio_jitter_clear(s_audio_jb);
         }
         badge_rx_amr_decoder_reset();
-        dashcdg_platform_hw_karaoke_dac_stop();
+        /*
+         * Resume from pause: same pop fix as session reset — keep the DAC handle alive, just
+         * tail-flush with DC silence.  Tearing down `dac_continuous` here clicked every time the
+         * sender un-paused.
+         */
+        dashcdg_platform_hw_karaoke_dac_session_break();
         s_audio_decode_primed = 0;
         badge_rx_audio_last_mono_reset();
         s_last_audio_jitter_apply_local_ms = 0U;
@@ -4935,19 +4999,16 @@ static void badge_rx_task(void *arg)
         dashcdg_badge_exec_task_heartbeat("badge_rx");
 #if defined(ESP_PLATFORM)
         /*
-         * Something (NVS default, coexist, or a race with screen PM) can re-enable modem PS while RX
-         * is active — multicast delivery suffers. Re-clamp periodically; no-op when already NONE.
-         * (1.5 s: faster recovery than 5 s if the stack toggles PS after Wi-Fi events.)
+         * Wi-Fi PS is clamped to NONE at three deterministic points:
+         *   1. `wifi_touch_ui::wifi_driver_init_only` right after `esp_wifi_start` (kills the
+         *      boot-time `wifi:pm start, type: 1` window that was dropping multicast).
+         *   2. `platform_hw::dashcdg_platform_hw_on_badge_rx_started` (karaoke entry).
+         *   3. `dashcdg_badge_rx_start` (decoder/socket open path).
+         * We previously also re-clamped here every 1.5 s "in case something toggled PS",
+         * which printed `wifi:Set ps type: 0` thirty times per soak with no observed PS flip
+         * in the log; remove the churn. If we ever see PS_MIN_MODEM creep back, add a wifi
+         * event-driven clamp instead of a polling one.
          */
-        {
-            static uint64_t s_last_wifi_ps_clamp_ms;
-            uint64_t t = dashcdg_clock_now_ms();
-
-            if (s_last_wifi_ps_clamp_ms == 0U || t - s_last_wifi_ps_clamp_ms >= 1500U) {
-                s_last_wifi_ps_clamp_ms = t;
-                (void)esp_wifi_set_ps(WIFI_PS_NONE);
-            }
-        }
 #endif
         fd_set rfds;
         struct timeval tv;
@@ -6061,6 +6122,8 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
             s_stats.audio_jb_pending_slots = 0U;
             s_stats.audio_slots_capacity = 0U;
         }
+        /* Refresh the lock-free mirrors while we hold the mutex (cheap; keeps both consistent). */
+        badge_rx_audio_jb_mirror_publish();
         s_stats.repair_nack_enabled = s_repair_nack_enabled;
         s_stats.v4_stats_tx_enabled = s_v4_stats_tx_enabled;
         s_stats.v4_rx_stats_suppressed = s_v4_stats_suppressed;
@@ -6077,7 +6140,19 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
         *out = s_stats;
         xSemaphoreGive(s_mtx);
     } else {
+        /*
+         * Mutex contended: previously we returned the last-mutex-held `s_stats` snapshot, which
+         * is exactly the "JB sticky at 100%" bug — `audio_jb_pending_slots` froze at whatever
+         * was captured during the most recent successful read (often right after a burst peak,
+         * giving the user a permanent 100% display while audio actually drained cleanly).
+         * Override the audio occupancy / capacity fields with the lock-free atomic mirrors so
+         * the HUD reads a fresh live value even when the producer / drain owns the mutex.
+         */
         *out = s_stats;
+        out->audio_jb_pending_slots =
+                (uint32_t)__atomic_load_n(&s_audio_jb_pending_slots_atomic, __ATOMIC_RELAXED);
+        out->audio_slots_capacity =
+                (uint16_t)__atomic_load_n(&s_audio_jb_capacity_atomic, __ATOMIC_RELAXED);
         snap_vdec = s_video_decode_enabled;
         snap_adec = s_audio_decode_enabled;
     }
@@ -6121,6 +6196,7 @@ void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, das
         s_stats.audio_jb_pending_slots = 0U;
         s_stats.audio_slots_capacity = 0U;
     }
+    badge_rx_audio_jb_mirror_publish();
     s_stats.repair_nack_enabled = s_repair_nack_enabled;
     s_stats.v4_stats_tx_enabled = s_v4_stats_tx_enabled;
     s_stats.v4_rx_stats_suppressed = s_v4_stats_suppressed;

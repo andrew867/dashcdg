@@ -52,10 +52,16 @@ CONFIG_LWIP_IPV6=n
 # Wi-Fi RX/TX pools (defaults ~10 static RX + 32/32 dynamic on ESP32).
 # With AMPDU enabled, Espressif recommends keeping static RX buffers at least 6 (below 6 only if
 # AMPDU is off). See ESP-IDF Wi-Fi buffer / QoS docs.
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
-# Slightly leaner than 16/16 to claw internal DRAM for lwIP IGMP + socket layer under Opus/jitter/CYD UI load.
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12
+#
+# Multicast karaoke wire is ~350 packets/s (50 audio + ~300 CDG raw) with bursty AMPDU aggregates;
+# with AMPDU_RX enabled a 64-frame block ack window can require nearly that many RX slots in flight
+# before a `wifi:NaN br=12, 0` driver drop.  Boost dynamic RX from 12 → 24 so the driver does not
+# silently shed multicast packets while badge_rx is busy decoding the previous burst — the user-
+# visible symptom of the old 12-buffer cap was `audio_chop d_amiss=37–88/s` (~75 % audio chunk loss)
+# even at -32 dBm RSSI, which the desktop receiver did not see on the same stream.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=24
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 # AMPDU (802.11n block ack): better airtime efficiency on many APs; uses a bit more Wi-Fi driver RAM for
 # reorder/BA state. Disabled previously for internal-RAM headroom; re-enabled to help RX bursty UDP
 # (multicast karaoke). If Opus init fails more often, try n/n again or lower DYNAMIC_*_BUFFER_NUM slightly.

@@ -1581,6 +1581,53 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void)
     xSemaphoreGive(s_karaoke_dac_io_mtx);
 }
 
+/*
+ * Glitch-free session/pause/resume break.
+ *  - Emit a short DC-silence fade so the running DMA does not snap mid-sample (audible pop on
+ *    track change / resume).
+ *  - Keep the `dac_continuous` handle alive across the break — `dac_continuous_disable` +
+ *    `dac_continuous_del_channels` were the actual source of the pop we used to hear.
+ *  - Caller still clears jitter / decoder state; we just keep the audio pipeline warm so the next
+ *    decoded frame slips into the DMA ring without re-init.
+ */
+void dashcdg_platform_hw_karaoke_dac_session_break(void)
+{
+    size_t chunk;
+
+    karaoke_dac_io_mutex_init();
+    if (xSemaphoreTake(s_karaoke_dac_io_mtx, pdMS_TO_TICKS(40)) != pdTRUE) {
+        return;
+    }
+    if (s_karaoke_dac_handle == NULL) {
+        xSemaphoreGive(s_karaoke_dac_io_mtx);
+        return;
+    }
+    chunk = s_karaoke_dac_chunk_samples;
+    if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
+        chunk = 640U;
+    }
+    if (s_karaoke_dac_fill > 0U) {
+        while (s_karaoke_dac_fill < chunk) {
+            s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
+        }
+        karaoke_dac_note_dma_write_result(
+                karaoke_dac_continuous_write_chunk_locked(s_karaoke_dac_chunk, chunk));
+        s_karaoke_dac_fill = 0U;
+    }
+    /*
+     * ~13 ms of DC silence (one chunk @ 48 kHz) so the previous waveform tails into the DC midpoint
+     * and the next session's first chunk starts from a known midpoint instead of stitching into
+     * mid-cycle samples. Cheap insurance against pops on rapid track/pause transitions.
+     */
+    for (size_t i = 0U; i < chunk; ++i) {
+        s_karaoke_dac_chunk[i] = 128U;
+    }
+    karaoke_dac_note_dma_write_result(
+            karaoke_dac_continuous_write_chunk_locked(s_karaoke_dac_chunk, chunk));
+    s_karaoke_dac_upsample_accum = 0U;
+    xSemaphoreGive(s_karaoke_dac_io_mtx);
+}
+
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
         uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
         uint32_t *pending_pcm_u8_fill_out)
@@ -1625,6 +1672,8 @@ bool dashcdg_platform_hw_karaoke_dac_begin(void)
 }
 
 void dashcdg_platform_hw_karaoke_dac_stop(void) {}
+
+void dashcdg_platform_hw_karaoke_dac_session_break(void) {}
 
 void dashcdg_platform_hw_karaoke_dac_set_trim_ppm(int32_t ppm)
 {

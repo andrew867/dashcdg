@@ -282,12 +282,17 @@ static void wifi_owner_start_once(void)
 
 static bool s_wifi_driver_ready;
 
-/** IDF may re-apply default modem PS on (re)association; keep multicast RX from sleeping the radio. */
+/*
+ * IDF may re-apply default modem PS on (re)association; keep multicast RX from sleeping the radio.
+ * Previously we gated this on `dashcdg_badge_rx_is_running()` so the clamp only fired *after* RX
+ * task came up — but STA_CONNECTED / STA_GOT_IP can land before that, leaving a brief PS_MIN_MODEM
+ * window during which we drop multicast bursts (= audio chop and "JB stays at 100% / wm explodes"
+ * symptom).  The initial clamp in `wifi_driver_init_only` covers boot; this one re-asserts after
+ * every association event so a reconnect can never sneak PS back in.
+ */
 static void wifi_touch_clamp_ps_none_if_rx_active(void)
 {
-    if (dashcdg_badge_rx_is_running()) {
-        (void)esp_wifi_set_ps(WIFI_PS_NONE);
-    }
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
 }
 
 /** ESP-IDF `wifi_config_t` SSID/password are fixed arrays; avoid `strncpy(..., n-1)` — GCC stringop-truncation. */
@@ -942,6 +947,14 @@ esp_err_t dashcdg_wifi_ensure_init(void)
                         "reg ip");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set mode sta");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi_start");
+    /*
+     * ESP-IDF defaults `esp_wifi_start` to `WIFI_PS_MIN_MODEM` (the boot log shows
+     * `wifi:pm start, type: 1` immediately after start).  For our multicast karaoke RX that
+     * one-second-ish PS window starves the audio stream — we measured ~70 % audio chunk loss
+     * with WIFI_PS_MIN active.  Clamp to NONE here so the radio is awake before STA connect /
+     * IP_EVENT_STA_GOT_IP fires; downstream paths (badge_rx, karaoke entry) then trust it.
+     */
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
 
     s_wifi_driver_ready = true;
     (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_WIFI_DRV_OK, "wifi_start_ok");

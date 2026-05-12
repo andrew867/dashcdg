@@ -116,6 +116,13 @@ bool dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(uint32_t nominal_hz);
 /** Back-compat: same as begin_nominal_hz(48000). */
 bool dashcdg_platform_hw_karaoke_dac_begin(void);
 void dashcdg_platform_hw_karaoke_dac_stop(void);
+/**
+ * Glitch-free session/pause/resume break: emit any partial chunk, then a short DC-silence run
+ * so the DMA tails off cleanly without snapping to the next session's first sample. Keeps the
+ * `dac_continuous` handle alive across track changes — the audible pop on session_info / pause
+ * resume was caused by repeated `dac_continuous_disable` + `dac_continuous_del_channels`.
+ */
+void dashcdg_platform_hw_karaoke_dac_session_break(void);
 /** Playback trim in ppm (−500000…500000 typical); applied when opening DAC (integer Hz quantum). */
 void dashcdg_platform_hw_karaoke_dac_set_trim_ppm(int32_t ppm);
 void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t samples);
