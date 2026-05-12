@@ -157,6 +157,12 @@ typedef struct {
     uint32_t rx_mtx_postburst_drain_miss;
     /** LVGL tick cooperative audio-only drains that ran (bounded budget). */
     uint32_t lvgl_coop_audio_drains;
+    /** RX owner command queue: commands dropped because the queue was full (zero-tick send). */
+    uint32_t rx_cmd_q_drops;
+    /** RX owner command queue: peak slots used (high-water mark observed at drain time). */
+    uint16_t rx_cmd_q_high_water;
+    /** RX owner command queue: total commands dequeued and applied by the RX task. */
+    uint32_t rx_cmd_q_applied;
 } dashcdg_badge_rx_stats_t;
 
 #define DASHCDG_BADGE_UCAST_RX_MASK_MEDIA  0x01U

@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_err.h"
@@ -503,6 +504,41 @@ static uint64_t s_last_select_enomem_local_ms;
 static uint64_t s_last_igmp_refresh_local_ms;
 static uint64_t s_igmp_bootstrap_until_local_ms;
 static volatile uint8_t s_sta_got_ip_pending_resync;
+
+/*
+ * RX owner command queue (T4 - executive refactor).
+ *
+ * Public mutation API (set_decode_enabled, apply_rx_tuning_prefs, notify_sta_got_ip,
+ * try_upgrade_cdg_heap) is called from LVGL, Wi-Fi owner, settings UI, and home/karaoke screens.
+ * Touching `s_mtx` from those callers contends with the hot media pump. The executive contract
+ * says: the RX task is the single owner of its state — outside callers post a command, the RX
+ * task drains the queue between select() iterations.
+ *
+ * - Zero-tick send: callers must not block.
+ * - Queue full -> count drop + log + (depending on command) fall back to a direct best-effort
+ *   apply so the system doesn't silently miss a settings change.
+ * - When the RX task is not running, callers apply directly (existing behavior preserved).
+ */
+typedef enum {
+    BADGE_RX_CMD_NOTIFY_STA_GOT_IP = 1,
+    BADGE_RX_CMD_SET_DECODE_ENABLED,
+    BADGE_RX_CMD_APPLY_TUNING_PREFS,
+    BADGE_RX_CMD_TRY_UPGRADE_CDG_HEAP,
+} badge_rx_cmd_kind_t;
+
+typedef struct {
+    uint8_t kind;
+    uint8_t video_on;
+    uint8_t audio_on;
+    uint8_t _reserved;
+} badge_rx_cmd_t;
+
+#define BADGE_RX_CMD_Q_DEPTH 12U
+
+static QueueHandle_t s_rx_cmd_q;
+static volatile uint32_t s_rx_cmd_q_drops;
+static volatile uint16_t s_rx_cmd_q_high_water;
+static volatile uint32_t s_rx_cmd_q_applied;
 static uint32_t s_rx_mcast_media_datagrams;
 static uint32_t s_rx_ucast_media_datagrams;
 static uint32_t s_media_sequence_duplicate_hits;
@@ -2264,11 +2300,9 @@ static void badge_rx_try_alloc_cdg_jitter(void)
     ESP_LOGI(TAG, "CDG/jitter buffers allocated (late bind)");
 }
 
-void dashcdg_badge_rx_try_upgrade_cdg_heap(void)
+/** Apply CDG-heap upgrade attempt from inside the RX task. Owner-only. */
+static void badge_rx_apply_try_upgrade_cdg_heap(void)
 {
-    if (s_rx_task == NULL) {
-        return;
-    }
     if (s_cdg != NULL && s_jb != NULL) {
         return;
     }
@@ -2276,6 +2310,25 @@ void dashcdg_badge_rx_try_upgrade_cdg_heap(void)
     if (s_video_decode_enabled) {
         badge_rx_try_alloc_cdg_jitter();
     }
+}
+
+void dashcdg_badge_rx_try_upgrade_cdg_heap(void)
+{
+    if (s_rx_task == NULL) {
+        return;
+    }
+    if (s_rx_cmd_q != NULL) {
+        badge_rx_cmd_t cmd = { .kind = (uint8_t)BADGE_RX_CMD_TRY_UPGRADE_CDG_HEAP };
+
+        if (xQueueSend(s_rx_cmd_q, &cmd, 0) == pdTRUE) {
+            return;
+        }
+        /* Best-effort heap upgrade: dropping is acceptable since we re-arm on next low-heap event. */
+        s_rx_cmd_q_drops++;
+        ESP_LOGW(TAG, "rx cmd q full: TRY_UPGRADE_CDG_HEAP dropped");
+        return;
+    }
+    badge_rx_apply_try_upgrade_cdg_heap();
 }
 
 static void badge_rx_opus_decoder_reset(void)
@@ -4751,12 +4804,81 @@ static void badge_rx_try_open_ucast_sockets(void)
     }
 }
 
+/* Forward declarations for the apply helpers defined later in this file (near public APIs). */
+static void badge_rx_apply_sta_got_ip_locked(void);
+static void badge_rx_apply_set_decode_enabled(bool video_on, bool audio_on);
+static void badge_rx_apply_tuning_prefs(void);
+static void badge_rx_apply_try_upgrade_cdg_heap(void);
+
+/**
+ * Drain the RX owner command queue. Called once per main-loop iteration (after select wake).
+ *
+ * The RX task is the sole writer for `s_video_decode_enabled`, `s_audio_decode_enabled`,
+ * tuning flags, and the IGMP/socket re-arm path. Outside callers (UI, Wi-Fi owner, settings)
+ * post commands here with a zero-tick send; this function applies them in arrival order.
+ *
+ * Latency budget: bounded by `BADGE_RX_SELECT_TIMEOUT_*` (~12 ms hot, ~20 ms audio-only),
+ * which is well under the 100 ms human-visible budget for a settings toggle.
+ */
+static void badge_rx_drain_commands(void)
+{
+    badge_rx_cmd_t cmd;
+    UBaseType_t depth;
+    uint16_t depth_u;
+    uint32_t applied = 0U;
+
+    if (s_rx_cmd_q == NULL) {
+        return;
+    }
+    depth = uxQueueMessagesWaiting(s_rx_cmd_q);
+    depth_u = (depth > 0xFFFFU) ? 0xFFFFU : (uint16_t)depth;
+    if (depth_u > s_rx_cmd_q_high_water) {
+        s_rx_cmd_q_high_water = depth_u;
+    }
+    while (xQueueReceive(s_rx_cmd_q, &cmd, 0) == pdTRUE) {
+        switch ((badge_rx_cmd_kind_t)cmd.kind) {
+        case BADGE_RX_CMD_NOTIFY_STA_GOT_IP:
+            badge_rx_apply_sta_got_ip_locked();
+            break;
+        case BADGE_RX_CMD_SET_DECODE_ENABLED:
+            badge_rx_apply_set_decode_enabled((cmd.video_on != 0U), (cmd.audio_on != 0U));
+            break;
+        case BADGE_RX_CMD_APPLY_TUNING_PREFS:
+            badge_rx_apply_tuning_prefs();
+            break;
+        case BADGE_RX_CMD_TRY_UPGRADE_CDG_HEAP:
+            badge_rx_apply_try_upgrade_cdg_heap();
+            break;
+        default:
+            ESP_LOGW(TAG, "rx cmd q: unknown kind=%u", (unsigned)cmd.kind);
+            break;
+        }
+        ++applied;
+        /*
+         * Cap commands per iteration so a wedge in any apply path can't starve the media
+         * pump. 8 is well above the typical settings-toggle burst (1 cmd per user gesture).
+         */
+        if (applied >= 8U) {
+            break;
+        }
+    }
+    if (applied != 0U) {
+        s_rx_cmd_q_applied += applied;
+    }
+}
+
 static void badge_rx_task(void *arg)
 {
     (void)arg;
     uint8_t buf[DASHCDG_MAX_PACKET_SIZE];
 
     while (s_run) {
+        /*
+         * Drain owner commands before any blocking call: keeps settings-toggle / Wi-Fi-got-IP
+         * latency bounded by one select cycle and ensures all `s_*_decode_enabled` mutations are
+         * serialized on the task side.
+         */
+        badge_rx_drain_commands();
 #if defined(ESP_PLATFORM)
         /*
          * Something (NVS default, coexist, or a race with screen PM) can re-enable modem PS while RX
@@ -5218,6 +5340,19 @@ static void badge_rx_maybe_periodic_igmp_refresh(uint64_t now_ms)
     badge_rx_try_open_ucast_sockets();
 }
 
+/** Apply the STA-got-IP fact from within the RX task. Owner-only mutator. */
+static void badge_rx_apply_sta_got_ip_locked(void)
+{
+#if defined(ESP_PLATFORM)
+    /* DHCP renew / reconnect can restore default modem PS; IGMP reports need immediate TX. */
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+#endif
+    s_stats.igmp_joined = 0U;
+    s_last_igmp_refresh_local_ms = 0U;
+    (void)badge_rx_refresh_igmp_memberships();
+    badge_rx_try_open_ucast_sockets();
+}
+
 void dashcdg_badge_rx_notify_sta_got_ip(void)
 {
     if (s_rx_task == NULL) {
@@ -5229,14 +5364,17 @@ void dashcdg_badge_rx_notify_sta_got_ip(void)
         s_sta_got_ip_pending_resync = 1U;
         return;
     }
-#if defined(ESP_PLATFORM)
-    /* DHCP renew / reconnect can restore default modem PS; IGMP reports need immediate TX. */
-    (void)esp_wifi_set_ps(WIFI_PS_NONE);
-#endif
-    s_stats.igmp_joined = 0U;
-    s_last_igmp_refresh_local_ms = 0U;
-    (void)badge_rx_refresh_igmp_memberships();
-    badge_rx_try_open_ucast_sockets();
+    if (s_rx_cmd_q != NULL) {
+        badge_rx_cmd_t cmd = { .kind = (uint8_t)BADGE_RX_CMD_NOTIFY_STA_GOT_IP };
+
+        if (xQueueSend(s_rx_cmd_q, &cmd, 0) == pdTRUE) {
+            return;
+        }
+        /* Queue full: count drop and fall through to direct apply so we don't miss the IGMP refresh. */
+        s_rx_cmd_q_drops++;
+        ESP_LOGW(TAG, "rx cmd q full: dropping STA_GOT_IP command, applying inline");
+    }
+    badge_rx_apply_sta_got_ip_locked();
 }
 
 static int open_multicast_rx_on_port(uint16_t port, int rcv_bytes)
@@ -5291,7 +5429,19 @@ void dashcdg_badge_rx_start(void)
     if (s_mtx == NULL) {
         s_mtx = xSemaphoreCreateMutex();
     }
-    dashcdg_badge_rx_apply_rx_tuning_prefs();
+    if (s_rx_cmd_q == NULL) {
+        s_rx_cmd_q = xQueueCreate(BADGE_RX_CMD_Q_DEPTH, sizeof(badge_rx_cmd_t));
+        if (s_rx_cmd_q == NULL) {
+            ESP_LOGW(TAG, "rx cmd queue create failed (depth=%u) — falling back to inline apply",
+                     (unsigned)BADGE_RX_CMD_Q_DEPTH);
+        }
+    }
+    /* Reset hot stats so a soak run starts with clean queue counters. */
+    s_rx_cmd_q_drops = 0U;
+    s_rx_cmd_q_high_water = 0U;
+    s_rx_cmd_q_applied = 0U;
+    /* Apply tuning directly: the RX task is not yet alive, so the queue path would be a no-op. */
+    badge_rx_apply_tuning_prefs();
 
     memset(&s_stats, 0, sizeof(s_stats));
     s_last_uart_audio_stat_ms = 0U;
@@ -5613,6 +5763,13 @@ void dashcdg_badge_rx_stop(void)
     for (int i = 0; i < 80 && s_rx_task != NULL; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    if (s_rx_cmd_q != NULL) {
+        /*
+         * The task is gone; purge any leftover commands so the next start() doesn't replay stale
+         * state (e.g. a pending SET_DECODE_ENABLED from a UI toggle right before stop).
+         */
+        xQueueReset(s_rx_cmd_q);
+    }
     (void)dashcdg_badge_exec_unregister_task("badge_rx");
     (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX,
                                         DASHCDG_BADGE_EXEC_HEALTH_UNKNOWN, "stopped");
@@ -5640,7 +5797,13 @@ bool dashcdg_badge_rx_is_running(void)
     return s_rx_task != NULL;
 }
 
-void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on)
+/**
+ * Apply decode-enable flags. Used both by external callers when the RX task is not yet running
+ * and by the RX task itself draining the command queue. Takes `s_mtx` to coordinate with HUD
+ * readers / LVGL tick — the RX task is the sole writer once running, but readers (overlay tick,
+ * stats) still snapshot under the same mutex.
+ */
+static void badge_rx_apply_set_decode_enabled(bool video_on, bool audio_on)
 {
     uint8_t audio_was_enabled;
 
@@ -5686,6 +5849,25 @@ void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on)
     }
 }
 
+void dashcdg_badge_rx_set_decode_enabled(bool video_on, bool audio_on)
+{
+    if (s_rx_task != NULL && s_rx_cmd_q != NULL) {
+        badge_rx_cmd_t cmd = {
+            .kind = (uint8_t)BADGE_RX_CMD_SET_DECODE_ENABLED,
+            .video_on = video_on ? 1U : 0U,
+            .audio_on = audio_on ? 1U : 0U,
+        };
+
+        if (xQueueSend(s_rx_cmd_q, &cmd, 0) == pdTRUE) {
+            return;
+        }
+        s_rx_cmd_q_drops++;
+        ESP_LOGW(TAG, "rx cmd q full: SET_DECODE_ENABLED (v=%u a=%u) — applying inline",
+                 (unsigned)cmd.video_on, (unsigned)cmd.audio_on);
+    }
+    badge_rx_apply_set_decode_enabled(video_on, audio_on);
+}
+
 void dashcdg_badge_rx_get_decode_enabled(bool *video_on, bool *audio_on)
 {
     if (video_on == NULL || audio_on == NULL) {
@@ -5704,7 +5886,8 @@ void dashcdg_badge_rx_get_decode_enabled(bool *video_on, bool *audio_on)
     xSemaphoreGive(s_mtx);
 }
 
-void dashcdg_badge_rx_apply_rx_tuning_prefs(void)
+/** Reload NVS-backed RX tuning flags. Safe to call from the RX task (it's the owner). */
+static void badge_rx_apply_tuning_prefs(void)
 {
     uint8_t n = 1U;
     uint8_t stx = 1U;
@@ -5729,6 +5912,20 @@ void dashcdg_badge_rx_apply_rx_tuning_prefs(void)
         s_v4_stats_tx_enabled = (stx != 0U) ? 1U : 0U;
         s_media_path_policy = mp;
     }
+}
+
+void dashcdg_badge_rx_apply_rx_tuning_prefs(void)
+{
+    if (s_rx_task != NULL && s_rx_cmd_q != NULL) {
+        badge_rx_cmd_t cmd = { .kind = (uint8_t)BADGE_RX_CMD_APPLY_TUNING_PREFS };
+
+        if (xQueueSend(s_rx_cmd_q, &cmd, 0) == pdTRUE) {
+            return;
+        }
+        s_rx_cmd_q_drops++;
+        ESP_LOGW(TAG, "rx cmd q full: APPLY_TUNING_PREFS — applying inline");
+    }
+    badge_rx_apply_tuning_prefs();
 }
 
 /** Fields that do not require `s_mtx` (or are intentionally re-read) after a mutex snapshot. */
@@ -5768,6 +5965,10 @@ static void badge_rx_stats_finalize_public_view(dashcdg_badge_rx_stats_t *out, u
     out->media_path_policy = s_media_path_policy;
     out->video_decode_enabled = (snap_vdec != 0U) ? 1U : 0U;
     out->audio_decode_enabled = (snap_adec != 0U) ? 1U : 0U;
+    /* RX owner command-queue counters (T4 executive refactor). */
+    out->rx_cmd_q_drops = s_rx_cmd_q_drops;
+    out->rx_cmd_q_high_water = s_rx_cmd_q_high_water;
+    out->rx_cmd_q_applied = s_rx_cmd_q_applied;
     snprintf(out->tx_stats_dest, sizeof(out->tx_stats_dest), "--");
     if (s_v4_tx_src_ipv4 != 0U) {
         uint32_t h = ntohl(s_v4_tx_src_ipv4);
