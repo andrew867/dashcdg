@@ -1,5 +1,11 @@
 # ESP32 badge RX hot-loop separation spec (audio continuity first)
 
+## Status (2026-05-13)
+
+- Audio-only decode is working **very well** on current `master` (clean, stable playback in real use).
+- Video decode: still **TBD** under longer soaks (treat as not yet fully characterized).
+- Reliability note: OpenWrt mcast→ucast “dup path” can exhaust lwIP internal heap if a disallowed media socket is left undrained; current implementation drains-and-discards disallowed media fds to prevent `select()` ENOMEM collapses while retaining IGMP joins and auto path logic.
+
 ## Document control
 
 - Applies to: ESP-IDF badge firmware in `platform/espidf/projects/dashcdg_badge` (FreeRTOS).
