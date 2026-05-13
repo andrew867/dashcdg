@@ -3813,8 +3813,7 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
         return 0;
     }
     stats = &slot->stats;
-    if (stats == NULL || latency_ms_out == NULL ||
-            stats->presented_audio_timestamp_ms == 0U) {
+    if (stats == NULL || latency_ms_out == NULL) {
         return 0;
     }
     if (stats->startup_flags & DASHCDG_V4_RX_STARTUP_FLAG_LATENCY_CONFIDENT) {
@@ -3827,6 +3826,19 @@ static int dashcdg_tx_compute_rx_latency_ms_locked(
         latency_confident = 1;
     }
     if (!latency_confident) {
+        return 0;
+    }
+    /*
+     * Some receivers (notably constrained embedded builds) may temporarily emit v4 stats without a
+     * stable presented_audio_timestamp_ms even though they provide a meaningful target latency.
+     * For group-sync eligibility, prefer a sane fallback over classifying as "no-latency".
+     */
+    if (stats->presented_audio_timestamp_ms == 0U) {
+        if (stats->target_total_latency_ms > 0U &&
+                stats->target_total_latency_ms <= (uint16_t) DASHCDG_TX_RX_REPORTER_MAX_REASONABLE_LATENCY_MS) {
+            *latency_ms_out = (int32_t) stats->target_total_latency_ms;
+            return 1;
+        }
         return 0;
     }
     if (stats->target_total_latency_ms > 0U &&
