@@ -14,6 +14,7 @@ set(DASHCDG_BADGE_MAIN_SRCS
         "karaoke_settings_ui.c"
         "badge_lab_ym.c"
         "audio_mgr.c"
+        "sfx_touch.c"
         "touch_cal_store.c"
         "touch_cal_ui.c"
         "wifi_touch_ui.c"

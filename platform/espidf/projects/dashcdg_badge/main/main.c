@@ -16,6 +16,7 @@
 #include "badge_exec.h"
 #include "badge_stats.h"
 #include "audio_mgr.h"
+#include "sfx_touch.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
 #include "nav.h"
@@ -215,6 +216,7 @@ void app_main(void)
             ESP_LOGW(TAG, "audio_mgr init: %s (RX may block on DAC path)", esp_err_to_name(am));
         }
     }
+    dashcdg_sfx_touch_init();
 
     const bool touch_cal_valid = dashcdg_touch_cal_store_has_valid();
     if (!touch_cal_valid) {
