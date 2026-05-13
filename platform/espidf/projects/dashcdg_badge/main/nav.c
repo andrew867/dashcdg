@@ -24,6 +24,8 @@ void dashcdg_nav_home(lv_disp_t *disp)
     (void)dashcdg_home_ui_present(disp);
     /* After home replaces the screen, karaoke CDG slot is gone; RX task stops (CDG+jitter heap kept). */
     dashcdg_badge_rx_stop();
+    /* Allow platform_hw to restore Wi-Fi power-save state once RX has fully stopped. */
+    dashcdg_platform_hw_on_badge_rx_stopped();
 }
 
 void dashcdg_nav_settings(lv_disp_t *disp)

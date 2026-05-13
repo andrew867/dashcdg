@@ -50,6 +50,8 @@
 #include "badge_cdg_rgb565.h"
 #include "badge_exec.h"
 #include "badge_prefs.h"
+#include "badge_stats.h"
+#include "audio_mgr.h"
 #include "display_lvgl.h"
 #include "platform_hw.h"
 #if defined(CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT) && CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT
@@ -58,6 +60,12 @@
 
 static const char *TAG = "badge_rx";
 
+#if defined(CONFIG_DASHCDG_BADGE_AUDIO_DIAG_UART_INFO) && CONFIG_DASHCDG_BADGE_AUDIO_DIAG_UART_INFO
+#define BADGE_RX_AUDIO_DIAG_LOG ESP_LOGI
+#else
+#define BADGE_RX_AUDIO_DIAG_LOG ESP_LOGD
+#endif
+
 #define BADGE_RX_MCAST_ADDR "239.255.77.77"
 #define BADGE_RX_PORT       24684
 /* Same as desktop `DASHCDG_TX_DEFAULT_REPAIR_PORT`: v4 CDG FEC repair when TX uses split port. */
@@ -65,6 +73,12 @@ static const char *TAG = "badge_rx";
 /* Receiver stats multicast on same group, separate port so peers can observe each other. */
 #define BADGE_RX_TX_STATS_PORT 24685
 /* AMR-WB decode + vendor C stack + recv path: 8 KiB overflowed; keep headroom. */
+/*
+ * Heap-backed FreeRTOS task stack for badge_rx. Keep this conservative: the RX task creation must
+ * succeed even under tighter memory profiles after audio_mgr/stats tasks are present.
+ *
+ * Note: stack depth is in words (FreeRTOS API), not bytes.
+ */
 #define BADGE_RX_STACK      12288
 #define BADGE_RX_TASK_PRIO  6
 /*
@@ -162,7 +176,11 @@ static const char *TAG = "badge_rx";
  */
 #define BADGE_RX_AUDIO_DRAIN_DEFERRED_MAX_STEPS_AUDIO_ONLY    32U
 /** UART ESP_LOGI cadence for audio-only tuning (matches stats summary grep). */
+#if defined(CONFIG_DASHCDG_BADGE_AUDIO_DIAG_UART_RATE_MS)
+#define BADGE_RX_UART_AUDIO_STATS_MS                          ((uint32_t)CONFIG_DASHCDG_BADGE_AUDIO_DIAG_UART_RATE_MS)
+#else
 #define BADGE_RX_UART_AUDIO_STATS_MS                          1000U
+#endif
 #if defined(DASHCDG_AUDIO_JITTER_HEAP_BACKED) && DASHCDG_AUDIO_JITTER_HEAP_BACKED
 /*
  * `dashcdg_audio_jitter_init` allocates the slot+payload pool with calloc(30, …). Under A/V on,
@@ -370,6 +388,18 @@ static volatile int s_uplink_sock = -1;
 static volatile int s_run;
 /** Monotonic ms: do not open optional ucast (stats/repair dups) until this time (startup defer + ENOMEM cool-down). */
 static uint64_t s_ucast_optional_earliest_ms;
+/* Once lwIP starts returning ENOMEM from select(), stop reopening ucast dup sockets (fd id churn makes it worse). */
+static uint8_t s_ucast_dup_disabled;
+
+/*
+ * Real-time RX must not fail to start due to heap fragmentation/pressure from LVGL trees,
+ * socket PCBs, or codec scratch. Allocate the task stack/TCB statically (BSS) so startup
+ * is deterministic even when internal heap is low.
+ *
+ * FreeRTOS stack size is in words (StackType_t), not bytes.
+ */
+static StaticTask_t s_rx_task_tcb;
+static StackType_t s_rx_task_stack[BADGE_RX_STACK];
 
 static SemaphoreHandle_t s_mtx;
 
@@ -455,6 +485,54 @@ static uint64_t badge_rx_estimated_playback_ms_at_local(uint64_t local_now_ms)
 }
 
 static dashcdg_badge_rx_stats_t s_stats;
+
+/* Interarrival jitter estimate for v4 audio chunks (simple EMA of |dt - frame_ms|). */
+static uint8_t s_audio_iaj_inited;
+static uint64_t s_audio_iaj_last_local_ms;
+static uint32_t s_audio_iaj_ema_x256;
+
+/* Lock-free published stats snapshot for UI/telemetry consumers (T12). */
+static dashcdg_badge_rx_stats_t s_pub_stats_buf[2];
+static uint32_t s_pub_stats_gen;
+static uint8_t s_pub_stats_valid;
+
+static void badge_rx_pub_stats_write(const dashcdg_badge_rx_stats_t *st)
+{
+    /* gen layout: bit0 = active index, bits1.. = version counter (increments by 2 per publish). */
+    uint32_t g = __atomic_load_n(&s_pub_stats_gen, __ATOMIC_RELAXED);
+    uint32_t idx = (g ^ 1U) & 1U;
+    uint32_t new_g = ((g & ~1U) + 2U) | idx;
+
+    s_pub_stats_buf[idx] = *st;
+    __atomic_store_n(&s_pub_stats_gen, new_g, __ATOMIC_RELEASE);
+    s_pub_stats_valid = 1U;
+}
+
+static void badge_rx_pub_stats_read(dashcdg_badge_rx_stats_t *out)
+{
+    uint32_t g1;
+    uint32_t g2;
+    uint32_t idx;
+    int tries = 0;
+
+    if (out == NULL) {
+        return;
+    }
+    if (!s_pub_stats_valid) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    do {
+        g1 = __atomic_load_n(&s_pub_stats_gen, __ATOMIC_ACQUIRE);
+        idx = g1 & 1U;
+        *out = s_pub_stats_buf[idx];
+        g2 = __atomic_load_n(&s_pub_stats_gen, __ATOMIC_ACQUIRE);
+        if (g1 == g2) {
+            return;
+        }
+        tries++;
+    } while (tries < 6);
+}
 
 #if defined(CONFIG_DASHCDG_BADGE_PERF_PROBES) && CONFIG_DASHCDG_BADGE_PERF_PROBES
 static void badge_rx_perf_note_mtx_pump_us(uint32_t us)
@@ -544,6 +622,7 @@ typedef enum {
     BADGE_RX_CMD_SET_DECODE_ENABLED,
     BADGE_RX_CMD_APPLY_TUNING_PREFS,
     BADGE_RX_CMD_TRY_UPGRADE_CDG_HEAP,
+    BADGE_RX_CMD_REFRESH_IGMP,
 } badge_rx_cmd_kind_t;
 
 typedef struct {
@@ -1551,33 +1630,55 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
         uint32_t dac_hz_eff = 0U;
         uint32_t dac_chunk_u8 = 0U;
         uint32_t expect_dma_per_s = 0U;
+        uint32_t dac_write_max_us = 0U;
+        uint32_t dac_write_over = 0U;
+        dashcdg_audio_mgr_stats_t am = {0};
 
-        dashcdg_platform_hw_karaoke_dac_get_uart_health(&dac_dma_ok, &dac_dma_err, &dac_hz_eff, &dac_chunk_u8, NULL);
+        dashcdg_platform_hw_karaoke_dac_get_uart_health(
+                &dac_dma_ok,
+                &dac_dma_err,
+                &dac_hz_eff,
+                &dac_chunk_u8,
+                NULL,
+                &dac_write_max_us,
+                &dac_write_over);
         if (dac_chunk_u8 > 0U && dac_hz_eff > 0U) {
             expect_dma_per_s = dac_hz_eff / dac_chunk_u8;
         }
-        ESP_LOGI(TAG,
+        dashcdg_audio_mgr_get_stats(&am);
+        BADGE_RX_AUDIO_DIAG_LOG(TAG,
                  "audio_only a_rx=%lu a_out=%lu jb=%lu/%lu skip=%lu deg=%lu dec_fail=%lu dac_begin_fail=%lu "
                  "profile=%u clock=%d primed=%d ms_since_pcm=%llu mtx_idle_miss=%lu mtx_post_miss=%lu lvgl_coop=%lu "
-                 "rx_mtx_to=%lu",
+                 "rx_mtx_to=%lu dac_wr_max_us=%lu dac_wr_over=%lu",
                  (unsigned long)snap.v4_audio_chunk_rx, (unsigned long)snap.v4_audio_frames_out, (unsigned long)occ,
                  (unsigned long)cap, (unsigned long)snap.v4_audio_jitter_skip_events,
                  (unsigned long)snap.v4_audio_degraded_push, (unsigned long)snap.v4_audio_decode_fail,
                  (unsigned long)snap.v4_audio_dac_begin_fail, (unsigned)s_memory_profile, (int)snap.have_clock,
                  s_audio_decode_primed, (unsigned long long)ms_since_pcm,
                  (unsigned long)snap.rx_mtx_idle_drain_miss, (unsigned long)snap.rx_mtx_postburst_drain_miss,
-                 (unsigned long)snap.lvgl_coop_audio_drains, (unsigned long)snap.rx_mtx_pump_timeouts);
+                 (unsigned long)snap.lvgl_coop_audio_drains, (unsigned long)snap.rx_mtx_pump_timeouts,
+                 (unsigned long)dac_write_max_us,
+                 (unsigned long)dac_write_over);
         /*
          * Proof line (grep AUDIO_UART_PROOF): dac_dma_err must stay 0; d_dma_ok/s ~ expect_dma_per_s when sound plays.
          * If dac_dma_ok frozen while a_rx climbs → decode/DAC path stuck; if dac_dma_err > 0 → ESP-IDF DMA reject.
          */
-        ESP_LOGI(TAG,
+        BADGE_RX_AUDIO_DIAG_LOG(TAG,
                  "AUDIO_UART_PROOF dac_dma_ok=%lu dac_dma_err=%lu hz_eff=%lu chunk_u8=%lu expect_dma_per_s=%lu "
-                 "vol_pct=%u amp_idle=%lu",
+                 "vol_pct=%u amp_idle=%lu am_drop=%lu am_drop_old=%lu am_ud_sil=%lu am_push=%lu am_dac_begin_fail=%lu am_nom_hz=%lu "
+                 "dac_wr_max_us=%lu dac_wr_over=%lu",
                  (unsigned long)dac_dma_ok, (unsigned long)dac_dma_err, (unsigned long)dac_hz_eff,
                  (unsigned long)dac_chunk_u8, (unsigned long)expect_dma_per_s,
                  (unsigned)dashcdg_platform_hw_get_karaoke_output_volume_pct(),
-                 (unsigned long)dashcdg_platform_hw_karaoke_amp_idle_shutdowns());
+                 (unsigned long)dashcdg_platform_hw_karaoke_amp_idle_shutdowns(),
+                 (unsigned long)am.pcm_drop_full,
+                 (unsigned long)am.pcm_drop_oldest,
+                 (unsigned long)am.underrun_silence_frames,
+                 (unsigned long)am.frames_pushed,
+                 (unsigned long)am.dac_begin_fail,
+                 (unsigned long)am.last_nom_hz,
+                 (unsigned long)dac_write_max_us,
+                 (unsigned long)dac_write_over);
     }
 
     {
@@ -1613,8 +1714,14 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             s_uart_audio_chop_prev.idle_miss = snap.rx_mtx_idle_drain_miss;
             s_uart_audio_chop_prev.post_miss = snap.rx_mtx_postburst_drain_miss;
             s_uart_audio_chop_prev.coop = snap.lvgl_coop_audio_drains;
-            dashcdg_platform_hw_karaoke_dac_get_uart_health(&s_uart_audio_chop_prev.dac_dma_ok,
-                                                            &s_uart_audio_chop_prev.dac_dma_err, NULL, NULL, NULL);
+            dashcdg_platform_hw_karaoke_dac_get_uart_health(
+                    &s_uart_audio_chop_prev.dac_dma_ok,
+                    &s_uart_audio_chop_prev.dac_dma_err,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL);
             s_uart_audio_chop_warmed = 1U;
         } else {
             uint32_t d_skip = badge_rx_uart_monotonic_delta_u32(snap.v4_audio_jitter_skip_events,
@@ -1656,11 +1763,18 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
             uint32_t d_dma_ok = 0U;
             uint32_t d_dma_err = 0U;
 
-            dashcdg_platform_hw_karaoke_dac_get_uart_health(&dac_cur_ok, &dac_cur_err, NULL, NULL, NULL);
+            dashcdg_platform_hw_karaoke_dac_get_uart_health(
+                    &dac_cur_ok,
+                    &dac_cur_err,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL);
             d_dma_ok = badge_rx_uart_monotonic_delta_u32(dac_cur_ok, s_uart_audio_chop_prev.dac_dma_ok);
             d_dma_err = badge_rx_uart_monotonic_delta_u32(dac_cur_err, s_uart_audio_chop_prev.dac_dma_err);
 
-            ESP_LOGI(
+            BADGE_RX_AUDIO_DIAG_LOG(
                     TAG,
                     "audio_chop iv_ms=%llu jb_pk=%u jb=%u/%u d_skip=%u d_dec=%u d_deg=%u d_dac=%u d_out=%u d_rx=%u "
                     "d_udp=%llu d_wm=%llu d_wr=%u d_amiss=%u d_jbe=%u d_jbr=%llu d_jbd=%llu d_ru=%u d_rz=%u d_rs=%u "
@@ -1862,12 +1976,40 @@ static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
         pl.clock_offset_estimate_ms = skew_inited ? -skew_ms : 0;
         pl.playout_delay_ms_config = preroll_ms;
         pl.reserved0 = 0;
-        pl.audio_buffer_ms = audio_jb_pending * (uint32_t)(s_announced_audio_frame_ms ? s_announced_audio_frame_ms : 20U);
+        /*
+         * TX uses audio_buffer_ms to classify "empty-buf" and compute plausible pipeline latency.
+         * For the badge, jitter-buffer occupancy alone can be near-zero while audio is healthy,
+         * because PCM is staged through audio_mgr and the ESP32 DAC DMA.
+         */
+        {
+            uint32_t frame_ms = (uint32_t)(s_announced_audio_frame_ms ? s_announced_audio_frame_ms : 20U);
+            uint32_t jb_ms = audio_jb_pending * frame_ms;
+            uint32_t dac_eff_hz = 0U;
+            uint32_t dac_chunk = 0U;
+            uint32_t dac_fill = 0U;
+            uint32_t dac_ms = 0U;
+            dashcdg_audio_mgr_stats_t am = {0};
+            uint32_t am_ms = 0U;
+
+            dashcdg_audio_mgr_get_stats(&am);
+            if (am.last_nom_hz != 0U && am.queued_samples != 0U) {
+                am_ms = (uint32_t)((am.queued_samples * 1000ULL) / (uint64_t)am.last_nom_hz);
+            }
+            dashcdg_platform_hw_karaoke_dac_get_uart_health(NULL, NULL, &dac_eff_hz, &dac_chunk, &dac_fill, NULL, NULL);
+            (void)dac_chunk;
+            if (dac_eff_hz != 0U && dac_fill != 0U) {
+                dac_ms = (uint32_t)((dac_fill * 1000ULL) / (uint64_t)dac_eff_hz);
+            }
+            pl.audio_buffer_ms = jb_ms + am_ms + dac_ms;
+        }
         pl.audio_queue_pressure_events = s_stats.jb_evict_rounds;
         pl.fec_audio_recovered = 0U;
         {
-            int32_t aj = skew_ms >= 0 ? skew_ms : -skew_ms;
-            pl.jitter_rms_ms = (uint16_t)(aj > 65535 ? 65535 : aj);
+            uint32_t jms = (s_audio_iaj_ema_x256 >> 8);
+            if (jms > 65535U) {
+                jms = 65535U;
+            }
+            pl.jitter_rms_ms = (uint16_t)jms;
         }
         if (s_stats.datagrams > 0U) {
             uint64_t lx100 = (s_stats.wire_missing_estimate * 10000ULL) / s_stats.datagrams;
@@ -3085,7 +3227,14 @@ static int badge_rx_audio_start_gate_holding(uint64_t local_now_ms)
         frame_ms = (uint32_t)(s_announced_audio_frame_ms != 0U ? s_announced_audio_frame_ms : 20U);
         buffered_ms = occ * frame_ms;
     }
-    required_ms = (uint32_t)(s_announced_playout_delay_ms != 0U ? (s_announced_playout_delay_ms / 2U) : 170U);
+    /*
+     * Audio-only on ESP32: do not require a large startup buffer. Waiting for 120ms of occupied
+     * frames can deadlock when insert/drop policy keeps only a small window ahead of the drain
+     * cursor (especially before the first primed decode). A short buffer is enough to avoid pops.
+     */
+    required_ms = badge_rx_is_audio_only_decode()
+            ? 20U
+            : (uint32_t)(s_announced_playout_delay_ms != 0U ? (s_announced_playout_delay_ms / 2U) : 170U);
     frame_ms = (uint32_t)(s_announced_audio_frame_ms != 0U ? s_announced_audio_frame_ms : 20U);
     {
         uint32_t frame_window_ms = frame_ms * 6U;
@@ -3217,18 +3366,11 @@ static int badge_rx_audio_push_mono_gated(uint64_t local_now_ms, const int16_t *
         return 0;
     }
     nom_hz = badge_rx_karaoke_nominal_pcm_hz();
-    if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
-        /*
-         * Defensive recovery: when audio decode is toggled on mid-session or amp state is stale,
-         * explicitly arm amp then retry DAC begin once before declaring host-underrun.
-         */
-        dashcdg_platform_hw_karaoke_amp_arm_for_rx();
-        if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
-            s_stats.v4_audio_dac_begin_fail++;
-            return 0;
-        }
+    if (!dashcdg_audio_mgr_push_mono_s16(nom_hz, mono, mono_samples)) {
+        /* Queue full or audio_mgr not initialized: count a degraded push (audible chop risk). */
+        s_stats.v4_audio_degraded_push++;
+        return 0;
     }
-    dashcdg_platform_hw_karaoke_dac_push_mono_s16(mono, mono_samples);
     badge_rx_audio_no_dac_watch_note_push();
     return 1;
 }
@@ -3436,7 +3578,14 @@ static void badge_rx_drain_v4_audio_budget(uint64_t local_now_ms, uint32_t max_s
         uint32_t hz_s = 0U;
         uint32_t fill_u8 = 0U;
 
-        dashcdg_platform_hw_karaoke_dac_get_uart_health(NULL, NULL, &hz_s, NULL, &fill_u8);
+        dashcdg_platform_hw_karaoke_dac_get_uart_health(
+                NULL,
+                NULL,
+                &hz_s,
+                NULL,
+                &fill_u8,
+                NULL,
+                NULL);
         if (hz_s == 0U) {
             hz_s = 48000U;
         }
@@ -3853,6 +4002,36 @@ static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64
     if (!s_audio_decode_enabled) {
         return;
     }
+
+    /* Update a lightweight interarrival-jitter EMA for TX stats (ms). */
+    {
+        uint32_t expect_ms = a->frame_ms != 0U ? (uint32_t)a->frame_ms
+                                              : (uint32_t)(s_announced_audio_frame_ms ? s_announced_audio_frame_ms : 20U);
+        if (expect_ms < 5U) {
+            expect_ms = 5U;
+        }
+        if (!s_audio_iaj_inited) {
+            s_audio_iaj_inited = 1U;
+            s_audio_iaj_last_local_ms = local_now_ms;
+            s_audio_iaj_ema_x256 = 0U;
+        } else if (local_now_ms > s_audio_iaj_last_local_ms) {
+            uint32_t dt = (uint32_t)(local_now_ms - s_audio_iaj_last_local_ms);
+            uint32_t j = (dt > expect_ms) ? (dt - expect_ms) : (expect_ms - dt);
+            /* EMA alpha = 1/8 in fixed-point: ema += (sample - ema) / 8 */
+            uint32_t sample_x256 = j << 8;
+            if (sample_x256 > (60000U << 8)) {
+                sample_x256 = (60000U << 8);
+            }
+            if (s_audio_iaj_ema_x256 == 0U) {
+                s_audio_iaj_ema_x256 = sample_x256;
+            } else {
+                int32_t diff = (int32_t)sample_x256 - (int32_t)s_audio_iaj_ema_x256;
+                s_audio_iaj_ema_x256 = (uint32_t)((int32_t)s_audio_iaj_ema_x256 + (diff / 8));
+            }
+            s_audio_iaj_last_local_ms = local_now_ms;
+        }
+    }
+
     badge_rx_audio_no_dac_watch_note_rx(local_now_ms);
     if (badge_rx_ensure_audio_jitter() != 0) {
         return;
@@ -3922,7 +4101,7 @@ static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
      * (~13 ms) so the previous waveform tails off cleanly, then leaves the DAC running so the next
      * push slips into the live DMA ring with no re-open / amp churn.
      */
-    dashcdg_platform_hw_karaoke_dac_session_break();
+    dashcdg_audio_mgr_session_break();
     s_audio_decode_primed = 0;
     badge_rx_audio_last_mono_reset();
     s_last_audio_jitter_apply_local_ms = 0U;
@@ -4174,7 +4353,7 @@ static void handle_clock_sync(const struct dashcdg_packet_view *view, uint64_t l
          * tail-flush with DC silence.  Tearing down `dac_continuous` here clicked every time the
          * sender un-paused.
          */
-        dashcdg_platform_hw_karaoke_dac_session_break();
+        dashcdg_audio_mgr_session_break();
         s_audio_decode_primed = 0;
         badge_rx_audio_last_mono_reset();
         s_last_audio_jitter_apply_local_ms = 0U;
@@ -4851,6 +5030,9 @@ static int badge_rx_open_ucast_rx_on_port(uint16_t port, int rcv_bytes)
 /** Open STA-bound duplicates when DHCP has an address (retried from RX idle if early). */
 static void badge_rx_try_open_ucast_sockets(void)
 {
+    if (s_ucast_dup_disabled) {
+        return;
+    }
     if ((int)s_ucast_media_sock < 0) {
         if (badge_rx_internal_largest_block_bytes() < (size_t)BADGE_RX_MIN_LARGEST_INTERNAL_FOR_UCAST_MEDIA_CRITICAL) {
             static uint64_t s_last_ucast_media_crit_ms;
@@ -4922,6 +5104,7 @@ static void badge_rx_apply_sta_got_ip_locked(void);
 static void badge_rx_apply_set_decode_enabled(bool video_on, bool audio_on);
 static void badge_rx_apply_tuning_prefs(void);
 static void badge_rx_apply_try_upgrade_cdg_heap(void);
+static void badge_rx_apply_refresh_igmp_locked(void);
 
 /**
  * Drain the RX owner command queue. Called once per main-loop iteration (after select wake).
@@ -4961,6 +5144,9 @@ static void badge_rx_drain_commands(void)
             break;
         case BADGE_RX_CMD_TRY_UPGRADE_CDG_HEAP:
             badge_rx_apply_try_upgrade_cdg_heap();
+            break;
+        case BADGE_RX_CMD_REFRESH_IGMP:
+            badge_rx_apply_refresh_igmp_locked();
             break;
         default:
             ESP_LOGW(TAG, "rx cmd q: unknown kind=%u", (unsigned)cmd.kind);
@@ -5111,6 +5297,8 @@ static void badge_rx_task(void *arg)
                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
                     );
                 }
+                /* Avoid fd id churn: once select is ENOMEM, do not reopen ucast dup sockets this session. */
+                s_ucast_dup_disabled = 1U;
                 badge_rx_close_ucast_sockets();
                 {
                     uint64_t cool = dashcdg_clock_now_ms() + 5000ULL;
@@ -5161,10 +5349,6 @@ static void badge_rx_task(void *arg)
             } else if (badge_rx_is_audio_only_decode()) {
                 s_stats.rx_mtx_idle_drain_miss++;
             }
-            dashcdg_platform_hw_karaoke_dac_pad_partial_chunk();
-            badge_rx_maybe_send_v4_stats(idle_now_ms);
-            badge_rx_maybe_uart_log_audio_stats(idle_now_ms);
-            badge_rx_maybe_periodic_igmp_refresh(idle_now_ms);
             continue;
         }
         if (fd >= 0 && FD_ISSET(fd, &rfds)) {
@@ -5297,11 +5481,7 @@ static void badge_rx_task(void *arg)
             }
         }
         {
-            uint64_t loop_now_ms = dashcdg_clock_now_ms();
-
-            badge_rx_maybe_send_v4_stats(loop_now_ms);
-            badge_rx_maybe_uart_log_audio_stats(loop_now_ms);
-            badge_rx_maybe_periodic_igmp_refresh(loop_now_ms);
+            /* Periodic telemetry + housekeeping runs on `badge_stats`, not the RX hot loop (T12). */
         }
     }
 
@@ -5453,6 +5633,19 @@ static void badge_rx_maybe_periodic_igmp_refresh(uint64_t now_ms)
         return;
     }
     s_last_igmp_refresh_local_ms = now_ms;
+    /*
+     * T12: do not mutate RX sockets from a background task. When the RX owner is running,
+     * request a refresh via its command queue so the select()/FD sets can't race with open/close.
+     */
+    if (s_rx_task != NULL && s_rx_cmd_q != NULL) {
+        badge_rx_cmd_t cmd = { .kind = (uint8_t)BADGE_RX_CMD_REFRESH_IGMP };
+
+        if (xQueueSend(s_rx_cmd_q, &cmd, 0) == pdTRUE) {
+            return;
+        }
+        s_rx_cmd_q_drops++;
+        ESP_LOGW(TAG, "rx cmd q full: REFRESH_IGMP — applying inline");
+    }
     if (badge_rx_refresh_igmp_memberships() != 0) {
         s_last_igmp_refresh_local_ms = now_ms;
     }
@@ -5468,6 +5661,17 @@ static void badge_rx_apply_sta_got_ip_locked(void)
 #endif
     s_stats.igmp_joined = 0U;
     s_last_igmp_refresh_local_ms = 0U;
+    (void)badge_rx_refresh_igmp_memberships();
+    badge_rx_try_open_ucast_sockets();
+}
+
+/** Periodic IGMP refresh, applied from within the RX task. Owner-only mutator. */
+static void badge_rx_apply_refresh_igmp_locked(void)
+{
+#if defined(ESP_PLATFORM)
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+#endif
+    s_stats.igmp_joined = 0U;
     (void)badge_rx_refresh_igmp_memberships();
     badge_rx_try_open_ucast_sockets();
 }
@@ -5567,6 +5771,9 @@ void dashcdg_badge_rx_start(void)
     s_uart_audio_chop_warmed = 0U;
     s_uart_audio_chop_jb_peak = 0U;
     memset(&s_uart_audio_chop_prev, 0, sizeof(s_uart_audio_chop_prev));
+    s_audio_iaj_inited = 0U;
+    s_audio_iaj_last_local_ms = 0U;
+    s_audio_iaj_ema_x256 = 0U;
     {
         uint8_t v = 1U;
         uint8_t a = 1U;
@@ -5588,6 +5795,7 @@ void dashcdg_badge_rx_start(void)
      * settle before allocating two more UDP PCBs (reduces select ENOMEM + fragmentation).
      */
     s_ucast_optional_earliest_ms = dashcdg_clock_now_ms() + 3000ULL;
+    s_ucast_dup_disabled = 0U;
     if (s_audio_decode_enabled) {
 #if defined(ESP_PLATFORM)
         if (!dashcdg_opus_preallocate_decoder_blob()) {
@@ -5747,11 +5955,26 @@ void dashcdg_badge_rx_start(void)
 
     s_run = 1;
 #if CONFIG_FREERTOS_UNICORE
-    if (xTaskCreate(badge_rx_task, "badge_rx", BADGE_RX_STACK, NULL, BADGE_RX_TASK_PRIO, &s_rx_task) != pdPASS) {
+    s_rx_task = xTaskCreateStatic(
+            badge_rx_task,
+            "badge_rx",
+            BADGE_RX_STACK,
+            NULL,
+            BADGE_RX_TASK_PRIO,
+            s_rx_task_stack,
+            &s_rx_task_tcb);
 #else
-    if (xTaskCreatePinnedToCore(badge_rx_task, "badge_rx", BADGE_RX_STACK, NULL, BADGE_RX_TASK_PRIO, &s_rx_task,
-                                BADGE_RX_TASK_CORE) != pdPASS) {
+    s_rx_task = xTaskCreateStaticPinnedToCore(
+            badge_rx_task,
+            "badge_rx",
+            BADGE_RX_STACK,
+            NULL,
+            BADGE_RX_TASK_PRIO,
+            s_rx_task_stack,
+            &s_rx_task_tcb,
+            BADGE_RX_TASK_CORE);
 #endif
+    if (s_rx_task == NULL) {
         s_run = 0;
         badge_rx_close_ucast_sockets();
         close(s_sock);
@@ -5768,8 +5991,8 @@ void dashcdg_badge_rx_start(void)
             close(s_uplink_sock);
             s_uplink_sock = -1;
         }
-        snprintf(s_stats.last_error, sizeof(s_stats.last_error), "xTaskCreate failed");
-        ESP_LOGE(TAG, "%s", s_stats.last_error);
+        snprintf(s_stats.last_error, sizeof(s_stats.last_error), "xTaskCreateStatic failed");
+        ESP_LOGE(TAG, "%s (stack_words=%u)", s_stats.last_error, (unsigned)BADGE_RX_STACK);
         badge_rx_free_heap();
     } else {
         {
@@ -5893,7 +6116,7 @@ void dashcdg_badge_rx_stop(void)
     (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_RX,
                                         DASHCDG_BADGE_EXEC_HEALTH_UNKNOWN, "stopped");
     badge_rx_v4_anchor_asm_reset();
-    dashcdg_platform_hw_karaoke_dac_stop();
+    dashcdg_audio_mgr_stop();
     badge_rx_amr_decoder_reset();
     badge_rx_free_audio_jitter();
     s_audio_decode_primed = 0;
@@ -5964,7 +6187,7 @@ static void badge_rx_apply_set_decode_enabled(bool video_on, bool audio_on)
     if (audio_on) {
         dashcdg_platform_hw_karaoke_amp_arm_for_rx();
     } else {
-        dashcdg_platform_hw_karaoke_dac_stop();
+        dashcdg_audio_mgr_stop();
     }
 }
 
@@ -6100,13 +6323,33 @@ static void badge_rx_stats_finalize_public_view(dashcdg_badge_rx_stats_t *out, u
 
 void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
 {
+    badge_rx_pub_stats_read(out);
+}
+
+static void badge_rx_publish_stats_snapshot(uint64_t now_ms)
+{
+    dashcdg_badge_rx_stats_t snap;
     uint8_t snap_vdec = 0U;
     uint8_t snap_adec = 0U;
 
-    if (out == NULL) {
+    (void)now_ms;
+    memset(&snap, 0, sizeof(snap));
+
+    if (s_mtx == NULL) {
+        /*
+         * T12: stats task starts at boot, but RX may not be initialized yet. Avoid
+         * calling xSemaphoreTake(NULL) (FreeRTOS assert) and publish a minimal snapshot.
+         */
+        snap = s_stats;
+        badge_rx_pub_stats_write(&snap);
         return;
     }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(5)) == pdTRUE) {
+
+    /*
+     * Keep this mutex window short: copy-only + occupancy reads. UART formatting and any serial
+     * I/O is handled by the stats task, not here.
+     */
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(8)) == pdTRUE) {
         if (s_jb) {
             s_stats.jb_next_packet_index = s_jb->next_packet_index;
             s_stats.jb_pending_slots = dashcdg_cdg_batch_jitter_occupied_count(s_jb);
@@ -6123,7 +6366,6 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
             s_stats.audio_jb_pending_slots = 0U;
             s_stats.audio_slots_capacity = 0U;
         }
-        /* Refresh the lock-free mirrors while we hold the mutex (cheap; keeps both consistent). */
         badge_rx_audio_jb_mirror_publish();
         s_stats.repair_nack_enabled = s_repair_nack_enabled;
         s_stats.v4_stats_tx_enabled = s_v4_stats_tx_enabled;
@@ -6138,26 +6380,33 @@ void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out)
         s_stats.media_path_policy = s_media_path_policy;
         snap_vdec = s_video_decode_enabled;
         snap_adec = s_audio_decode_enabled;
-        *out = s_stats;
+        snap = s_stats;
         xSemaphoreGive(s_mtx);
     } else {
-        /*
-         * Mutex contended: previously we returned the last-mutex-held `s_stats` snapshot, which
-         * is exactly the "JB sticky at 100%" bug — `audio_jb_pending_slots` froze at whatever
-         * was captured during the most recent successful read (often right after a burst peak,
-         * giving the user a permanent 100% display while audio actually drained cleanly).
-         * Override the audio occupancy / capacity fields with the lock-free atomic mirrors so
-         * the HUD reads a fresh live value even when the producer / drain owns the mutex.
-         */
-        *out = s_stats;
-        out->audio_jb_pending_slots =
-                (uint32_t)__atomic_load_n(&s_audio_jb_pending_slots_atomic, __ATOMIC_RELAXED);
-        out->audio_slots_capacity =
-                (uint16_t)__atomic_load_n(&s_audio_jb_capacity_atomic, __ATOMIC_RELAXED);
+        /* Stale is acceptable; prefer not to block a busy pump for UI stats. */
+        snap = s_stats;
         snap_vdec = s_video_decode_enabled;
         snap_adec = s_audio_decode_enabled;
+        snap.audio_jb_pending_slots =
+            (uint32_t)__atomic_load_n(&s_audio_jb_pending_slots_atomic, __ATOMIC_RELAXED);
+        snap.audio_slots_capacity =
+            (uint16_t)__atomic_load_n(&s_audio_jb_capacity_atomic, __ATOMIC_RELAXED);
     }
-    badge_rx_stats_finalize_public_view(out, snap_vdec, snap_adec);
+
+    badge_rx_stats_finalize_public_view(&snap, snap_vdec, snap_adec);
+    badge_rx_pub_stats_write(&snap);
+}
+
+void dashcdg_badge_rx_housekeeping_tick(uint64_t now_ms)
+{
+    /* Publish snapshot first so UI reads remain consistent even if later work is suppressed. */
+    badge_rx_publish_stats_snapshot(now_ms);
+    if (s_mtx == NULL) {
+        return;
+    }
+    badge_rx_maybe_send_v4_stats(now_ms);
+    badge_rx_maybe_uart_log_audio_stats(now_ms);
+    badge_rx_maybe_periodic_igmp_refresh(now_ms);
 }
 
 void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, dashcdg_badge_rx_stats_t *out)
@@ -6168,6 +6417,17 @@ void dashcdg_badge_rx_lvgl_overlay_tick_and_get_stats(lv_obj_t *cdg_lv_slot, das
     if (out == NULL) {
         return;
     }
+#if defined(CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT) && CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT
+    if (cdg_lv_slot != NULL && lv_obj_is_valid(cdg_lv_slot) && dashcdg_display_lcd_panel()) {
+        dashcdg_sp_blit_worker_try_init();
+    }
+#endif
+    /* T12: serve stats from a lock-free published snapshot; never block LVGL on `s_mtx`. */
+    dashcdg_badge_rx_get_stats(out);
+    if (out->video_decode_enabled != 0U) {
+        dashcdg_badge_rx_cdg_overlay_tick(cdg_lv_slot);
+    }
+    return;
 #if defined(CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT) && CONFIG_DASHCDG_BADGE_CDG_DEFERRED_BLIT
     if (cdg_lv_slot != NULL && lv_obj_is_valid(cdg_lv_slot) && dashcdg_display_lcd_panel()) {
         dashcdg_sp_blit_worker_try_init();

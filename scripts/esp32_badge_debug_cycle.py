@@ -24,6 +24,7 @@ DEFAULT_BAUD = 115200
 DEFAULT_LOG_SECONDS = 45
 DEFAULT_ITERATIONS = 1
 DEFAULT_WAIT_DHCP_SECONDS = 30
+DEFAULT_BUILD_DIR_WIN = str(Path(os.environ.get("TEMP", r"C:\Windows\Temp")) / "dashcdg_badge_build")
 
 
 def windows_shell_env() -> dict[str, str]:
@@ -48,6 +49,17 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build/flash badge firmware and capture serial logs in a loop.")
     p.add_argument("--project-dir", default=str(default_project), help="Path to dashcdg_badge project directory.")
     p.add_argument("--log-dir", default=str(default_logs), help="Directory for captured UART logs.")
+    if os.name == "nt":
+        p.add_argument(
+            "--build-dir",
+            default=DEFAULT_BUILD_DIR_WIN,
+            help=(
+                "Out-of-tree build directory. Default is C:\\tmp\\dashcdg_badge_build to avoid OneDrive reparse-point "
+                "restrictions in repo-local build/log (idf.py stdout/stderr capture files)."
+            ),
+        )
+    else:
+        p.add_argument("--build-dir", default="", help="Optional out-of-tree build directory.")
     p.add_argument("--port", default=DEFAULT_PORT, help="Serial port (default: COM6).")
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="UART baud (default: 115200).")
     p.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS, help="Number of build/flash/log loops.")
@@ -91,13 +103,17 @@ def parse_args() -> argparse.Namespace:
 def run_build_flash(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     project_q = str(project_dir)
+    build_dir = Path(args.build_dir).resolve() if args.build_dir else None
+    build_q = str(build_dir) if build_dir else ""
+    build_flag = f"-B \"{build_q}\" " if build_dir else ""
     if args.init_shell == "cmd":
         # Match Espressif shortcuts: cmd /k ""C:\Espressif\idf_cmd_init.bat" <IdfId>"
         # (Leading "" is cmd's escape so the batch path can be quoted.)
         cmd_line = (
             f'""C:\\Espressif\\idf_cmd_init.bat" {args.idf_id} '
             f'&& cd /d "{project_q}" '
-            f'&& idf.py -p {args.port} build flash'
+            f'&& if not "{build_q}"=="" (mkdir "{build_q}" 2>nul) '
+            f'&& idf.py {build_flag}-p {args.port} build flash'
         )
         cmd = ["C:\\Windows\\System32\\cmd.exe", "/c", cmd_line]
         print(f"[debug-cycle] build/flash (cmd):\n{cmd_line}\n")
@@ -108,7 +124,8 @@ def run_build_flash(args: argparse.Namespace) -> None:
         ps_cmd = (
             f"& '{init_ps1}' -IdfId '{args.idf_id}'; "
             f"Set-Location -LiteralPath '{project_q.replace(chr(39), chr(39) + chr(39))}'; "
-            f"idf.py -p {args.port} build flash"
+            f"if ('{build_q}') {{ New-Item -ItemType Directory -Force -Path '{build_q}' | Out-Null }}; "
+            f"idf.py {build_flag}-p {args.port} build flash"
         )
         cmd = [
             ps_exe,

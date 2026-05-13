@@ -188,6 +188,17 @@ void dashcdg_badge_rx_apply_rx_tuning_prefs(void);
 /** After LVGL freed widgets / heap settled, try calloc CDG+jitter again (no-op if already ok). */
 void dashcdg_badge_rx_try_upgrade_cdg_heap(void);
 void dashcdg_badge_rx_get_stats(dashcdg_badge_rx_stats_t *out);
+
+/**
+ * Background stats/housekeeping tick. Must not run on the RX hot loop.
+ *
+ * Responsibilities:
+ * - publish a lock-free stats snapshot for UI
+ * - send v4_rx_stats (when enabled)
+ * - emit 1 Hz UART proof lines (when enabled)
+ * - perform periodic IGMP refresh retries (when needed)
+ */
+void dashcdg_badge_rx_housekeeping_tick(uint64_t now_ms);
 /**
  * LVGL tick helper (T4): one `s_mtx` acquisition — refresh `s_stats` mirror, copy to `out`, optional CDG
  * overlay blit (same rules as `dashcdg_badge_rx_cdg_overlay_tick`). Call from the LVGL task only.

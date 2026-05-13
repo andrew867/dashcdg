@@ -29,7 +29,8 @@ param(
     [int]$CaptureSeconds = 45,
     [string]$LogPath = "",
     [switch]$SkipFlash,
-    [int]$PostFlashWaitSeconds = 5
+    [int]$PostFlashWaitSeconds = 5,
+    [string]$BuildDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,10 +55,15 @@ if (-not $LogPath) {
     $LogPath = Join-Path $PSScriptRoot "badge_uart_last.txt"
 }
 
+if (-not $BuildDir) {
+    $BuildDir = Join-Path $env:TEMP "dashcdg_badge_build"
+}
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
 if (-not $SkipFlash) {
     idf.py --version
     Write-Host "Building and flashing on $Port (exclusive; close any monitor on this port)..."
-    idf.py -p $Port build flash
+    idf.py -B $BuildDir -p $Port build flash
     Write-Host "Flash finished. Waiting ${PostFlashWaitSeconds}s for esptool to release $Port..."
     Start-Sleep -Seconds $PostFlashWaitSeconds
 } else {

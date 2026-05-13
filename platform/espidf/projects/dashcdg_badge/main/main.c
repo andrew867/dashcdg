@@ -14,6 +14,8 @@
 #include "nvs_flash.h"
 
 #include "badge_exec.h"
+#include "badge_stats.h"
+#include "audio_mgr.h"
 #include "display_lvgl.h"
 #include "home_ui.h"
 #include "nav.h"
@@ -197,6 +199,20 @@ void app_main(void)
             (void)dashcdg_badge_exec_publish_boot_event(DASHCDG_BADGE_EXEC_BOOT_HW_OK, NULL);
             (void)dashcdg_badge_exec_set_health(DASHCDG_BADGE_EXEC_SUB_PLATFORM_HW,
                                                 DASHCDG_BADGE_EXEC_HEALTH_OK, NULL);
+        }
+    }
+    {
+        esp_err_t st = dashcdg_badge_stats_init();
+        if (st != ESP_OK) {
+            ESP_LOGW(TAG, "badge_stats init: %s (telemetry offloaded task disabled)", esp_err_to_name(st));
+        } else {
+            dashcdg_badge_stats_kick();
+        }
+    }
+    {
+        esp_err_t am = dashcdg_audio_mgr_init();
+        if (am != ESP_OK) {
+            ESP_LOGW(TAG, "audio_mgr init: %s (RX may block on DAC path)", esp_err_to_name(am));
         }
     }
 

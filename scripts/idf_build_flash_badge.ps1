@@ -6,7 +6,8 @@
 #>
 param(
     [string]$Port = "COM6",
-    [switch]$BuildOnly
+    [switch]$BuildOnly,
+    [string]$BuildDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,9 +26,14 @@ foreach ($name in @(
 $badgeDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\platform\espidf\projects\dashcdg_badge"))
 Set-Location -LiteralPath $badgeDir
 
+if (-not $BuildDir) {
+    $BuildDir = Join-Path $env:TEMP "dashcdg_badge_build"
+}
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
 idf.py --version
 if ($BuildOnly) {
-    idf.py build
+    idf.py -B $BuildDir build
 } else {
-    idf.py -p $Port build flash
+    idf.py -B $BuildDir -p $Port build flash
 }

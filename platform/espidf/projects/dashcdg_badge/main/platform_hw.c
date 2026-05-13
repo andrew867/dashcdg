@@ -52,6 +52,10 @@ static const char *TAG = "platform_hw";
 
 #define HW_TASK_STACK  3072
 #define HW_TASK_PRIO   1
+#if !CONFIG_FREERTOS_UNICORE
+/* Keep HW/background work on PRO core; RX/audio are pinned off it. */
+#define HW_TASK_CORE   0
+#endif
 #define HW_TICK_MS     40
 /* Battery ADC cadence: slow in sleep, moderate in active UI (cached for callers). */
 #define BAT_SAMPLE_ACTIVE_MS 1000U
@@ -233,7 +237,13 @@ static volatile bool s_karaoke_pcm_streaming;
  * 200 pegged u8 rails (16â239) on normal programme peaks â harsh buzz; ~108 keeps typical music
  * below clipping so the SC8002B chain is not hammering the DAC limits when UI volume is high. */
 #ifndef KARAOKE_DAC_PCM_GAIN_NUM
-#define KARAOKE_DAC_PCM_GAIN_NUM 108
+/*
+ * Default to full-scale mapping: full-scale s16 (+/-32767) should reach the edges of the 8-bit
+ * DAC range when volume=100 so badge audio is not artificially quiet.
+ *
+ * Note: the final 0–255 clamp still prevents numeric overflow if upstream PCM exceeds full-scale.
+ */
+#define KARAOKE_DAC_PCM_GAIN_NUM 127
 #endif
 static dac_continuous_handle_t s_karaoke_dac_handle;
 static uint8_t s_karaoke_dac_chunk[KARAOKE_DAC_CHUNK_SAMPLES_MAX];
@@ -388,6 +398,8 @@ void dashcdg_platform_hw_dac_route_get_stats(uint32_t *wrong_owner_drops,
 static uint32_t s_karaoke_dac_dma_chunks_ok;
 static uint32_t s_karaoke_dac_dma_write_err;
 static TickType_t s_karaoke_dac_write_warn_suppress;
+static uint32_t s_karaoke_dac_write_max_us;
+static uint32_t s_karaoke_dac_write_over_warn;
 
 static void karaoke_dac_note_dma_write_result(esp_err_t e)
 {
@@ -1199,7 +1211,32 @@ static int karaoke_dac_continuous_write_timeout_ms(void)
 
 static esp_err_t karaoke_dac_continuous_write_chunk_locked(uint8_t *buf, size_t len_bytes)
 {
-    return dac_continuous_write(s_karaoke_dac_handle, buf, len_bytes, NULL, karaoke_dac_continuous_write_timeout_ms());
+    esp_err_t err;
+#if defined(CONFIG_DASHCDG_BADGE_AUDIO_DIAG_TIMING) && CONFIG_DASHCDG_BADGE_AUDIO_DIAG_TIMING
+    int64_t t0 = esp_timer_get_time();
+#endif
+    err = dac_continuous_write(s_karaoke_dac_handle, buf, len_bytes, NULL, karaoke_dac_continuous_write_timeout_ms());
+#if defined(CONFIG_DASHCDG_BADGE_AUDIO_DIAG_TIMING) && CONFIG_DASHCDG_BADGE_AUDIO_DIAG_TIMING
+    {
+        int64_t dt = esp_timer_get_time() - t0;
+        if (dt > 0 && dt < 2000000) {
+            uint32_t us = (uint32_t)dt;
+            if (us > s_karaoke_dac_write_max_us) {
+                s_karaoke_dac_write_max_us = us;
+            }
+#ifdef CONFIG_DASHCDG_BADGE_AUDIO_DIAG_DAC_WRITE_WARN_US
+            if (us > (uint32_t)CONFIG_DASHCDG_BADGE_AUDIO_DIAG_DAC_WRITE_WARN_US) {
+                s_karaoke_dac_write_over_warn++;
+            }
+#else
+            if (us > 2000U) {
+                s_karaoke_dac_write_over_warn++;
+            }
+#endif
+        }
+    }
+#endif
+    return err;
 }
 
 static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
@@ -1227,6 +1264,19 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
     if (chunk == 0U || chunk > KARAOKE_DAC_CHUNK_SAMPLES_MAX) {
         chunk = 640U;
     }
+    /*
+     * Mute the amp /SHDN HIGH *before* we touch `dac_continuous_*`. Karaoke enter/exit was popping
+     * because `dac_continuous_disable` + `dac_continuous_del_channels` releases GPIO25/26 from the
+     * DAC peripheral while the amp is still active -- the line-step from DC midpoint to the GPIO
+     * default got amplified to a click. With /SHDN HIGH the amp output stage is gated and the
+     * FM8002E / SC8002B "switching/transitioning noise suppression" handles the /SHDN edge itself
+     * (~1 ms internal damp). Trailing silence flush below still drains any partial chunk so DMA
+     * descriptors are well-formed, but is now inaudible.
+     *
+     * The next push (re-entry to karaoke or audio lab) re-asserts /SHDN LOW via `amp_set_run(true)`
+     * on the first non-mute PCM chunk. The ~1.1 ms FM8002E wake-up is inside one jitter slot.
+     */
+    amp_set_run(false);
     while (s_karaoke_dac_fill > 0U) {
         while (s_karaoke_dac_fill < chunk) {
             s_karaoke_dac_chunk[s_karaoke_dac_fill++] = 128U;
@@ -1234,6 +1284,12 @@ static void karaoke_dac_flush_stop_and_ledc_restore_locked(void)
         karaoke_dac_note_dma_write_result(karaoke_dac_continuous_write_chunk_locked(s_karaoke_dac_chunk, chunk));
         s_karaoke_dac_fill = 0U;
     }
+    /*
+     * Brief settle window: lets the amp's internal Bypass / Bias network (1 uF // 100k to VDD/2)
+     * collapse toward midpoint and the last DMA buffer commit before we yank the DAC. ~15 ms is far
+     * shorter than karaoke enter/exit perception and well-bounded for caller throughput.
+     */
+    vTaskDelay(pdMS_TO_TICKS(15));
     (void)dac_continuous_disable(s_karaoke_dac_handle);
     (void)dac_continuous_del_channels(s_karaoke_dac_handle);
     s_karaoke_dac_handle = NULL;
@@ -1259,11 +1315,16 @@ void dashcdg_platform_hw_karaoke_amp_arm_for_rx(void)
     if (!s_mtx) {
         return;
     }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(80)) != pdTRUE) {
-        return;
-    }
-    amp_set_run(true);
-    xSemaphoreGive(s_mtx);
+    /*
+     * Historically this released /SHDN LOW *before* any audio existed, which:
+     *   1. Caused the karaoke-entry click ("amp on while DAC still booting").
+     *   2. Burned the FM8002E quiescent (~3.7 mA) during the entire pre-roll, including the case
+     *      where the join never produced audio (no DTIM multicast, wrong TX, etc.).
+     * The amp now stays in shutdown until `karaoke_dac_push_mono_s16` lands a real PCM chunk;
+     * the FM8002E datasheet wake-up (~1.1 ms) is much shorter than one jitter slot. We still
+     * claim the DAC route here so a stale audio-lab handoff cannot keep streaming synth output
+     * into karaoke, and we still publish BOOT_DAC_OK on the first successful claim.
+     */
     /*
      * T6: claim the DAC route for karaoke RX so a stale audio-lab handoff cannot keep streaming
      * synth output into karaoke. Idempotent if already KARAOKE_RX. Failure here is non-fatal:
@@ -1310,7 +1371,13 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
      */
     if (s_karaoke_dac_handle != NULL && s_karaoke_dac_open_nominal_hz == nominal_hz &&
             s_karaoke_dac_open_effective_hz == eff_hz) {
-        amp_set_run(true);
+        /*
+         * Do not preemptively `amp_set_run(true)` here. Karaoke enter/exit was popping because we
+         * woke the amp before any DC was on the line; the next push (`karaoke_dac_push_mono_s16`)
+         * will re-arm /SHDN LOW on the first non-mute PCM chunk after the FM8002E's <1.1 ms
+         * wake-up. Idle/mute PCM continues to flow silently with the amp gated -- the audible
+         * effect is "no hiss between songs and on app entry" instead of a click.
+         */
         __atomic_store_n(&s_karaoke_pcm_streaming, true, __ATOMIC_RELEASE);
         return true;
     }
@@ -1401,7 +1468,14 @@ static bool karaoke_dac_begin_nominal_hz_locked(uint32_t nominal_hz)
     s_karaoke_dac_dma_chunks_ok = 0U;
     s_karaoke_dac_dma_write_err = 0U;
     s_karaoke_dac_write_warn_suppress = (TickType_t)0;
-    amp_set_run(true);
+    s_karaoke_dac_write_max_us = 0U;
+    s_karaoke_dac_write_over_warn = 0U;
+    /*
+     * Defer `amp_set_run(true)` until the first real PCM chunk lands via `karaoke_dac_push_mono_s16`.
+     * `dac_continuous_new_channels` + `dac_continuous_enable` toggle GPIO25/26 during DMA prime; if
+     * the amp is on during that bring-up the line step is amplified to a click. Datasheet wake-up
+     * (~1.1 ms) is shorter than one jitter slot, so the first audio chunk after this is intact.
+     */
     __atomic_store_n(&s_karaoke_pcm_streaming, true, __ATOMIC_RELEASE);
     return true;
 }
@@ -1543,11 +1617,11 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
             int32_t s = ((int32_t)pcm[i] * (int32_t)vol_pct) / 100;
 
             u = (s * (int32_t)KARAOKE_DAC_PCM_GAIN_NUM) / 32768 + 128;
-            if (u < 16) {
-                u = 16;
+            if (u < 0) {
+                u = 0;
             }
-            if (u > 239) {
-                u = 239;
+            if (u > 255) {
+                u = 255;
             }
         }
         if (nom_hz != 0U && eff_hz > nom_hz) {
@@ -1669,8 +1743,13 @@ void dashcdg_platform_hw_karaoke_dac_session_break(void)
 }
 
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
-        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
-        uint32_t *pending_pcm_u8_fill_out)
+        uint32_t *dma_chunks_ok,
+        uint32_t *dma_write_err,
+        uint32_t *eff_hz_out,
+        uint32_t *chunk_u8_out,
+        uint32_t *pending_pcm_u8_fill_out,
+        uint32_t *write_max_us_out,
+        uint32_t *write_over_warn_out)
 {
     if (dma_chunks_ok != NULL) {
         *dma_chunks_ok = s_karaoke_dac_dma_chunks_ok;
@@ -1693,6 +1772,12 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
             }
             xSemaphoreGive(s_karaoke_dac_io_mtx);
         }
+    }
+    if (write_max_us_out != NULL) {
+        *write_max_us_out = s_karaoke_dac_write_max_us;
+    }
+    if (write_over_warn_out != NULL) {
+        *write_over_warn_out = s_karaoke_dac_write_over_warn;
     }
 }
 #endif
@@ -1732,8 +1817,13 @@ void dashcdg_platform_hw_karaoke_dac_push_mono_s16(const int16_t *pcm, size_t sa
 }
 
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
-        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
-        uint32_t *pending_pcm_u8_fill_out)
+        uint32_t *dma_chunks_ok,
+        uint32_t *dma_write_err,
+        uint32_t *eff_hz_out,
+        uint32_t *chunk_u8_out,
+        uint32_t *pending_pcm_u8_fill_out,
+        uint32_t *write_max_us_out,
+        uint32_t *write_over_warn_out)
 {
     if (dma_chunks_ok != NULL) {
         *dma_chunks_ok = 0U;
@@ -1749,6 +1839,12 @@ void dashcdg_platform_hw_karaoke_dac_get_uart_health(
     }
     if (pending_pcm_u8_fill_out != NULL) {
         *pending_pcm_u8_fill_out = 0U;
+    }
+    if (write_max_us_out != NULL) {
+        *write_max_us_out = 0U;
+    }
+    if (write_over_warn_out != NULL) {
+        *write_over_warn_out = 0U;
     }
 }
 
@@ -2101,7 +2197,8 @@ esp_err_t dashcdg_platform_hw_init(void)
     s_ready = true;
     ESP_LOGI(TAG, "platform hw task started (prio %d)", HW_TASK_PRIO);
     (void)dashcdg_badge_exec_register_task("dashcdg_hw", s_hw_task,
-                                           (uint8_t)HW_TASK_PRIO, (int8_t)-1,
+                                           (uint8_t)HW_TASK_PRIO,
+                                           (int8_t)-1,
                                            (uint16_t)HW_TASK_STACK);
     return ESP_OK;
 }

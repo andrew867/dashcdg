@@ -137,8 +137,13 @@ void dashcdg_platform_hw_karaoke_dac_pad_partial_chunk(void);
  * before the next full `dac_continuous_write`). Pass NULL if unused.
  */
 void dashcdg_platform_hw_karaoke_dac_get_uart_health(
-        uint32_t *dma_chunks_ok, uint32_t *dma_write_err, uint32_t *eff_hz_out, uint32_t *chunk_u8_out,
-        uint32_t *pending_pcm_u8_fill_out);
+        uint32_t *dma_chunks_ok,
+        uint32_t *dma_write_err,
+        uint32_t *eff_hz_out,
+        uint32_t *chunk_u8_out,
+        uint32_t *pending_pcm_u8_fill_out,
+        uint32_t *write_max_us_out,
+        uint32_t *write_over_warn_out);
 /**
  * Release SC8002B shutdown (amp on) when karaoke RX starts so the speaker path is not left muted
  * until the first decoded frame (no startup click through DAC otherwise).

@@ -14,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_wifi.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -131,6 +132,10 @@ static esp_err_t nvs_save_creds(const char *ssid, const char *psk);
 #define WIFI_OWNER_QUEUE_DEPTH        16U
 #define WIFI_OWNER_QUEUE_RX_WAIT_MS   2000U
 #define WIFI_OWNER_QUEUE_TX_WAIT_TICKS 0  /* event handler: never block */
+#if !CONFIG_FREERTOS_UNICORE
+/* Keep Wi-Fi/UI background work on PRO core; RX/audio are pinned off it. */
+#define WIFI_OWNER_TASK_CORE          0
+#endif
 
 typedef enum {
     WIFI_OWNER_CMD_SCAN_DONE = 1,
@@ -274,7 +279,8 @@ static void wifi_owner_start_once(void)
         return;
     }
     (void)dashcdg_badge_exec_register_task("wifi_owner", s_wifi_owner_task,
-                                           (uint8_t)WIFI_OWNER_TASK_PRIO, (int8_t)-1,
+                                           (uint8_t)WIFI_OWNER_TASK_PRIO,
+                                           (int8_t)-1,
                                            (uint16_t)WIFI_OWNER_TASK_STACK);
     ESP_LOGI(TAG, "wifi_owner up depth=%u prio=%u", (unsigned)WIFI_OWNER_QUEUE_DEPTH,
              (unsigned)WIFI_OWNER_TASK_PRIO);
@@ -310,6 +316,9 @@ static const char *NVS_NS = "dashcfg";
 static TaskHandle_t s_reconn_task;
 #define WIFI_RECONN_STACK_WORDS 4096
 #define WIFI_RECONN_TASK_PRIO     3
+#if !CONFIG_FREERTOS_UNICORE
+#define WIFI_RECONN_TASK_CORE     0
+#endif
 
 static lv_obj_t *s_lbl_status;
 static lv_obj_t *s_dd_ssid;
@@ -902,14 +911,16 @@ static void wifi_reconn_task_start_once(void)
     if (s_reconn_task != NULL) {
         return;
     }
-    if (xTaskCreate(wifi_reconn_task_fn, "wifi_reconn", WIFI_RECONN_STACK_WORDS, NULL, WIFI_RECONN_TASK_PRIO,
-                    &s_reconn_task) != pdPASS) {
+    BaseType_t ok = xTaskCreate(wifi_reconn_task_fn, "wifi_reconn", WIFI_RECONN_STACK_WORDS, NULL,
+                                WIFI_RECONN_TASK_PRIO, &s_reconn_task);
+    if (ok != pdPASS) {
         ESP_LOGW(TAG, "wifi_reconn task create failed");
         s_reconn_task = NULL;
     } else {
         ESP_LOGI(TAG, "wifi_reconn: background reconnect every 2–5 s when disconnected + creds saved");
         (void)dashcdg_badge_exec_register_task("wifi_reconn", s_reconn_task,
-                                               (uint8_t)WIFI_RECONN_TASK_PRIO, (int8_t)-1,
+                                               (uint8_t)WIFI_RECONN_TASK_PRIO,
+                                               (int8_t)-1,
                                                (uint16_t)WIFI_RECONN_STACK_WORDS);
     }
 }

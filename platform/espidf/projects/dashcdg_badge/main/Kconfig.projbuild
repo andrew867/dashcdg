@@ -287,4 +287,31 @@ menu "DashCDG badge"
             lines at ESP_LOGI once per second while decode is on — useful for field RCA without raising
             global log level. Keep off for normal builds (UART bandwidth + CPU).
 
+    config DASHCDG_BADGE_AUDIO_DIAG_UART_RATE_MS
+        int "UART: audio diag rate limit (ms)"
+        range 250 10000
+        default 5000
+        depends on DASHCDG_BADGE_AUDIO_DIAG_UART_INFO
+        help
+            Minimum interval between `audio_chop` / `AUDIO_UART_PROOF` lines when audio diag UART
+            logging is enabled. Raise this (e.g. 2000–5000) to rule out 1 Hz logging-induced audio
+            glitches while keeping diagnostics.
+
+    config DASHCDG_BADGE_AUDIO_DIAG_TIMING
+        bool "Audio diagnostics: record DAC write/block timing"
+        default n
+        help
+            Records max/over-threshold duration of `dac_continuous_write` calls so we can prove
+            whether audible glitches are caused by DMA writer stalls vs network loss. Low overhead
+            when enabled; compiled out when disabled.
+
+    config DASHCDG_BADGE_AUDIO_DIAG_DAC_WRITE_WARN_US
+        int "Audio diagnostics: DAC write warn threshold (us)"
+        range 100 20000
+        default 2000
+        depends on DASHCDG_BADGE_AUDIO_DIAG_TIMING
+        help
+            Counts and tracks the maximum duration (microseconds) for a single `dac_continuous_write`
+            call above this threshold.
+
 endmenu
