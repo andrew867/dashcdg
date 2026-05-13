@@ -4245,8 +4245,12 @@ static void handle_clock_sync(const struct dashcdg_packet_view *view, uint64_t l
         view->v4_clock_sync.session_start_ms != s_active_session_start_ms) {
         /*
          * Guard against stale/reordered clock_sync from an older session causing reset loops.
-         * We already maintain a sender-time floor from session_info/clock_sync of the active
-         * session; if this clock packet lands behind that floor (with reorder slack), ignore it.
+         *
+         * IMPORTANT: session changes are driven by v4_session_info. Some networks can deliver
+         * clock_sync from a different/older session (or a parallel transmitter) even while we are
+         * actively playing. Treat that as noise and ignore it; tearing down jitter buffers and
+         * issuing a DAC session_break here produces audible glitches and can spiral into repeated
+         * resets ("works for ~10–20s then breaks").
          */
         if (s_session_epoch_sender_floor_ms != 0U &&
             view->header.sender_time_ms + BADGE_RX_V4_SESSION_REORDER_SENDER_SLACK_MS <
@@ -4260,19 +4264,12 @@ static void handle_clock_sync(const struct dashcdg_packet_view *view, uint64_t l
                     (unsigned long long)view->v4_clock_sync.session_start_ms);
             return;
         }
-        ESP_LOGI(
+        ESP_LOGD(
                 TAG,
-                "clock epoch change session=%llu->%llu; forcing session reset",
+                "ignore mismatched clock epoch session=%llu incoming=%llu",
                 (unsigned long long)s_active_session_start_ms,
                 (unsigned long long)view->v4_clock_sync.session_start_ms);
-        if (badge_rx_reset_for_new_session_locked(local_now_ms) != 0) {
-            return;
-        }
-        s_active_session_start_ms = view->v4_clock_sync.session_start_ms;
-        s_session_epoch_sender_floor_ms = view->header.sender_time_ms;
-        s_active_session_valid = 1;
-        s_stats.v4_session_count++;
-        s_recovery_zero_buffer_count++;
+        return;
     } else if (view->v4_clock_sync.session_start_ms != 0U &&
                (!s_active_session_valid || s_active_session_start_ms == 0U)) {
         s_active_session_start_ms = view->v4_clock_sync.session_start_ms;
