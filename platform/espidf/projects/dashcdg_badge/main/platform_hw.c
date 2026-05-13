@@ -88,6 +88,12 @@ static const char *TAG = "platform_hw";
 #define BEEP_SEQ_CAP        12
 #define BEEP_TICK_FAST_MS   15 /* while a sequence runs; slower tick = less zipper noise on PWM */
 
+/*
+ * Beep output is being migrated to the shared `audio_mgr` pipeline (synth PCM -> audio_mgr).
+ * Disable the legacy LEDC/PWM beep path to avoid contention/regressions.
+ */
+#define DASHCDG_BADGE_LEGACY_BEEPS_ENABLED 0
+
 typedef enum {
     PM_ACTIVE = 0,
     PM_DIM,
@@ -926,6 +932,9 @@ static void amp_set_run(bool run)
 /** PWM to 0 only; does not touch amp shutdown (use between envelope samples while a jingle runs). */
 static void beep_pwm_zero_locked(void)
 {
+#if !DASHCDG_BADGE_LEGACY_BEEPS_ENABLED
+    return;
+#endif
 #if CONFIG_IDF_TARGET_ESP32
     if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
         return;
@@ -941,6 +950,9 @@ static void beep_pwm_zero_locked(void)
 /** Full mute: zero PWM and assert SC8002B shutdown (call when idle / sequence finished). */
 static void beep_mute_locked(void)
 {
+#if !DASHCDG_BADGE_LEGACY_BEEPS_ENABLED
+    return;
+#endif
 #if CONFIG_IDF_TARGET_ESP32
     if (__atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED)) {
         return;
@@ -1030,6 +1042,13 @@ static void beep_apply_freq_duty_locked(uint32_t freq_hz, uint32_t duty_u8)
 
 static bool beep_queue_copy_locked(const beep_note_t *src, uint8_t n, beep_seq_kind_t kind, uint64_t now)
 {
+#if !DASHCDG_BADGE_LEGACY_BEEPS_ENABLED
+    (void)src;
+    (void)n;
+    (void)kind;
+    (void)now;
+    return false;
+#else
     int neu;
     int cur;
 
@@ -1059,10 +1078,15 @@ static bool beep_queue_copy_locked(const beep_note_t *src, uint8_t n, beep_seq_k
     s_seq_note_t0_ms = now;
     s_seq_note_t1_ms = now + (uint64_t)s_seq[0].duration_ms;
     return true;
+#endif
 }
 
 static void beep_seq_tick_locked(uint64_t now)
 {
+#if !DASHCDG_BADGE_LEGACY_BEEPS_ENABLED
+    (void)now;
+    return;
+#else
     if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
         return;
     }
@@ -1109,6 +1133,7 @@ static void beep_seq_tick_locked(uint64_t now)
     }
 
     beep_apply_freq_duty_locked((uint32_t)n->freq_hz, duty);
+#endif
 }
 
 static bool beep_seq_active(void)
@@ -1154,6 +1179,9 @@ static esp_err_t ledc_install_rgb_bl(void)
 
 static esp_err_t ledc_install_beep(void)
 {
+#if !DASHCDG_BADGE_LEGACY_BEEPS_ENABLED
+    return ESP_OK;
+#else
     ledc_timer_config_t t = {
         .speed_mode = LEDC_MODE,
         .duty_resolution = LEDC_DUTY_RES,
@@ -1173,12 +1201,16 @@ static esp_err_t ledc_install_beep(void)
     ch.duty = 0;
     ch.hpoint = 0;
     return ledc_channel_config(&ch);
+#endif
 }
 
 #if CONFIG_IDF_TARGET_ESP32
 /** Re-bind IO26 to LEDC after DAC continuous teardown (UI beeps / mute). Caller holds `s_mtx`. */
 static esp_err_t ledc_beep_audio_channel_attach_locked(void)
 {
+#if !DASHCDG_BADGE_LEGACY_BEEPS_ENABLED
+    return ESP_OK;
+#endif
     ledc_channel_config_t ch = {0};
     if (s_karaoke_dac_handle != NULL || __atomic_load_n(&s_karaoke_pcm_streaming, __ATOMIC_RELAXED) ||
         __atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {

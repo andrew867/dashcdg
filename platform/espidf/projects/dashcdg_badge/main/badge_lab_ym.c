@@ -5,6 +5,7 @@
  */
 #include "badge_lab_ym.h"
 
+#include "audio_mgr.h"
 #include "badge_exec.h"
 #include "platform_hw.h"
 
@@ -34,6 +35,14 @@ static const char *TAG = "badge_lab_ym";
 #define TICKS_PER_STEP  (DASHCDG_LAB_PCM_FS_HZ / 8u)
 /** Max samples per tight loop before yielding (backlog after preemption must not starve LVGL / WDT). */
 #define LAB_MAX_BURST     2048U
+
+#if CONFIG_IDF_TARGET_ESP32
+#define LAB_FRAME_MS       20U
+#define LAB_FRAME_SAMPLES  ((uint32_t)(LAB_FS_HZ / (1000U / LAB_FRAME_MS)))
+#define LAB_NOTIFY_US      ((uint64_t)LAB_FRAME_MS * 1000ULL)
+#else
+#define LAB_NOTIFY_US      ((uint64_t)LAB_SAMPLE_US)
+#endif
 
 #if CONFIG_IDF_TARGET_ESP32
 /** Slightly wider than PWM-only path: DAC chain applies its own level / softening in `platform_hw.c`. */
@@ -315,7 +324,7 @@ static void lab_task(void *arg)
                     continue;
                 }
                 carrier_on = true;
-                if (s_pcm_tmr && esp_timer_start_periodic(s_pcm_tmr, LAB_SAMPLE_US) != ESP_OK) {
+                if (s_pcm_tmr && esp_timer_start_periodic(s_pcm_tmr, LAB_NOTIFY_US) != ESP_OK) {
                     ESP_LOGE(TAG, "esp_timer_start_periodic failed");
                 }
             }
@@ -357,11 +366,14 @@ static void lab_task(void *arg)
             uint32_t chunk = (pending > LAB_MAX_BURST) ? LAB_MAX_BURST : pending;
             pending -= chunk;
             while (chunk-- > 0U) {
-                int32_t s = ym_tick();
 #if CONFIG_IDF_TARGET_ESP32
-                int16_t pcm = lab_acc_to_pcm16(s);
-                dashcdg_platform_hw_karaoke_dac_push_mono_s16(&pcm, 1U);
+                int16_t pcm[LAB_FRAME_SAMPLES];
+                for (uint32_t i = 0U; i < (uint32_t)LAB_FRAME_SAMPLES; ++i) {
+                    pcm[i] = lab_acc_to_pcm16(ym_tick());
+                }
+                (void)dashcdg_audio_mgr_push_mono_s16((uint32_t)LAB_FS_HZ, pcm, (size_t)LAB_FRAME_SAMPLES);
 #else
+                int32_t s = ym_tick();
                 uint8_t d = lab_sample_to_duty(s);
                 dashcdg_platform_hw_lab_pcm_push_u8(d);
 #endif
@@ -424,12 +436,14 @@ void dashcdg_badge_lab_ym_play_set(bool play)
         /* Ensure IO26 / streaming flag / seq state are sane before the lab task opens PCM again. */
         dashcdg_platform_hw_lab_pcm_stream_end();
         dashcdg_badge_lab_ym_reset();
+        (void)dashcdg_audio_mgr_init();
     } else {
         /* Stop timer + streaming here so pause is immediate (lab task may be mid-burst on ulTaskNotifyTake). */
         if (s_pcm_tmr) {
             (void)esp_timer_stop(s_pcm_tmr);
         }
         dashcdg_platform_hw_lab_pcm_stream_end();
+        dashcdg_audio_mgr_stop();
     }
     s_want_play = play;
     if (s_task != NULL) {
@@ -444,6 +458,7 @@ void dashcdg_badge_lab_ym_stop(void)
         (void)esp_timer_stop(s_pcm_tmr);
     }
     dashcdg_platform_hw_lab_pcm_stream_end();
+    dashcdg_audio_mgr_stop();
     if (s_task) {
         (void)xTaskNotifyGive(s_task);
         vTaskDelay(pdMS_TO_TICKS(20));
