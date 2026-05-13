@@ -2075,13 +2075,8 @@ static void badge_rx_maybe_send_v4_stats(uint64_t now_ms)
         if (s_playback_paused) {
             startup_flags |= DASHCDG_V4_RX_STARTUP_FLAG_LOADING_SCREEN_ACTIVE;
         }
-        /*
-         * TX "no-latency" classifier requires LATENCY_CONFIDENT (gen>=v4) plus a non-zero
-         * presented_audio_timestamp_ms. The badge can produce a valid playout-timeline timestamp
-         * from audio frame playback_ms even before v4_clock_sync has converged; requiring
-         * HAVE_CLOCK here caused some badge instances to be permanently reported as no-latency.
-         */
-        if (s_last_presented_audio_timestamp_ms > 0U &&
+        if (have_clock &&
+            s_last_presented_audio_timestamp_ms > 0U &&
             pl.audio_buffer_ms > 0U &&
             startup_stage >= DASHCDG_V4_RX_STARTUP_RUNNING &&
             (startup_flags & DASHCDG_V4_RX_STARTUP_FLAG_RECOVERY_COOLDOWN) == 0U) {
@@ -3983,14 +3978,6 @@ static void handle_v4_audio_chunk(const struct dashcdg_packet_view *view, uint64
     a = &view->v4_audio_chunk;
     if (a->encoded_bytes == NULL || a->encoded_length == 0U) {
         return;
-    }
-    /*
-     * Keep a non-zero presented_audio_timestamp_ms as soon as we see valid playback_ms tags.
-     * This is used by TX for latency classification; waiting until the decoder APPLY path can
-     * leave some receivers stuck reporting "no-latency" under load or during early startup.
-     */
-    if (a->playback_ms != 0U && s_last_presented_audio_timestamp_ms == 0U) {
-        s_last_presented_audio_timestamp_ms = a->playback_ms;
     }
     badge_rx_note_stream_media_sequence(a->media_sequence, &s_audio_seq_inited, &s_audio_next_expected,
                                         &s_stats.audio_missing_estimate);
