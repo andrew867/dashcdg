@@ -108,6 +108,8 @@ static const char *TAG = "badge_rx";
 #define BADGE_RX_MEDIA_PATH_AUTO_HOLD_MS 2200U
 #define BADGE_RX_MEDIA_PATH_FALLBACK_IDLE_MS 300U
 #define BADGE_RX_MEDIA_PATH_AUTO_DUP_TRIGGER 4U
+/* When a media path is temporarily disallowed (AUTO / prefer), still drain its socket to avoid lwIP queue growth. */
+#define BADGE_RX_MEDIA_DISALLOWED_DRAIN_MAX_DGRAMS 24U
 /*
  * `select` must wake often enough to (1) run `badge_rx_drain_v4_audio` so WiFi gaps do not balloon
  * `ms_since_prior_audio_apply` into hole-SKIP spirals, and (2) keep ESP32 `dac_continuous` fed
@@ -602,6 +604,28 @@ static uint64_t s_last_select_enomem_local_ms;
 static uint64_t s_last_igmp_refresh_local_ms;
 static uint64_t s_igmp_bootstrap_until_local_ms;
 static volatile uint8_t s_sta_got_ip_pending_resync;
+static uint32_t s_discard_mcast_media_dgrams;
+static uint32_t s_discard_ucast_media_dgrams;
+
+static void badge_rx_drain_disallowed_media_fd(int fd, uint8_t *buf, size_t buf_sz, uint32_t *discard_counter)
+{
+    if (fd < 0 || buf == NULL || buf_sz == 0U) {
+        return;
+    }
+    for (uint32_t i = 0U; i < (uint32_t)BADGE_RX_MEDIA_DISALLOWED_DRAIN_MAX_DGRAMS; ++i) {
+        struct sockaddr_in src;
+        socklen_t srclen = (socklen_t)sizeof(src);
+        ssize_t n = recvfrom(fd, buf, buf_sz, MSG_DONTWAIT, (struct sockaddr *)&src, &srclen);
+
+        if (n <= 0) {
+            break;
+        }
+        /* Intentionally discard: keep lwIP receive queues from exhausting internal heap. */
+        if (discard_counter != NULL) {
+            (*discard_counter)++;
+        }
+    }
+}
 
 /*
  * RX owner command queue (T4 - executive refactor).
@@ -5203,12 +5227,24 @@ static void badge_rx_task(void *arg)
         int ucast_m = (int)s_ucast_media_sock;
         int ucast_s = (int)s_ucast_stats_sock;
         int ucast_r = (int)s_ucast_repair_sock;
+        const uint64_t loop_now_ms = dashcdg_clock_now_ms();
+        int allow_mcast_media = 1;
+        int allow_ucast_media = 1;
         int max_fd = -1;
 
         FD_ZERO(&rfds);
+        /*
+         * Media path AUTO / prefer: we may temporarily stop *processing* one fd to avoid duplicate
+         * work, but we must still drain it to avoid lwIP queue growth (select() ENOMEM).
+         */
         if (fd >= 0) {
-            FD_SET(fd, &rfds);
-            max_fd = fd;
+            allow_mcast_media = badge_rx_media_path_allow_fd(fd, loop_now_ms);
+            if (allow_mcast_media) {
+                FD_SET(fd, &rfds);
+                max_fd = fd;
+            } else {
+                badge_rx_drain_disallowed_media_fd(fd, buf, sizeof(buf), &s_discard_mcast_media_dgrams);
+            }
         }
         if (stats_fd >= 0) {
             FD_SET(stats_fd, &rfds);
@@ -5223,9 +5259,14 @@ static void badge_rx_task(void *arg)
             }
         }
         if (ucast_m >= 0) {
-            FD_SET(ucast_m, &rfds);
-            if (ucast_m > max_fd) {
-                max_fd = ucast_m;
+            allow_ucast_media = badge_rx_media_path_allow_fd(ucast_m, loop_now_ms);
+            if (allow_ucast_media) {
+                FD_SET(ucast_m, &rfds);
+                if (ucast_m > max_fd) {
+                    max_fd = ucast_m;
+                }
+            } else {
+                badge_rx_drain_disallowed_media_fd(ucast_m, buf, sizeof(buf), &s_discard_ucast_media_dgrams);
             }
         }
         if (ucast_s >= 0) {
@@ -5348,13 +5389,13 @@ static void badge_rx_task(void *arg)
             }
             continue;
         }
-        if (fd >= 0 && FD_ISSET(fd, &rfds)) {
+        if (fd >= 0 && allow_mcast_media && FD_ISSET(fd, &rfds)) {
             uint64_t now_ms = dashcdg_clock_now_ms();
             if (badge_rx_media_path_allow_fd(fd, now_ms)) {
                 badge_rx_pump_main_fd(fd, buf, sizeof(buf));
             }
         }
-        if (ucast_m >= 0 && FD_ISSET(ucast_m, &rfds)) {
+        if (ucast_m >= 0 && allow_ucast_media && FD_ISSET(ucast_m, &rfds)) {
             uint64_t now_ms = dashcdg_clock_now_ms();
             if (badge_rx_media_path_allow_fd(ucast_m, now_ms)) {
                 badge_rx_pump_main_fd(ucast_m, buf, sizeof(buf));
@@ -6583,6 +6624,7 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
         "stats->TX %s:%d (sent %lu)\n"
         "stats suppressed %lu  audio_no_dac_warn %lu\n"
         "path policy %u  media m/u %lu/%lu  dup_seq %lu\n"
+        "discard disallowed m/u %lu/%lu\n"
         "raster Y<=%u  jb_evict %lu  ins fl %lu dup %lu st %lu\n"
         "\n"
         "datagrams %llu\n"
@@ -6628,7 +6670,9 @@ void dashcdg_badge_rx_format_mcast_modal(char *buf, size_t buf_sz)
         (unsigned long)st.v4_rx_stats_sent,
         (unsigned long)st.v4_rx_stats_suppressed, (unsigned long)st.audio_rx_no_dac_warn,
         (unsigned)st.media_path_policy, (unsigned long)st.mcast_media_datagrams, (unsigned long)st.ucast_media_datagrams,
-        (unsigned long)st.media_sequence_duplicate_hits, (unsigned)st.cdg_blit_max_y, (unsigned long)st.jb_evict_rounds,
+        (unsigned long)st.media_sequence_duplicate_hits,
+        (unsigned long)s_discard_mcast_media_dgrams, (unsigned long)s_discard_ucast_media_dgrams,
+        (unsigned)st.cdg_blit_max_y, (unsigned long)st.jb_evict_rounds,
         (unsigned long)st.cdg_delta_insert_fail, (unsigned long)st.cdg_delta_insert_dup, (unsigned long)st.cdg_delta_insert_stale,
         (unsigned long long)st.datagrams, (unsigned long)st.parse_failures,
         (unsigned long)st.v4_session_count, (unsigned long)st.v4_clock_count, (unsigned long)st.v4_audio_chunk_rx,
