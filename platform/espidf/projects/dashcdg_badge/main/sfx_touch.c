@@ -5,6 +5,7 @@
 
 #include "audio_mgr.h"
 #include "badge_exec.h"
+#include "platform_hw.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -37,6 +38,14 @@ static void sfx_task_fn(void *arg)
 
         /* Best-effort: do not crash if audio_mgr init fails. */
         (void)dashcdg_audio_mgr_init();
+
+        /*
+         * The chirp uses the shared DAC path at 24 kHz. Do not let a UI touch tear down an
+         * active karaoke RX stream (48 kHz line rate) just to reopen the DAC for SFX.
+         */
+        if (dashcdg_platform_hw_dac_route_owner() == DASHCDG_DAC_ROUTE_KARAOKE_RX) {
+            continue;
+        }
 
         /* 80 ms chirp @ 24 kHz. */
         enum { FS = 24000, MS = 80, N = (FS * MS) / 1000 };

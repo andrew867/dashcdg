@@ -4199,7 +4199,7 @@ static int badge_rx_reset_for_new_session_locked(uint64_t local_now_ms)
     return 0;
 }
 
-static void handle_session_info(const struct dashcdg_packet_view *view)
+static int handle_session_info(const struct dashcdg_packet_view *view)
 {
     int same_session;
 
@@ -4231,11 +4231,16 @@ static void handle_session_info(const struct dashcdg_packet_view *view)
         } else {
             s_session_epoch_sender_floor_ms = view->header.sender_time_ms;
         }
-        return;
+        return 1;
     }
 
     if (badge_rx_reset_for_new_session_locked(dashcdg_clock_now_ms()) != 0) {
-        return;
+        /*
+         * badge_rx_reset_for_new_session_locked drops s_mtx before heavyweight reset work.
+         * A non-zero return means it failed to re-acquire s_mtx before the bounded timeout,
+         * so the pump must not perform its normal unconditional give for this datagram.
+         */
+        return 0;
     }
 
     s_active_session_start_ms = view->v4_session_info.session_start_ms;
@@ -4251,6 +4256,7 @@ static void handle_session_info(const struct dashcdg_packet_view *view)
     memcpy(s_stats.song_id, view->v4_session_info.song_id, DASHCDG_MAX_SONG_ID);
     s_stats.song_id[DASHCDG_MAX_SONG_ID] = '\0';
     s_stats.v4_session_count++;
+    return 1;
 }
 
 static void handle_clock_sync(const struct dashcdg_packet_view *view, uint64_t local_now_ms)
@@ -4759,14 +4765,14 @@ static void badge_rx_process_repair_datagram(const uint8_t *buf, size_t buflen)
     }
 }
 
-static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
+static int rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
 {
     struct dashcdg_packet_view view;
     uint64_t seq;
 
     if (!dashcdg_protocol_parse_packet(&view, buf, buflen)) {
         s_stats.parse_failures++;
-        return;
+        return 1;
     }
 
     seq = view.header.sequence;
@@ -4785,8 +4791,7 @@ static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
 
     switch (view.header.type) {
     case DASHCDG_PACKET_V4_SESSION_INFO:
-        handle_session_info(&view);
-        break;
+        return handle_session_info(&view);
     case DASHCDG_PACKET_V4_CLOCK_SYNC:
         handle_clock_sync(&view, local_now_ms);
         /* `drain_cdg_to_idle` walks CDG jitter + audio; skip CDG drain when video decode is off. */
@@ -4833,6 +4838,7 @@ static void rx_one_datagram(uint8_t *buf, size_t buflen, uint64_t local_now_ms)
     default:
         break;
     }
+    return 1;
 }
 
 static void badge_rx_deferred_audio_drain_if_pending_locked(uint64_t local_now_ms)
@@ -4942,8 +4948,9 @@ static void badge_rx_pump_main_fd(int pump_fd, uint8_t *buf, size_t buf_cap)
 #if defined(CONFIG_DASHCDG_BADGE_PERF_PROBES) && CONFIG_DASHCDG_BADGE_PERF_PROBES
                     const int64_t t_hold0 = esp_timer_get_time();
 #endif
+                    int still_holds_mtx;
                     s_stats.datagrams++;
-                    rx_one_datagram(buf, (size_t)n, now_ms);
+                    still_holds_mtx = rx_one_datagram(buf, (size_t)n, now_ms);
 #if defined(CONFIG_DASHCDG_BADGE_PERF_PROBES) && CONFIG_DASHCDG_BADGE_PERF_PROBES
                     {
                         int64_t dt_hold = esp_timer_get_time() - t_hold0;
@@ -4953,8 +4960,10 @@ static void badge_rx_pump_main_fd(int pump_fd, uint8_t *buf, size_t buf_cap)
                         }
                     }
 #endif
-                    xSemaphoreGive(s_mtx);
-                    badge_rx_pump_flush_deferred_audio_drain(now_ms);
+                    if (still_holds_mtx) {
+                        xSemaphoreGive(s_mtx);
+                        badge_rx_pump_flush_deferred_audio_drain(now_ms);
+                    }
                     dashcdg_platform_hw_note_karaoke_mcast_rx(now_ms);
                     /*
                      * T7: mark progress (not just heartbeat) so the liveness sweep can tell
