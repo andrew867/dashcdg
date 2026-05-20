@@ -277,6 +277,19 @@ int dashcdg_badge_exec_get_boot_complete_state(void)
     return 0;
 }
 
+static void badge_exec_append_text(char *out, size_t out_len, size_t *off, const char *text)
+{
+    if (out == NULL || out_len == 0U || off == NULL || text == NULL) {
+        return;
+    }
+    while (*text != '\0' && *off + 1U < out_len) {
+        out[*off] = *text;
+        (*off)++;
+        text++;
+    }
+    out[*off] = '\0';
+}
+
 /*
  * Build a short human-readable reason describing why the boot was DEGRADED. Each contributing bit
  * adds its short tag to a comma-separated list. NOMINAL boots produce "ok".
@@ -380,10 +393,14 @@ esp_err_t dashcdg_badge_exec_decide_boot_complete(void)
         if ((bits & hw_any) == 0U) { BADGE_EXEC_MISSING_APPEND(hw_any, "hw"); }
 #undef BADGE_EXEC_MISSING_APPEND
         char merged[sizeof(reason)];
-        snprintf(merged, sizeof(merged), "missing=%s%s%s",
-                 missing,
-                 reason[0] ? "," : "",
-                 reason[0] ? reason : "");
+        size_t merged_off = 0U;
+        merged[0] = '\0';
+        badge_exec_append_text(merged, sizeof(merged), &merged_off, "missing=");
+        badge_exec_append_text(merged, sizeof(merged), &merged_off, missing);
+        if (reason[0] != '\0') {
+            badge_exec_append_text(merged, sizeof(merged), &merged_off, ",");
+            badge_exec_append_text(merged, sizeof(merged), &merged_off, reason);
+        }
         return dashcdg_badge_exec_set_boot_complete(true, merged);
     }
     return dashcdg_badge_exec_set_boot_complete(degraded, reason);
