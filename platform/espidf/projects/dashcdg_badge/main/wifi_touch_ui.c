@@ -304,10 +304,22 @@ static void wifi_touch_clamp_ps_none_if_rx_active(void)
 /** ESP-IDF `wifi_config_t` SSID/password are fixed arrays; avoid `strncpy(..., n-1)` — GCC stringop-truncation. */
 static void wifi_touch_copy_to_cfg_field(uint8_t *dst, size_t dst_sz, const char *src)
 {
+    size_t i = 0U;
+
     if (dst == NULL || dst_sz == 0U) {
         return;
     }
-    snprintf((char *)dst, dst_sz, "%s", (src != NULL) ? src : "");
+    if (src == NULL) {
+        src = "";
+    }
+    while (src[i] != '\0' && i + 1U < dst_sz) {
+        dst[i] = (uint8_t)src[i];
+        i++;
+    }
+    dst[i] = '\0';
+    if (i + 1U < dst_sz) {
+        memset(dst + i + 1U, 0, dst_sz - i - 1U);
+    }
 }
 static esp_netif_t *s_wifi_sta_netif;
 static const char *NVS_NS = "dashcfg";
