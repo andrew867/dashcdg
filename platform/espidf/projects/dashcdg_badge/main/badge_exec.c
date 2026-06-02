@@ -319,6 +319,24 @@ static void badge_exec_format_boot_reason(uint32_t bits, bool degraded,
     }
 }
 
+static void badge_exec_append_cstr_trunc(char *out, size_t out_len, size_t *off, const char *text)
+{
+    if (out == NULL || out_len == 0U || off == NULL || text == NULL || *off >= out_len) {
+        return;
+    }
+
+    size_t avail = out_len - *off - 1U;
+    size_t n = strlen(text);
+    if (n > avail) {
+        n = avail;
+    }
+    if (n != 0U) {
+        memcpy(out + *off, text, n);
+        *off += n;
+    }
+    out[*off] = '\0';
+}
+
 esp_err_t dashcdg_badge_exec_decide_boot_complete(void)
 {
     if (!s_state.initialized) {
@@ -380,10 +398,14 @@ esp_err_t dashcdg_badge_exec_decide_boot_complete(void)
         if ((bits & hw_any) == 0U) { BADGE_EXEC_MISSING_APPEND(hw_any, "hw"); }
 #undef BADGE_EXEC_MISSING_APPEND
         char merged[sizeof(reason)];
-        snprintf(merged, sizeof(merged), "missing=%s%s%s",
-                 missing,
-                 reason[0] ? "," : "",
-                 reason[0] ? reason : "");
+        size_t merged_off = 0U;
+        merged[0] = '\0';
+        badge_exec_append_cstr_trunc(merged, sizeof(merged), &merged_off, "missing=");
+        badge_exec_append_cstr_trunc(merged, sizeof(merged), &merged_off, missing);
+        if (reason[0] != '\0') {
+            badge_exec_append_cstr_trunc(merged, sizeof(merged), &merged_off, ",");
+            badge_exec_append_cstr_trunc(merged, sizeof(merged), &merged_off, reason);
+        }
         return dashcdg_badge_exec_set_boot_complete(true, merged);
     }
     return dashcdg_badge_exec_set_boot_complete(degraded, reason);
