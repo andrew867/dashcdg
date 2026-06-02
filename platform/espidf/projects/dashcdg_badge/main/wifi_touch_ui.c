@@ -307,7 +307,18 @@ static void wifi_touch_copy_to_cfg_field(uint8_t *dst, size_t dst_sz, const char
     if (dst == NULL || dst_sz == 0U) {
         return;
     }
-    snprintf((char *)dst, dst_sz, "%s", (src != NULL) ? src : "");
+    dst[0] = '\0';
+    if (src == NULL) {
+        return;
+    }
+    size_t n = strlen(src);
+    if (n >= dst_sz) {
+        n = dst_sz - 1U;
+    }
+    if (n != 0U) {
+        memcpy(dst, src, n);
+    }
+    dst[n] = '\0';
 }
 static esp_netif_t *s_wifi_sta_netif;
 static const char *NVS_NS = "dashcfg";
