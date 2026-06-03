@@ -1529,7 +1529,8 @@ bool dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(uint32_t nominal_hz)
             return false;
         }
     }
-    if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED)) {
+    if (__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED) &&
+        __atomic_load_n(&s_dac_route_owner, __ATOMIC_ACQUIRE) != (uint8_t)DASHCDG_DAC_ROUTE_AUDIO_LAB) {
         xSemaphoreGive(s_mtx);
         return false;
     }
@@ -2542,27 +2543,17 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
         return false;
     }
 #if CONFIG_IDF_TARGET_ESP32
-    {
-        TickType_t now = xTaskGetTickCount();
-        if (s_karaoke_dac_begin_cool_until_tick != (TickType_t)0 && now < s_karaoke_dac_begin_cool_until_tick) {
-            xSemaphoreGive(s_mtx);
-            dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
-            return false;
-        }
-    }
     /*
-     * Same `dac_continuous` + amp path as karaoke RX (`karaoke_dac_begin_nominal_hz_locked`).
-     * Mary pushes s16 via `karaoke_dac_push_mono_s16` at `DASHCDG_LAB_PCM_FS_HZ`.
+     * ESP32 lab PCM now flows through audio_mgr. This function remains the lab ownership gate:
+     * claim AUDIO_LAB and suppress UI beeps, then let audio_mgr open the DAC on the first frame.
+     * Opening here would leave audio_mgr unaware of the active rate and make its first begin()
+     * fail against the lab-streaming guard.
      */
-    ok = karaoke_dac_begin_nominal_hz_locked((uint32_t)DASHCDG_LAB_PCM_FS_HZ);
-    if (ok) {
-        __atomic_store_n(&s_lab_pcm_streaming, true, __ATOMIC_RELEASE);
-    }
+    beep_seq_abort_locked();
+    beep_mute_locked();
+    ok = true;
+    __atomic_store_n(&s_lab_pcm_streaming, true, __ATOMIC_RELEASE);
     xSemaphoreGive(s_mtx);
-    if (!ok) {
-        /* Release route so karaoke RX (or a retry) can claim. */
-        dashcdg_platform_hw_dac_route_release(DASHCDG_DAC_ROUTE_AUDIO_LAB);
-    }
     return ok;
 #else
     /* Play demo: abort UI triad state; lab owns IO26 while streaming. */
