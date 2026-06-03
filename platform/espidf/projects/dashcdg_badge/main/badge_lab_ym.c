@@ -433,8 +433,9 @@ void dashcdg_badge_lab_ym_play_set(bool play)
 {
     dashcdg_badge_lab_ym_init();
     if (play) {
-        /* Ensure IO26 / streaming flag / seq state are sane before the lab task opens PCM again. */
+        /* Ensure IO26 / streaming flag / audio_mgr rate state are sane before playback restarts. */
         dashcdg_platform_hw_lab_pcm_stream_end();
+        dashcdg_audio_mgr_stop();
         dashcdg_badge_lab_ym_reset();
         (void)dashcdg_audio_mgr_init();
     } else {
