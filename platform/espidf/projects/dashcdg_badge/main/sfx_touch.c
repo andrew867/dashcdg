@@ -5,6 +5,7 @@
 
 #include "audio_mgr.h"
 #include "badge_exec.h"
+#include "platform_hw.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -23,6 +24,12 @@ static TaskHandle_t s_task;
 static lv_obj_t *s_attached_screen;
 static uint64_t s_last_touch_ms;
 
+enum {
+    SFX_TOUCH_FS = 24000,
+    SFX_TOUCH_MS = 80,
+    SFX_TOUCH_SAMPLES = (SFX_TOUCH_FS * SFX_TOUCH_MS) / 1000,
+};
+
 static void sfx_task_fn(void *arg)
 {
     (void)arg;
@@ -37,20 +44,23 @@ static void sfx_task_fn(void *arg)
 
         /* Best-effort: do not crash if audio_mgr init fails. */
         (void)dashcdg_audio_mgr_init();
+        if (!dashcdg_platform_hw_get_touch_beep_enabled() ||
+                !dashcdg_audio_mgr_can_play_sfx_nominal_hz((uint32_t)SFX_TOUCH_FS)) {
+            continue;
+        }
 
         /* 80 ms chirp @ 24 kHz. */
-        enum { FS = 24000, MS = 80, N = (FS * MS) / 1000 };
-        static int16_t pcm[N];
+        static int16_t pcm[SFX_TOUCH_SAMPLES];
         const float f0 = 880.0f;
         const float a = 7000.0f;
 
-        for (int i = 0; i < N; ++i) {
-            float t = (float)i / (float)FS;
+        for (int i = 0; i < SFX_TOUCH_SAMPLES; ++i) {
+            float t = (float)i / (float)SFX_TOUCH_FS;
             float env = 1.0f;
             if (i < 64) {
                 env = (float)i / 64.0f;
-            } else if (i > (N - 64)) {
-                env = (float)(N - i) / 64.0f;
+            } else if (i > (SFX_TOUCH_SAMPLES - 64)) {
+                env = (float)(SFX_TOUCH_SAMPLES - i) / 64.0f;
             }
             float s = sinf(2.0f * (float)M_PI * f0 * t);
             int32_t v = (int32_t)(a * env * s);
@@ -59,7 +69,7 @@ static void sfx_task_fn(void *arg)
             pcm[i] = (int16_t)v;
         }
 
-        (void)dashcdg_audio_mgr_push_mono_s16((uint32_t)FS, pcm, (size_t)N);
+        (void)dashcdg_audio_mgr_push_mono_s16((uint32_t)SFX_TOUCH_FS, pcm, (size_t)SFX_TOUCH_SAMPLES);
         dashcdg_badge_exec_task_progress("sfx_touch");
     }
 }
@@ -67,6 +77,11 @@ static void sfx_task_fn(void *arg)
 static void on_screen_touch(lv_event_t *e)
 {
     (void)e;
+
+    if (!dashcdg_platform_hw_get_touch_beep_enabled() ||
+            !dashcdg_audio_mgr_can_play_sfx_nominal_hz((uint32_t)SFX_TOUCH_FS)) {
+        return;
+    }
 
     uint64_t now_ms = (uint64_t)lv_tick_get();
     if (s_last_touch_ms != 0U && now_ms > s_last_touch_ms && (now_ms - s_last_touch_ms) < 120U) {

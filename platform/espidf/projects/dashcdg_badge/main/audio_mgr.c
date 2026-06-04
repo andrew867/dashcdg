@@ -87,7 +87,8 @@ static void audio_mgr_task_fn(void *arg)
         }
 
         if (nom_hz != 0U && nom_hz != s_active_nom_hz) {
-            if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
+            if (!dashcdg_platform_hw_lab_pcm_stream_matches_nominal_hz(nom_hz) &&
+                    !dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
                 /* Mirror RX's legacy defensive retry path. */
                 dashcdg_platform_hw_karaoke_amp_arm_for_rx();
                 if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
@@ -247,6 +248,13 @@ void dashcdg_audio_mgr_stop(void)
 void dashcdg_audio_mgr_set_trim_ppm(int32_t ppm)
 {
     dashcdg_platform_hw_karaoke_dac_set_trim_ppm(ppm);
+}
+
+bool dashcdg_audio_mgr_can_play_sfx_nominal_hz(uint32_t nom_hz)
+{
+    uint32_t active = __atomic_load_n(&s_active_nom_hz, __ATOMIC_RELAXED);
+
+    return active == 0U || active == nom_hz;
 }
 
 void dashcdg_audio_mgr_get_stats(dashcdg_audio_mgr_stats_t *out)
