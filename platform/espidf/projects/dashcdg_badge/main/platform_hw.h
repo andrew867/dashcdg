@@ -89,6 +89,7 @@ void dashcdg_platform_hw_set_auto_sleep_enabled(bool on);
 
 /** Touch LVGL UI tones (button triad, slider preview); off = silent. Power wake/sleep jingles still play. */
 void dashcdg_platform_hw_set_touch_beep_enabled(bool on);
+bool dashcdg_platform_hw_get_touch_beep_enabled(void);
 
 /** PWM beep loudness 5-100 (maps to LEDC duty; analog 4k7+20k + SC8002B path is quiet at mid duty). */
 void dashcdg_platform_hw_set_beep_volume_pct(uint8_t pct_5_100);
@@ -102,6 +103,8 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void);
 void dashcdg_platform_hw_lab_pcm_stream_end(void);
 /** True while lab owns IO26 (UI beeps suppressed; `beep_seq_tick` idle). */
 bool dashcdg_platform_hw_lab_pcm_is_streaming(void);
+/** True when the ESP32 lab path already owns an open DAC stream at `nominal_hz`. */
+bool dashcdg_platform_hw_lab_pcm_stream_matches_nominal_hz(uint32_t nominal_hz);
 void dashcdg_platform_hw_lab_pcm_push_u8(uint8_t duty_u8);
 uint8_t dashcdg_platform_hw_get_beep_volume_pct(void);
 

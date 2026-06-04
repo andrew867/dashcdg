@@ -2494,6 +2494,21 @@ void dashcdg_platform_hw_set_touch_beep_enabled(bool on)
     }
 }
 
+bool dashcdg_platform_hw_get_touch_beep_enabled(void)
+{
+    bool on;
+
+    if (!s_mtx) {
+        return false;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    on = s_touch_beep_on;
+    xSemaphoreGive(s_mtx);
+    return on;
+}
+
 void dashcdg_platform_hw_set_beep_volume_pct(uint8_t pct_5_100)
 {
     if (pct_5_100 < 5U) {
@@ -2580,6 +2595,33 @@ bool dashcdg_platform_hw_lab_pcm_stream_begin(void)
 bool dashcdg_platform_hw_lab_pcm_is_streaming(void)
 {
     return __atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_RELAXED);
+}
+
+bool dashcdg_platform_hw_lab_pcm_stream_matches_nominal_hz(uint32_t nominal_hz)
+{
+#if CONFIG_IDF_TARGET_ESP32
+    bool ok = false;
+
+    if (!s_mtx || nominal_hz == 0U) {
+        return false;
+    }
+    if (!__atomic_load_n(&s_lab_pcm_streaming, __ATOMIC_ACQUIRE)) {
+        return false;
+    }
+    if (__atomic_load_n(&s_dac_route_owner, __ATOMIC_ACQUIRE) !=
+            (uint8_t)DASHCDG_DAC_ROUTE_AUDIO_LAB) {
+        return false;
+    }
+    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    ok = (s_karaoke_dac_handle != NULL && s_karaoke_dac_open_nominal_hz == nominal_hz);
+    xSemaphoreGive(s_mtx);
+    return ok;
+#else
+    (void)nominal_hz;
+    return false;
+#endif
 }
 
 void dashcdg_platform_hw_lab_pcm_stream_end(void)

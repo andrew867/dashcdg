@@ -32,6 +32,12 @@ void dashcdg_audio_mgr_stop(void);
 /** Apply a drift trim hint (PPM) to the DAC effective sample rate. */
 void dashcdg_audio_mgr_set_trim_ppm(int32_t ppm);
 
+/**
+ * Best-effort guard for short UI SFX: false when a different-rate stream is already active.
+ * This keeps UI chirps from tearing down/reopening the DAC during live karaoke playback.
+ */
+bool dashcdg_audio_mgr_can_play_sfx_nominal_hz(uint32_t nom_hz);
+
 typedef struct {
     uint32_t pcm_drop_full;
     uint32_t pcm_drop_oldest;
