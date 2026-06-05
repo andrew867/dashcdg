@@ -46,8 +46,9 @@ typedef struct {
 
 typedef struct {
     uint32_t nom_hz;
+    uint8_t route_owner; /* dashcdg_dac_route_owner_t */
+    uint8_t _route_pad;
     uint16_t samples;
-    uint16_t _pad;
     int16_t pcm[AUDIO_MGR_SAMPLES_MAX];
 } audio_mgr_frame_t;
 
@@ -65,6 +66,29 @@ static dashcdg_audio_mgr_stats_t s_stats;
 static uint32_t s_active_nom_hz;
 static uint32_t s_queued_samples;
 
+static void audio_mgr_note_frame_done(audio_mgr_frame_t *frame)
+{
+    if (frame != NULL && frame->samples != 0U) {
+        __atomic_fetch_sub(&s_queued_samples, (uint32_t)frame->samples, __ATOMIC_RELAXED);
+    }
+}
+
+static bool audio_mgr_frame_route_allowed(const audio_mgr_frame_t *frame)
+{
+    dashcdg_dac_route_owner_t current;
+    dashcdg_dac_route_owner_t requested;
+
+    if (frame == NULL) {
+        return false;
+    }
+    current = dashcdg_platform_hw_dac_route_owner();
+    requested = (dashcdg_dac_route_owner_t)frame->route_owner;
+    if (requested == DASHCDG_DAC_ROUTE_NONE) {
+        return current == DASHCDG_DAC_ROUTE_NONE;
+    }
+    return current == requested;
+}
+
 static void audio_mgr_task_fn(void *arg)
 {
     (void)arg;
@@ -80,10 +104,16 @@ static void audio_mgr_task_fn(void *arg)
         /* Non-blocking: never manufacture PCM here; only play what the producer provides. */
         (void)xQueueReceive(s_fill_q, &frame, 0);
 
-        uint32_t nom_hz = s_stats.last_nom_hz;
+        uint32_t nom_hz = 0U;
         if (frame != NULL && frame->nom_hz != 0U) {
             nom_hz = frame->nom_hz;
-            s_stats.last_nom_hz = frame->nom_hz;
+        }
+
+        if (frame != NULL && !audio_mgr_frame_route_allowed(frame)) {
+            audio_mgr_note_frame_done(frame);
+            s_stats.pcm_drop_route_conflict++;
+            (void)xQueueSend(s_free_q, &frame, 0);
+            continue;
         }
 
         if (nom_hz != 0U && nom_hz != s_active_nom_hz) {
@@ -93,6 +123,7 @@ static void audio_mgr_task_fn(void *arg)
                 if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
                     s_stats.dac_begin_fail++;
                     if (frame != NULL) {
+                        audio_mgr_note_frame_done(frame);
                         (void)xQueueSend(s_free_q, &frame, 0);
                     }
                     continue;
@@ -102,10 +133,11 @@ static void audio_mgr_task_fn(void *arg)
         }
 
         if (frame != NULL && frame->samples != 0U) {
+            s_stats.last_nom_hz = nom_hz;
             dashcdg_platform_hw_karaoke_dac_push_mono_s16(frame->pcm, (size_t)frame->samples);
             s_stats.frames_pushed++;
             s_stats.bytes_pushed += (uint32_t)frame->samples * (uint32_t)sizeof(int16_t);
-            __atomic_fetch_sub(&s_queued_samples, (uint32_t)frame->samples, __ATOMIC_RELAXED);
+            audio_mgr_note_frame_done(frame);
         }
         if (frame != NULL) {
             (void)xQueueSend(s_free_q, &frame, 0);
@@ -160,6 +192,19 @@ esp_err_t dashcdg_audio_mgr_init(void)
 
 bool dashcdg_audio_mgr_push_mono_s16(uint32_t nom_hz, const int16_t *mono, size_t mono_samples)
 {
+    return dashcdg_audio_mgr_push_mono_s16_for_route(
+            DASHCDG_DAC_ROUTE_NONE,
+            nom_hz,
+            mono,
+            mono_samples);
+}
+
+bool dashcdg_audio_mgr_push_mono_s16_for_route(
+        dashcdg_dac_route_owner_t route_owner,
+        uint32_t nom_hz,
+        const int16_t *mono,
+        size_t mono_samples)
+{
     if (s_free_q == NULL || s_fill_q == NULL || mono == NULL || mono_samples == 0U) {
         return false;
     }
@@ -191,8 +236,9 @@ bool dashcdg_audio_mgr_push_mono_s16(uint32_t nom_hz, const int16_t *mono, size_
             }
         }
         frame->nom_hz = nom_hz;
+        frame->route_owner = (uint8_t)route_owner;
+        frame->_route_pad = 0U;
         frame->samples = (uint16_t)n;
-        frame->_pad = 0U;
         memcpy(frame->pcm, mono + off, n * sizeof(int16_t));
 
         if (xQueueSend(s_fill_q, &frame, 0) != pdTRUE) {
@@ -228,6 +274,7 @@ void dashcdg_audio_mgr_stop(void)
      */
     dashcdg_platform_hw_karaoke_dac_stop();
     s_active_nom_hz = 0U;
+    s_stats.last_nom_hz = 0U;
     __atomic_store_n(&s_queued_samples, 0U, __ATOMIC_RELAXED);
     /*
      * Best-effort: drop any queued frames so the next session starts cleanly (non-blocking).
