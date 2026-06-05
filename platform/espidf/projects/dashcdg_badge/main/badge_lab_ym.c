@@ -371,7 +371,11 @@ static void lab_task(void *arg)
                 for (uint32_t i = 0U; i < (uint32_t)LAB_FRAME_SAMPLES; ++i) {
                     pcm[i] = lab_acc_to_pcm16(ym_tick());
                 }
-                (void)dashcdg_audio_mgr_push_mono_s16((uint32_t)LAB_FS_HZ, pcm, (size_t)LAB_FRAME_SAMPLES);
+                (void)dashcdg_audio_mgr_push_mono_s16_for_route(
+                        DASHCDG_DAC_ROUTE_AUDIO_LAB,
+                        (uint32_t)LAB_FS_HZ,
+                        pcm,
+                        (size_t)LAB_FRAME_SAMPLES);
 #else
                 int32_t s = ym_tick();
                 uint8_t d = lab_sample_to_duty(s);

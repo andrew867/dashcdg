@@ -1689,7 +1689,7 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
          */
         BADGE_RX_AUDIO_DIAG_LOG(TAG,
                  "AUDIO_UART_PROOF dac_dma_ok=%lu dac_dma_err=%lu hz_eff=%lu chunk_u8=%lu expect_dma_per_s=%lu "
-                 "vol_pct=%u amp_idle=%lu am_drop=%lu am_drop_old=%lu am_ud_sil=%lu am_push=%lu am_dac_begin_fail=%lu am_nom_hz=%lu "
+                 "vol_pct=%u amp_idle=%lu am_drop=%lu am_drop_old=%lu am_drop_route=%lu am_ud_sil=%lu am_push=%lu am_dac_begin_fail=%lu am_nom_hz=%lu "
                  "dac_wr_max_us=%lu dac_wr_over=%lu",
                  (unsigned long)dac_dma_ok, (unsigned long)dac_dma_err, (unsigned long)dac_hz_eff,
                  (unsigned long)dac_chunk_u8, (unsigned long)expect_dma_per_s,
@@ -1697,6 +1697,7 @@ static void badge_rx_maybe_uart_log_audio_stats(uint64_t now_ms)
                  (unsigned long)dashcdg_platform_hw_karaoke_amp_idle_shutdowns(),
                  (unsigned long)am.pcm_drop_full,
                  (unsigned long)am.pcm_drop_oldest,
+                 (unsigned long)am.pcm_drop_route_conflict,
                  (unsigned long)am.underrun_silence_frames,
                  (unsigned long)am.frames_pushed,
                  (unsigned long)am.dac_begin_fail,
@@ -3390,7 +3391,11 @@ static int badge_rx_audio_push_mono_gated(uint64_t local_now_ms, const int16_t *
         return 0;
     }
     nom_hz = badge_rx_karaoke_nominal_pcm_hz();
-    if (!dashcdg_audio_mgr_push_mono_s16(nom_hz, mono, mono_samples)) {
+    if (!dashcdg_audio_mgr_push_mono_s16_for_route(
+                DASHCDG_DAC_ROUTE_KARAOKE_RX,
+                nom_hz,
+                mono,
+                mono_samples)) {
         /* Queue full or audio_mgr not initialized: count a degraded push (audible chop risk). */
         s_stats.v4_audio_degraded_push++;
         return 0;

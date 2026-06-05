@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "platform_hw.h"
 
 /**
  * Audio manager owner task (T11).
@@ -23,6 +24,17 @@ esp_err_t dashcdg_audio_mgr_init(void);
  */
 bool dashcdg_audio_mgr_push_mono_s16(uint32_t nom_hz, const int16_t *mono, size_t mono_samples);
 
+/**
+ * Enqueue PCM that belongs to a claimed DAC route. Frames are dropped if another route owns the
+ * DAC by the time the audio_mgr task drains them, preventing stale UI/lab audio from reopening
+ * the active karaoke DAC at a different sample rate.
+ */
+bool dashcdg_audio_mgr_push_mono_s16_for_route(
+        dashcdg_dac_route_owner_t route_owner,
+        uint32_t nom_hz,
+        const int16_t *mono,
+        size_t mono_samples);
+
 /** Flushes/pads partial chunks and keeps the DAC handle open (track boundary). */
 void dashcdg_audio_mgr_session_break(void);
 
@@ -35,6 +47,7 @@ void dashcdg_audio_mgr_set_trim_ppm(int32_t ppm);
 typedef struct {
     uint32_t pcm_drop_full;
     uint32_t pcm_drop_oldest;
+    uint32_t pcm_drop_route_conflict;
     uint32_t underrun_silence_frames;
     uint32_t dac_begin_fail;
     uint32_t frames_pushed;
