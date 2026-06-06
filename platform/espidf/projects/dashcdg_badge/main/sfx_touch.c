@@ -1,10 +1,12 @@
 #include "sfx_touch.h"
 
 #include <math.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "audio_mgr.h"
 #include "badge_exec.h"
+#include "platform_hw.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -23,6 +25,14 @@ static TaskHandle_t s_task;
 static lv_obj_t *s_attached_screen;
 static uint64_t s_last_touch_ms;
 
+static uint32_t sfx_touch_pick_nominal_hz(dashcdg_dac_route_owner_t owner)
+{
+    if (owner == DASHCDG_DAC_ROUTE_KARAOKE_RX) {
+        return 48000U;
+    }
+    return (uint32_t)DASHCDG_LAB_PCM_FS_HZ;
+}
+
 static void sfx_task_fn(void *arg)
 {
     (void)arg;
@@ -38,19 +48,30 @@ static void sfx_task_fn(void *arg)
         /* Best-effort: do not crash if audio_mgr init fails. */
         (void)dashcdg_audio_mgr_init();
 
-        /* 80 ms chirp @ 24 kHz. */
-        enum { FS = 24000, MS = 80, N = (FS * MS) / 1000 };
-        static int16_t pcm[N];
+        /*
+         * Match the active DAC route. A 24 kHz UI chirp during 48 kHz karaoke would otherwise
+         * tear down/reopen dac_continuous mid-song and can hit the low-heap NO_MEM cooldown path.
+         */
+        enum {
+            MS = 80,
+            FS_MAX = 48000,
+            N_MAX = (FS_MAX * MS) / 1000,
+        };
+        const dashcdg_dac_route_owner_t owner = dashcdg_platform_hw_dac_route_owner();
+        const bool standalone = (owner == DASHCDG_DAC_ROUTE_NONE);
+        const uint32_t fs = sfx_touch_pick_nominal_hz(owner);
+        const size_t n = (size_t)(((uint64_t)fs * (uint64_t)MS) / 1000ULL);
+        static int16_t pcm[N_MAX];
         const float f0 = 880.0f;
         const float a = 7000.0f;
 
-        for (int i = 0; i < N; ++i) {
-            float t = (float)i / (float)FS;
+        for (size_t i = 0; i < n && i < (size_t)N_MAX; ++i) {
+            float t = (float)i / (float)fs;
             float env = 1.0f;
             if (i < 64) {
                 env = (float)i / 64.0f;
-            } else if (i > (N - 64)) {
-                env = (float)(N - i) / 64.0f;
+            } else if (i > (n - 64U)) {
+                env = (float)(n - i) / 64.0f;
             }
             float s = sinf(2.0f * (float)M_PI * f0 * t);
             int32_t v = (int32_t)(a * env * s);
@@ -59,7 +80,15 @@ static void sfx_task_fn(void *arg)
             pcm[i] = (int16_t)v;
         }
 
-        (void)dashcdg_audio_mgr_push_mono_s16((uint32_t)FS, pcm, (size_t)N);
+        if (dashcdg_audio_mgr_push_mono_s16(fs, pcm, n) && standalone) {
+            vTaskDelay(pdMS_TO_TICKS(MS + 80U));
+            dashcdg_audio_mgr_stats_t stats = {0};
+            dashcdg_audio_mgr_get_stats(&stats);
+            if (dashcdg_platform_hw_dac_route_owner() == DASHCDG_DAC_ROUTE_KARAOKE_RX &&
+                stats.last_nom_hz == fs) {
+                dashcdg_audio_mgr_stop();
+            }
+        }
         dashcdg_badge_exec_task_progress("sfx_touch");
     }
 }

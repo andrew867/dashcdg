@@ -433,6 +433,8 @@ void dashcdg_badge_lab_ym_play_set(bool play)
 {
     dashcdg_badge_lab_ym_init();
     if (play) {
+        /* Clear any transient UI chirp route before the lab task claims IO26. */
+        dashcdg_audio_mgr_stop();
         /* Ensure IO26 / streaming flag / seq state are sane before the lab task opens PCM again. */
         dashcdg_platform_hw_lab_pcm_stream_end();
         dashcdg_badge_lab_ym_reset();
