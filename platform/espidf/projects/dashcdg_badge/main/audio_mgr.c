@@ -65,6 +65,48 @@ static dashcdg_audio_mgr_stats_t s_stats;
 static uint32_t s_active_nom_hz;
 static uint32_t s_queued_samples;
 
+static void audio_mgr_release_frame(audio_mgr_frame_t *frame)
+{
+    if (frame != NULL) {
+        (void)xQueueSend(s_free_q, &frame, 0);
+    }
+}
+
+static bool audio_mgr_play_frame(audio_mgr_frame_t *frame)
+{
+    uint32_t nom_hz;
+
+    if (frame == NULL) {
+        return true;
+    }
+
+    nom_hz = frame->nom_hz;
+    if (nom_hz != 0U) {
+        s_stats.last_nom_hz = nom_hz;
+        if (nom_hz != s_active_nom_hz) {
+            if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
+                /* Mirror RX's legacy defensive retry path. */
+                dashcdg_platform_hw_karaoke_amp_arm_for_rx();
+                if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
+                    s_stats.dac_begin_fail++;
+                    audio_mgr_release_frame(frame);
+                    return false;
+                }
+            }
+            s_active_nom_hz = nom_hz;
+        }
+    }
+
+    if (frame->samples != 0U) {
+        dashcdg_platform_hw_karaoke_dac_push_mono_s16(frame->pcm, (size_t)frame->samples);
+        s_stats.frames_pushed++;
+        s_stats.bytes_pushed += (uint32_t)frame->samples * (uint32_t)sizeof(int16_t);
+        __atomic_fetch_sub(&s_queued_samples, (uint32_t)frame->samples, __ATOMIC_RELAXED);
+    }
+    audio_mgr_release_frame(frame);
+    return true;
+}
+
 static void audio_mgr_task_fn(void *arg)
 {
     (void)arg;
@@ -73,42 +115,19 @@ static void audio_mgr_task_fn(void *arg)
         /* Sleep until a producer pokes us, but still wake periodically for housekeeping. */
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
 
-        audio_mgr_frame_t *frame = NULL;
         dashcdg_badge_exec_task_heartbeat("audio_mgr");
         dashcdg_badge_exec_task_progress("audio_mgr");
 
-        /* Non-blocking: never manufacture PCM here; only play what the producer provides. */
-        (void)xQueueReceive(s_fill_q, &frame, 0);
+        for (;;) {
+            audio_mgr_frame_t *frame = NULL;
 
-        uint32_t nom_hz = s_stats.last_nom_hz;
-        if (frame != NULL && frame->nom_hz != 0U) {
-            nom_hz = frame->nom_hz;
-            s_stats.last_nom_hz = frame->nom_hz;
-        }
-
-        if (nom_hz != 0U && nom_hz != s_active_nom_hz) {
-            if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
-                /* Mirror RX's legacy defensive retry path. */
-                dashcdg_platform_hw_karaoke_amp_arm_for_rx();
-                if (!dashcdg_platform_hw_karaoke_dac_begin_nominal_hz(nom_hz)) {
-                    s_stats.dac_begin_fail++;
-                    if (frame != NULL) {
-                        (void)xQueueSend(s_free_q, &frame, 0);
-                    }
-                    continue;
-                }
+            /* Non-blocking: never manufacture PCM here; only play what producers queued. */
+            if (xQueueReceive(s_fill_q, &frame, 0) != pdTRUE) {
+                break;
             }
-            s_active_nom_hz = nom_hz;
-        }
-
-        if (frame != NULL && frame->samples != 0U) {
-            dashcdg_platform_hw_karaoke_dac_push_mono_s16(frame->pcm, (size_t)frame->samples);
-            s_stats.frames_pushed++;
-            s_stats.bytes_pushed += (uint32_t)frame->samples * (uint32_t)sizeof(int16_t);
-            __atomic_fetch_sub(&s_queued_samples, (uint32_t)frame->samples, __ATOMIC_RELAXED);
-        }
-        if (frame != NULL) {
-            (void)xQueueSend(s_free_q, &frame, 0);
+            if (!audio_mgr_play_frame(frame)) {
+                break;
+            }
         }
     }
 }
