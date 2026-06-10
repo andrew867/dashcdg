@@ -5682,7 +5682,9 @@ static void badge_rx_maybe_periodic_igmp_refresh(uint64_t now_ms)
             return;
         }
         s_rx_cmd_q_drops++;
-        ESP_LOGW(TAG, "rx cmd q full: REFRESH_IGMP — applying inline");
+        s_last_igmp_refresh_local_ms = 0U;
+        ESP_LOGW(TAG, "rx cmd q full: REFRESH_IGMP dropped; retrying later");
+        return;
     }
     if (badge_rx_refresh_igmp_memberships() != 0) {
         s_last_igmp_refresh_local_ms = now_ms;
